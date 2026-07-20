@@ -5,6 +5,7 @@ import {
   Divider, RadioGroup, FormControlLabel, Radio,
   FormControl, FormLabel, CircularProgress, Box, Chip
 } from '@mui/material';
+import { useUser } from '../hooks/useUser';
 import {
   CheckCircleOutlined,
   LinkOffOutlined,
@@ -13,7 +14,8 @@ import {
 import api from '../lib/api';
 
 export default function Settings() {
-  const { getToken }                = useAuth();
+  const { getToken } = useAuth();
+  const { user }     = useUser();
   const [tgStatus, setTgStatus]     = useState(null);
   const [linkCode, setLinkCode]     = useState('');
   const [polling, setPolling]       = useState(false);
@@ -192,6 +194,42 @@ export default function Settings() {
             {msg.text}
           </Alert>
         )}
+      </Paper>
+
+      {/* Account Info */}
+      <Paper sx={{ p: 3, mb: 3 }}>
+        <Typography variant="h6" gutterBottom>Account</Typography>
+        <Divider sx={{ mb: 2 }} />
+        <Stack spacing={1}>
+          <Stack direction="row" justifyContent="space-between">
+            <Typography variant="body2" color="text.secondary">Plan</Typography>
+            <Chip
+              label={user?.plan?.toUpperCase() ?? 'FREE'}
+              size="small"
+              sx={{
+                borderRadius: '4px', fontWeight: 700, fontSize: '0.7rem',
+                bgcolor: { free:'#1a1a1a', coffee:'#2a1f00',
+                  beer:'#1a1200', wine:'#1a0020' }[user?.plan] ?? '#1a1a1a',
+                color: { free:'#888', coffee:'#f5a623',
+                  beer:'#ff8c00', wine:'#8855ff' }[user?.plan] ?? '#888',
+              }}
+            />
+          </Stack>
+          <Stack direction="row" justifyContent="space-between">
+            <Typography variant="body2" color="text.secondary">Asset slots</Typography>
+            <Typography variant="body2">{user?.asset_limit ?? 3}</Typography>
+          </Stack>
+          <Stack direction="row" justifyContent="space-between">
+            <Typography variant="body2" color="text.secondary">Expires</Typography>
+            <Typography variant="body2">
+              {user?.expires_at
+                ? new Date(user.expires_at).toLocaleDateString('en-IN', {
+                    day: 'numeric', month: 'short', year: 'numeric'
+                  })
+                : '—'}
+            </Typography>
+          </Stack>
+        </Stack>
       </Paper>
 
       {/* Alert Mode Section */}

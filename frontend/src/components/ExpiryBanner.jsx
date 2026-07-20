@@ -1,24 +1,29 @@
-import Alert from '@mui/material/Alert'
-import Button from '@mui/material/Button'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom';
+import { Alert, Button } from '@mui/material';
+import { useUser } from '../hooks/useUser';
 
-export default function ExpiryBanner({ daysLeft }) {
-  const navigate = useNavigate()
-  if (daysLeft === null || daysLeft > 7) return null
+export default function ExpiryBanner() {
+  const { user } = useUser();
+  const navigate = useNavigate();
+
+  if (!user || user.active === 0) return null;
+
+  const daysLeft = Math.ceil((user.expires_at - Date.now()) / 86400000);
+  if (daysLeft > 7) return null;
+
+  const severity = daysLeft <= 2 ? 'error' : 'warning';
+  const msg = daysLeft <= 0
+    ? 'Your account expires today.'
+    : `Your account expires in ${daysLeft} day${daysLeft !== 1 ? 's' : ''}.`;
 
   return (
-    <Alert
-      severity="warning"
-      sx={{ mb: 2 }}
+    <Alert severity={severity} sx={{ borderRadius: 0, mb: 0 }}
       action={
-        <Button size="small" variant="contained" color="warning" onClick={() => navigate('/upgrade')}>
+        <Button color="inherit" size="small" onClick={() => navigate('/upgrade')}>
           Renew
         </Button>
-      }
-    >
-      {daysLeft <= 0
-        ? 'Your plan has expired. Renew to continue receiving alerts.'
-        : `Your plan expires in ${daysLeft} day${daysLeft !== 1 ? 's' : ''}. Renew to stay active.`}
+      }>
+      {msg}
     </Alert>
-  )
+  );
 }

@@ -6,6 +6,8 @@ import { useTheme } from '@mui/material/styles'
 import useMediaQuery from '@mui/material/useMediaQuery'
 import SidebarContent from './Sidebar.jsx'
 import Topbar from './Topbar.jsx'
+import BottomNav from './BottomNav.jsx'
+import ExpiryBanner from '../ExpiryBanner.jsx'
 
 const PAGE_TITLES = {
   '/dashboard': 'Dashboard',
@@ -62,10 +64,22 @@ export default function AppShell({ children }) {
           daysLeft={null}
           onMenuClick={() => setMobileOpen(true)}
         />
-        <Box component="main" sx={{ flex: 1, overflowY: 'auto', p: { xs: 2, lg: 3 }, bgcolor: '#000000' }}>
+        <ExpiryBanner />
+        <Box
+          component="main"
+          sx={{
+            flex: 1,
+            overflowY: 'auto',
+            p: { xs: 2, lg: 3 },
+            pb: { xs: 9, lg: 3 },
+            bgcolor: '#000000',
+          }}
+        >
           {children}
         </Box>
       </Box>
+
+      <BottomNav />
     </Box>
   )
 }

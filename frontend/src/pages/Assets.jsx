@@ -1,5 +1,8 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import Box from '@mui/material/Box'
+import Card from '@mui/material/Card'
+import CardContent from '@mui/material/CardContent'
 import Stack from '@mui/material/Stack'
 import Paper from '@mui/material/Paper'
 import Typography from '@mui/material/Typography'
@@ -41,6 +44,7 @@ const TYPE_SX = {
 const ASSET_LIMIT_MAP = { free: 3, coffee: 5, beer: 15, wine: 30 }
 
 export default function Assets() {
+  const navigate = useNavigate()
   const { assets, loading, error, addAsset, removeAsset } = useAssets()
   const [search, setSearch]       = useState('')
   const [modalOpen, setModalOpen] = useState(false)
@@ -108,9 +112,6 @@ export default function Assets() {
       </Paper>
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
-      {slotsUsed >= maxSlots && (
-        <Alert severity="warning" sx={{ mb: 2 }}>Slot limit reached. Upgrade to add more assets.</Alert>
-      )}
 
       {loading ? (
         <Stack spacing={1}>
@@ -150,6 +151,22 @@ export default function Assets() {
             ))}
           </List>
         </Paper>
+      )}
+
+      {slotsUsed >= maxSlots && (
+        <Card sx={{ border: '1px solid #f5a623', mt: 2, bgcolor: '#1a1100' }}>
+          <CardContent sx={{ textAlign: 'center', py: 3 }}>
+            <Typography variant="body1" sx={{ color: '#f5a623', mb: 1 }}>
+              All {maxSlots} slots used
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              Upgrade to track more assets and receive more alerts
+            </Typography>
+            <Button variant="contained" onClick={() => navigate('/upgrade')}>
+              View Plans
+            </Button>
+          </CardContent>
+        </Card>
       )}
 
       <Dialog open={modalOpen} onClose={() => !adding && setModalOpen(false)} fullWidth maxWidth="xs">

@@ -4,9 +4,10 @@ import api from '../lib/api';
 
 export function useAssets() {
   const { getToken, isSignedIn } = useAuth();
-  const [assets, setAssets]     = useState([]);
-  const [loading, setLoading]   = useState(true);
-  const [error, setError]       = useState(null);
+  const [assets, setAssets]       = useState([]);
+  const [loading, setLoading]     = useState(true);
+  const [error, setError]         = useState(null);
+  const [lastUpdated, setLastUpdated] = useState(null);
 
   const fetchAssets = useCallback(async () => {
     if (!isSignedIn) return;
@@ -14,6 +15,7 @@ export function useAssets() {
       const token = await getToken();
       const data  = await api.get('/user/assets', token);
       setAssets(Array.isArray(data) ? data : []);
+      setLastUpdated(Date.now());
     } catch (e) {
       setError(e.message);
     } finally {
@@ -39,5 +41,5 @@ export function useAssets() {
     await fetchAssets();
   };
 
-  return { assets, loading, error, addAsset, removeAsset, refetch: fetchAssets };
+  return { assets, loading, error, addAsset, removeAsset, refetch: fetchAssets, lastUpdated };
 }

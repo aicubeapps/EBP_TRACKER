@@ -1,12 +1,13 @@
 import { useNavigate } from 'react-router-dom';
 import {
   Box, Container, Typography, Card, CardContent,
-  Stack, Chip, Alert, Skeleton, Button, Grid, Divider
+  Stack, Chip, Skeleton, Button, Grid, Divider
 } from '@mui/material';
-import BoltOutlinedIcon from '@mui/icons-material/BoltOutlined';
 import { AddOutlined } from '@mui/icons-material';
+import BoltOutlinedIcon from '@mui/icons-material/BoltOutlined';
 import { useAssets } from '../hooks/useAssets';
 import { useUser } from '../hooks/useUser';
+import ApiErrorAlert from '../components/ApiErrorAlert';
 
 const TF_LIST = ['W', 'D', '4H', '1H', 'M15'];
 
@@ -124,8 +125,8 @@ function AssetCard({ asset, onRemove }) {
 
 export default function Dashboard() {
   const navigate = useNavigate();
-  const { user }                                = useUser();
-  const { assets, loading, error, removeAsset } = useAssets();
+  const { user }                                          = useUser();
+  const { assets, loading, error, removeAsset, lastUpdated } = useAssets();
 
   const daysLeft = user
     ? Math.max(0, Math.ceil((user.expires_at - Date.now()) / 86400000))
@@ -134,7 +135,7 @@ export default function Dashboard() {
   return (
     <Container maxWidth="xl" sx={{ py: 3 }}>
       <Stack direction="row" justifyContent="space-between"
-        alignItems="center" sx={{ mb: 3 }}>
+        alignItems="center" sx={{ mb: 1 }}>
         <Typography variant="h5" fontWeight={700}>Dashboard</Typography>
         {user && (
           <Stack direction="row" spacing={1} alignItems="center">
@@ -159,12 +160,19 @@ export default function Dashboard() {
         )}
       </Stack>
 
+      <Typography variant="caption" color="text.disabled" sx={{ mb: 2, display: 'block' }}>
+        Auto-refreshes every 60s
+        {lastUpdated && ` · Last updated ${new Date(lastUpdated).toLocaleTimeString('en-US', {
+          hour: '2-digit', minute: '2-digit', hour12: true,
+          timeZone: 'America/New_York',
+        })} NY`}
+      </Typography>
+
       {daysLeft !== null && daysLeft <= 7 && daysLeft > 0 && (
-        <Alert severity="warning" sx={{ mb: 2 }}>
-          Account expires in {daysLeft} day{daysLeft !== 1 ? 's' : ''}.
-          <Button size="small" sx={{ ml: 1 }}
-            onClick={() => navigate('/upgrade')}>Renew</Button>
-        </Alert>
+        <ApiErrorAlert
+          error={null}
+          onRetry={null}
+        />
       )}
 
       {user?.active === 0 && (
@@ -196,13 +204,32 @@ export default function Dashboard() {
         </Box>
       )}
 
-      {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+      <ApiErrorAlert error={error} />
 
       {loading ? (
         <Stack spacing={2}>
-          {[1,2,3].map(i => (
-            <Skeleton key={i} variant="rectangular"
-              height={100} sx={{ borderRadius: 2 }} />
+          {[1, 2, 3].map(i => (
+            <Card key={i} sx={{ border: '1px solid #1a1a1a' }}>
+              <CardContent sx={{ py: 2 }}>
+                <Grid container alignItems="center" spacing={2}>
+                  <Grid item xs={12} lg={3}>
+                    <Skeleton variant="text" width={120} height={32} />
+                    <Skeleton variant="text" width={60} height={20} />
+                  </Grid>
+                  <Grid item xs={12} lg={6}>
+                    <Stack direction="row" spacing={1}>
+                      {[1,2,3,4,5].map(j => (
+                        <Skeleton key={j} variant="rectangular"
+                          width={44} height={52} sx={{ borderRadius: 1 }} />
+                      ))}
+                    </Stack>
+                  </Grid>
+                  <Grid item xs={12} lg={3}>
+                    <Skeleton variant="text" width={100} height={20} />
+                  </Grid>
+                </Grid>
+              </CardContent>
+            </Card>
           ))}
         </Stack>
       ) : assets.length === 0 ? (
