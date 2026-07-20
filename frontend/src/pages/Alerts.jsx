@@ -1,112 +1,152 @@
-import { useState, useEffect, useCallback } from 'react'
-import Box from '@mui/material/Box'
-import Typography from '@mui/material/Typography'
-import Chip from '@mui/material/Chip'
-import Alert from '@mui/material/Alert'
-import CheckCircleOutlinedIcon from '@mui/icons-material/CheckCircleOutlined'
-import WarningAmberOutlinedIcon from '@mui/icons-material/WarningAmberOutlined'
-import NotificationsNoneOutlinedIcon from '@mui/icons-material/NotificationsNoneOutlined'
-import Paper from '@mui/material/Paper'
-import { DataGrid } from '@mui/x-data-grid'
-import { useAuth } from '@clerk/clerk-react'
-import { api } from '../lib/api.js'
+import { useState, useEffect } from 'react';
+import { useAuth } from '@clerk/clerk-react';
+import {
+  Container, Typography, Stack, Chip, Alert,
+  LinearProgress, Box, ToggleButtonGroup, ToggleButton
+} from '@mui/material';
+import { DataGrid } from '@mui/x-data-grid';
+import api from '../lib/api';
 
-function NoRowsOverlay() {
+function NoRows() {
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', gap: 1 }}>
-      <NotificationsNoneOutlinedIcon sx={{ fontSize: 40, color: '#2a2a2a' }} />
-      <Typography variant="body2">No alerts fired yet. Add assets and connect Telegram to get started.</Typography>
+    <Box sx={{ display:'flex', alignItems:'center',
+      justifyContent:'center', height:'100%' }}>
+      <Typography variant="body2" color="text.disabled">
+        No alerts yet. Add assets and connect Telegram to get started.
+      </Typography>
     </Box>
-  )
-}
-
-function fmtTime(ms) {
-  if (!ms) return '—'
-  return new Date(ms).toISOString().replace('T', ' ').slice(0, 16)
+  );
 }
 
 const columns = [
   {
     field: 'fired_at', headerName: 'Time', width: 160,
-    renderCell: (p) => <Typography variant="caption" sx={{ fontFamily: 'monospace', color: '#8888a8' }}>{fmtTime(p.value)}</Typography>,
-  },
-  {
-    field: 'symbol', headerName: 'Symbol', width: 120,
-    renderCell: (p) => <Typography variant="body2" sx={{ fontWeight: 600, color: '#e8e8f0' }} className="tabular-nums">{p.value}</Typography>,
-  },
-  {
-    field: 'timeframe', headerName: 'TF', width: 70,
-    renderCell: (p) => (
-      <Chip label={p.value} size="small" sx={{ bgcolor: '#0d0d0d', color: '#8888a8', border: '1px solid #2a2a2a', borderRadius: '4px', fontFamily: 'monospace', fontSize: '0.7rem', fontWeight: 600, height: 20 }} />
+    renderCell: p => (
+      <Typography variant="caption" sx={{ fontFamily:'monospace' }}>
+        {new Date(p.value).toLocaleString('en-US', {
+          timeZone:'America/New_York',
+          month:'short', day:'numeric',
+          hour:'2-digit', minute:'2-digit',
+        })} NY
+      </Typography>
     ),
   },
   {
-    field: 'direction', headerName: 'Direction', width: 120,
-    renderCell: (p) => (
+    field: 'symbol', headerName: 'Symbol', width: 120,
+    renderCell: p => (
+      <Typography variant="body2"
+        sx={{ fontWeight:600, fontFamily:'monospace' }}>
+        {p.value}
+      </Typography>
+    ),
+  },
+  { field: 'timeframe', headerName: 'TF', width: 70 },
+  {
+    field: 'alert_type', headerName: 'Type', width: 100,
+    renderCell: p => {
+      const colors = { ebp:'#4488ff', sweep:'#8855ff', combined:'#f5a623' };
+      const c = colors[p.value] ?? '#888';
+      return (
+        <Chip label={p.value?.toUpperCase()} size="small" sx={{
+          bgcolor:`${c}22`, color:c,
+          border:`1px solid ${c}44`,
+          borderRadius:'4px', fontWeight:700, fontSize:'0.65rem',
+        }} />
+      );
+    },
+  },
+  {
+    field: 'direction', headerName: 'Direction', width: 100,
+    renderCell: p => (
       <Chip
-        label={p.value === 'bull' ? 'BULL EBP' : 'BEAR EBP'}
+        label={p.value === 'bull' ? 'BULL' : 'BEAR'}
         size="small"
         sx={{
           bgcolor: p.value === 'bull' ? '#001a12' : '#1a0008',
-          color: p.value === 'bull' ? '#00c896' : '#ff4466',
-          border: `1px solid ${p.value === 'bull' ? '#00c896' : '#ff4466'}`,
-          borderRadius: '4px', fontWeight: 700, fontSize: '0.7rem', height: 20,
+          color:   p.value === 'bull' ? '#00c896' : '#ff4466',
+          border:  `1px solid ${p.value === 'bull' ? '#00c896' : '#ff4466'}`,
+          borderRadius:'4px', fontWeight:700,
         }}
       />
     ),
   },
   {
-    field: 'trend_bias', headerName: 'HTF Bias', width: 110,
-    renderCell: (p) => {
-      const aligned = p.row.direction === 'bull' ? p.value === 'bullish' : p.value === 'bearish'
-      return aligned
-        ? <CheckCircleOutlinedIcon sx={{ color: '#00c896', fontSize: 18 }} />
-        : <WarningAmberOutlinedIcon sx={{ color: '#f5a623', fontSize: 18 }} />
-    },
+    field: 'trend_bias', headerName: 'Trend', width: 100,
+    renderCell: p => (
+      <Typography variant="caption" sx={{
+        color: p.value==='bullish' ? '#00c896'
+          : p.value==='bearish' ? '#ff4466' : '#888',
+      }}>
+        {p.value}
+      </Typography>
+    ),
   },
   {
-    field: 'candle_time', headerName: 'Candle', width: 160,
-    renderCell: (p) => <Typography variant="caption" sx={{ fontFamily: 'monospace', color: '#55556a' }}>{fmtTime(p.value)}</Typography>,
+    field: 'candle_time', headerName: 'Candle', width: 150,
+    renderCell: p => (
+      <Typography variant="caption" sx={{ fontFamily:'monospace' }}>
+        {p.value ? new Date(p.value).toLocaleString('en-US', {
+          timeZone:'America/New_York',
+          month:'short', day:'numeric',
+          hour:'2-digit', minute:'2-digit',
+        }) : '—'}
+      </Typography>
+    ),
   },
-]
+];
 
 export default function Alerts() {
-  const { getToken } = useAuth()
-  const [rows, setRows]     = useState([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError]   = useState(null)
+  const { getToken }          = useAuth();
+  const [alerts, setAlerts]   = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError]     = useState(null);
+  const [filter, setFilter]   = useState('all');
 
-  const fetchAlerts = useCallback(async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      const token = await getToken()
-      const data  = await api.get('/alerts/history?limit=200', token)
-      setRows(data)
-    } catch (e) {
-      setError(e.message)
-    } finally {
-      setLoading(false)
-    }
-  }, [getToken])
-
-  useEffect(() => { fetchAlerts() }, [fetchAlerts])
+  useEffect(() => {
+    setLoading(true);
+    (async () => {
+      try {
+        const token = await getToken();
+        const data  = await api.get(
+          `/alerts/history?type=${filter}&limit=200`, token
+        );
+        setAlerts((Array.isArray(data) ? data : [])
+          .map((a, i) => ({ ...a, id: a.id ?? i })));
+      } catch (e) {
+        setError(e.message);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [filter]);
 
   return (
-    <Box>
+    <Container maxWidth="xl" sx={{ py: 3 }}>
+      <Stack direction="row" justifyContent="space-between"
+        alignItems="center" sx={{ mb: 3 }}>
+        <Typography variant="h5" fontWeight={700}>Alert History</Typography>
+        <ToggleButtonGroup value={filter} exclusive size="small"
+          onChange={(_, v) => v && setFilter(v)}>
+          <ToggleButton value="all">All</ToggleButton>
+          <ToggleButton value="ebp">EBP</ToggleButton>
+          <ToggleButton value="sweep">Sweep</ToggleButton>
+          <ToggleButton value="combined">⚡ Combined</ToggleButton>
+        </ToggleButtonGroup>
+      </Stack>
+
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
-      <Paper sx={{ border: '1px solid #1a1a1a', height: 600 }}>
-        <DataGrid
-          rows={rows}
-          columns={columns}
-          loading={loading}
-          initialState={{ pagination: { paginationModel: { pageSize: 25 } } }}
-          pageSizeOptions={[25, 50, 100]}
-          disableRowSelectionOnClick
-          slots={{ noRowsOverlay: NoRowsOverlay }}
-          sx={{ border: 'none', height: '100%', '--DataGrid-overlayHeight': '300px' }}
-        />
-      </Paper>
-    </Box>
-  )
+      {loading && <LinearProgress sx={{ mb: 2 }} />}
+
+      <DataGrid
+        rows={alerts}
+        columns={columns}
+        pageSize={25}
+        rowsPerPageOptions={[25, 50, 100]}
+        disableRowSelectionOnClick
+        autoHeight
+        slots={{ noRowsOverlay: NoRows }}
+        sx={{ border:'none', bgcolor:'#000000', minHeight:400 }}
+      />
+    </Container>
+  );
 }

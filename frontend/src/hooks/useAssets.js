@@ -1,47 +1,43 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@clerk/clerk-react';
-import { api } from '../lib/api.js';
+import api from '../lib/api';
 
 export function useAssets() {
-  const { getToken } = useAuth();
-  const [assets, setAssets]   = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError]     = useState(null);
+  const { getToken, isSignedIn } = useAuth();
+  const [assets, setAssets]     = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [error, setError]       = useState(null);
 
   const fetchAssets = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+    if (!isSignedIn) return;
     try {
       const token = await getToken();
-      const data  = await api.get('/user/me/assets', token);
-      setAssets(data);
+      const data  = await api.get('/user/assets', token);
+      setAssets(Array.isArray(data) ? data : []);
     } catch (e) {
       setError(e.message);
     } finally {
       setLoading(false);
     }
-  }, [getToken]);
+  }, [isSignedIn, getToken]);
 
-  useEffect(() => { fetchAssets(); }, [fetchAssets]);
+  useEffect(() => {
+    fetchAssets();
+    const interval = setInterval(fetchAssets, 60_000);
+    return () => clearInterval(interval);
+  }, [fetchAssets]);
 
-  const addAsset = useCallback(async (payload) => {
+  const addAsset = async (symbol, displayName, assetType) => {
     const token = await getToken();
-    const result = await api.post('/user/me/assets', payload, token);
+    await api.post('/user/assets', { symbol, displayName, assetType }, token);
     await fetchAssets();
-    return result;
-  }, [getToken, fetchAssets]);
+  };
 
-  const removeAsset = useCallback(async (id) => {
+  const removeAsset = async (id) => {
     const token = await getToken();
-    await api.del(`/user/me/assets/${id}`, token);
-    setAssets(prev => prev.filter(a => a.id !== id));
-  }, [getToken]);
+    await api.delete(`/user/assets/${id}`, token);
+    await fetchAssets();
+  };
 
-  const updateAsset = useCallback(async (id, patch) => {
-    const token = await getToken();
-    await api.patch(`/user/me/assets/${id}`, patch, token);
-    setAssets(prev => prev.map(a => a.id === id ? { ...a, ...patch } : a));
-  }, [getToken]);
-
-  return { assets, loading, error, refetch: fetchAssets, addAsset, removeAsset, updateAsset };
+  return { assets, loading, error, addAsset, removeAsset, refetch: fetchAssets };
 }

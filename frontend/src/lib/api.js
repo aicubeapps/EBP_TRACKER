@@ -1,18 +1,24 @@
-const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'https://ebp-tracker-worker.aicube-apps.workers.dev';
+const BASE = import.meta.env.VITE_WORKER_URL
+  ?? 'https://ebp-tracker-worker.aicube-apps.workers.dev';
 
-async function request(path, options = {}, token = null) {
-  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+async function request(method, path, body, token) {
+  const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-
-  const res = await fetch(`${WORKER_URL}${path}`, { ...options, headers });
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    headers,
+    ...(body !== null ? { body: JSON.stringify(body) } : {}),
+  });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || data.message || `HTTP ${res.status}`);
+  if (!res.ok) throw new Error(data.error ?? `API error ${res.status}`);
   return data;
 }
 
-export const api = {
-  get:    (path, token)        => request(path, { method: 'GET' }, token),
-  post:   (path, body, token)  => request(path, { method: 'POST',   body: JSON.stringify(body) }, token),
-  patch:  (path, body, token)  => request(path, { method: 'PATCH',  body: JSON.stringify(body) }, token),
-  del:    (path, token)        => request(path, { method: 'DELETE' }, token),
+const api = {
+  get:    (path, token)       => request('GET',    path, null, token),
+  post:   (path, body, token) => request('POST',   path, body, token),
+  patch:  (path, body, token) => request('PATCH',  path, body, token),
+  delete: (path, token)       => request('DELETE', path, null, token),
 };
+
+export default api;
