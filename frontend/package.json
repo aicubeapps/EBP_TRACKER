@@ -1,0 +1,25 @@
+{
+  "name": "ebp-tracker-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@clerk/clerk-react": "latest",
+    "react": "^18",
+    "react-dom": "^18",
+    "react-router-dom": "^6",
+    "lucide-react": "latest"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "latest",
+    "autoprefixer": "latest",
+    "postcss": "latest",
+    "tailwindcss": "^3",
+    "vite": "latest"
+  }
+}
