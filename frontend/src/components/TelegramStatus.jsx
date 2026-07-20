@@ -1,20 +1,12 @@
-import { MessageCircle, CheckCircle, XCircle } from 'lucide-react'
+import Chip from '@mui/material/Chip'
+import TelegramIcon from '@mui/icons-material/Telegram'
 
 export default function TelegramStatus({ connected }) {
-  return (
-    <div className="flex items-center gap-1.5 text-xs">
-      <MessageCircle size={12} className="text-accent-blue" />
-      {connected ? (
-        <>
-          <CheckCircle size={12} className="text-bull" />
-          <span className="text-bull">Telegram connected</span>
-        </>
-      ) : (
-        <>
-          <XCircle size={12} className="text-bear" />
-          <span className="text-text-muted">Telegram not connected</span>
-        </>
-      )}
-    </div>
+  return connected ? (
+    <Chip icon={<TelegramIcon sx={{ fontSize: '14px !important' }} />} label="Telegram Connected" size="small"
+      sx={{ bgcolor: '#001a12', color: '#00c896', border: '1px solid #00c896', borderRadius: '4px', fontWeight: 600, fontSize: '0.7rem' }} />
+  ) : (
+    <Chip icon={<TelegramIcon sx={{ fontSize: '14px !important' }} />} label="Not Connected" size="small"
+      sx={{ bgcolor: '#0d0d0d', color: '#55556a', border: '1px solid #2a2a2a', borderRadius: '4px', fontWeight: 600, fontSize: '0.7rem' }} />
   )
 }

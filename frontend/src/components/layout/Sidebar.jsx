@@ -1,102 +1,108 @@
 import { useState, useEffect } from 'react'
-import { NavLink } from 'react-router-dom'
-import {
-  LayoutDashboard,
-  BarChart2,
-  Bell,
-  Settings,
-  Zap,
-  Shield,
-  ChevronLeft,
-  ChevronRight,
-} from 'lucide-react'
+import { useLocation, useNavigate } from 'react-router-dom'
+import Box from '@mui/material/Box'
+import List from '@mui/material/List'
+import ListItem from '@mui/material/ListItem'
+import ListItemButton from '@mui/material/ListItemButton'
+import ListItemIcon from '@mui/material/ListItemIcon'
+import ListItemText from '@mui/material/ListItemText'
+import IconButton from '@mui/material/IconButton'
+import Divider from '@mui/material/Divider'
+import Typography from '@mui/material/Typography'
+import Tooltip from '@mui/material/Tooltip'
+import DashboardOutlinedIcon from '@mui/icons-material/DashboardOutlined'
+import ShowChartOutlinedIcon from '@mui/icons-material/ShowChartOutlined'
+import NotificationsOutlinedIcon from '@mui/icons-material/NotificationsOutlined'
+import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined'
+import BoltOutlinedIcon from '@mui/icons-material/BoltOutlined'
+import AdminPanelSettingsOutlinedIcon from '@mui/icons-material/AdminPanelSettingsOutlined'
+import ChevronLeftOutlinedIcon from '@mui/icons-material/ChevronLeftOutlined'
+import ChevronRightOutlinedIcon from '@mui/icons-material/ChevronRightOutlined'
 
-const navItems = [
-  { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { to: '/assets', label: 'Assets', icon: BarChart2 },
-  { to: '/alerts', label: 'Alerts', icon: Bell },
-  { to: '/settings', label: 'Settings', icon: Settings },
-  { to: '/upgrade', label: 'Upgrade', icon: Zap },
-  { to: '/admin', label: 'Admin', icon: Shield },
+const NAV_ITEMS = [
+  { to: '/dashboard', label: 'Dashboard', Icon: DashboardOutlinedIcon },
+  { to: '/assets',    label: 'Assets',    Icon: ShowChartOutlinedIcon },
+  { to: '/alerts',    label: 'Alerts',    Icon: NotificationsOutlinedIcon },
+  { to: '/settings',  label: 'Settings',  Icon: SettingsOutlinedIcon },
+  { to: '/upgrade',   label: 'Upgrade',   Icon: BoltOutlinedIcon },
+  { to: '/admin',     label: 'Admin',     Icon: AdminPanelSettingsOutlinedIcon },
 ]
 
-export default function Sidebar({ mobile = false, onClose }) {
+const EXPANDED_W = 240
+const COLLAPSED_W = 56
+
+export default function SidebarContent({ mobile = false, onClose }) {
+  const { pathname } = useLocation()
+  const navigate = useNavigate()
+
   const [collapsed, setCollapsed] = useState(() => {
     if (mobile) return false
     return localStorage.getItem('ebp_sidebar_collapsed') === 'true'
   })
 
   useEffect(() => {
-    if (!mobile) {
-      localStorage.setItem('ebp_sidebar_collapsed', collapsed)
-    }
+    if (!mobile) localStorage.setItem('ebp_sidebar_collapsed', collapsed)
   }, [collapsed, mobile])
 
-  const toggle = () => setCollapsed((c) => !c)
+  const width = mobile ? EXPANDED_W : collapsed ? COLLAPSED_W : EXPANDED_W
 
-  const width = mobile ? 'w-60' : collapsed ? 'w-14' : 'w-60'
+  const handleNav = (to) => {
+    navigate(to)
+    if (mobile && onClose) onClose()
+  }
 
   return (
-    <aside
-      className={`${width} bg-bg-secondary border-r border-border flex flex-col h-full transition-all duration-200 shrink-0`}
-    >
-      {/* Logo / wordmark */}
-      {!collapsed && (
-        <div className="px-4 py-5 border-b border-border flex items-center gap-2.5">
-          <img src="/favicon.svg" alt="EBP Tracker" className="w-7 h-7 shrink-0" />
-          <span className="text-sm font-bold text-text-primary tracking-wide whitespace-nowrap">
+    <Box sx={{ width, display: 'flex', flexDirection: 'column', height: '100%', bgcolor: '#000000', transition: 'width 0.2s', overflow: 'hidden' }}>
+      {/* Logo */}
+      <Box sx={{ px: collapsed && !mobile ? 0 : 2, py: 2.5, display: 'flex', alignItems: 'center', gap: 1.5, justifyContent: collapsed && !mobile ? 'center' : 'flex-start', minHeight: 56, borderBottom: '1px solid #1a1a1a' }}>
+        <img src="/favicon.svg" alt="EBP" style={{ width: 28, height: 28, flexShrink: 0 }} />
+        {(!collapsed || mobile) && (
+          <Typography variant="body1" sx={{ fontWeight: 700, color: '#e8e8f0', whiteSpace: 'nowrap', letterSpacing: '0.02em' }}>
             EBP Tracker
-          </span>
-        </div>
-      )}
-      {collapsed && (
-        <div className="py-5 border-b border-border flex justify-center">
-          <img src="/favicon.svg" alt="EBP Tracker" className="w-7 h-7" />
-        </div>
-      )}
+          </Typography>
+        )}
+      </Box>
 
-      {/* Nav items */}
-      <nav className="flex-1 py-3 overflow-hidden">
-        {navItems.map(({ to, label, icon: Icon }) => (
-          <NavLink
-            key={to}
-            to={to}
-            onClick={mobile ? onClose : undefined}
-            title={collapsed ? label : undefined}
-            className={({ isActive }) =>
-              `flex items-center gap-3 py-2.5 mx-2 rounded-lg text-sm font-medium transition-colors duration-100 ${
-                collapsed ? 'justify-center px-0' : 'px-3'
-              } ${
-                isActive
-                  ? 'bg-bg-elevated text-text-primary border-l-2 border-accent-blue -ml-[1px] pl-[calc(0.75rem_-_1px)]'
-                  : 'text-text-secondary hover:text-text-primary hover:bg-bg-elevated border-l-2 border-transparent'
-              }`
-            }
-          >
-            {({ isActive }) => (
-              <>
-                <Icon size={16} className={isActive ? 'text-accent-blue' : ''} />
-                {!collapsed && <span className="whitespace-nowrap">{label}</span>}
-              </>
-            )}
-          </NavLink>
-        ))}
-      </nav>
+      {/* Nav */}
+      <List sx={{ flex: 1, py: 1, px: collapsed && !mobile ? 0 : 0 }}>
+        {NAV_ITEMS.map(({ to, label, Icon }) => {
+          const active = pathname === to
+          const btn = (
+            <ListItemButton
+              selected={active}
+              onClick={() => handleNav(to)}
+              sx={{ justifyContent: collapsed && !mobile ? 'center' : 'flex-start', px: collapsed && !mobile ? 0 : undefined, minHeight: 40 }}
+            >
+              <ListItemIcon sx={{ minWidth: collapsed && !mobile ? 0 : 36, justifyContent: 'center', color: active ? '#4488ff' : '#8888a8' }}>
+                <Icon fontSize="small" />
+              </ListItemIcon>
+              {(!collapsed || mobile) && (
+                <ListItemText
+                  primary={label}
+                  primaryTypographyProps={{ fontSize: '0.875rem', fontWeight: active ? 600 : 400, color: active ? '#e8e8f0' : '#8888a8' }}
+                />
+              )}
+            </ListItemButton>
+          )
+          return (
+            <ListItem key={to} disablePadding>
+              {collapsed && !mobile ? <Tooltip title={label} placement="right">{btn}</Tooltip> : btn}
+            </ListItem>
+          )
+        })}
+      </List>
 
-      {/* Bottom: collapse toggle (desktop only) */}
+      {/* Collapse toggle — desktop only */}
       {!mobile && (
-        <div className="border-t border-border p-2">
-          <button
-            onClick={toggle}
-            className={`w-full flex items-center py-2 px-2 rounded-lg text-text-muted hover:text-text-secondary hover:bg-bg-elevated transition-colors ${
-              collapsed ? 'justify-center' : 'justify-end'
-            }`}
-            title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          >
-            {collapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
-          </button>
-        </div>
+        <>
+          <Divider />
+          <Box sx={{ display: 'flex', justifyContent: collapsed ? 'center' : 'flex-end', p: 1 }}>
+            <IconButton size="small" onClick={() => setCollapsed(c => !c)} title={collapsed ? 'Expand' : 'Collapse'}>
+              {collapsed ? <ChevronRightOutlinedIcon fontSize="small" /> : <ChevronLeftOutlinedIcon fontSize="small" />}
+            </IconButton>
+          </Box>
+        </>
       )}
-    </aside>
+    </Box>
   )
 }

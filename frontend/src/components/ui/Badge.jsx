@@ -1,23 +1,25 @@
-export default function Badge({ variant = 'neutral', children, className = '' }) {
-  const variants = {
-    bull: 'bg-bull/10 text-bull border-bull/20',
-    bear: 'bg-bear/10 text-bear border-bear/20',
-    neutral: 'bg-neutral/10 text-neutral border-neutral/20',
-    blue: 'bg-accent-blue/10 text-accent-blue border-accent-blue/20',
-    yellow: 'bg-accent-yellow/10 text-accent-yellow border-accent-yellow/20',
-    purple: 'bg-accent-purple/10 text-accent-purple border-accent-purple/20',
-    expired: 'bg-bear/10 text-bear border-bear/20',
-    free: 'bg-text-muted/10 text-text-secondary border-border',
-    coffee: 'bg-accent-yellow/10 text-accent-yellow border-accent-yellow/20',
-    beer: 'bg-accent-blue/10 text-accent-blue border-accent-blue/20',
-    wine: 'bg-accent-purple/10 text-accent-purple border-accent-purple/20',
-  }
+import Chip from '@mui/material/Chip'
 
+const VARIANT_SX = {
+  bull:    { bgcolor: '#001a12', color: '#00c896', border: '1px solid #00c896' },
+  bear:    { bgcolor: '#1a0008', color: '#ff4466', border: '1px solid #ff4466' },
+  neutral: { bgcolor: '#0d0d0d', color: '#8888a8', border: '1px solid #2a2a2a' },
+  blue:    { bgcolor: '#001033', color: '#4488ff', border: '1px solid #4488ff' },
+  yellow:  { bgcolor: '#1a1100', color: '#f5a623', border: '1px solid #f5a623' },
+  purple:  { bgcolor: '#110022', color: '#8855ff', border: '1px solid #8855ff' },
+  expired: { bgcolor: '#1a0008', color: '#ff4466', border: '1px solid #ff4466' },
+  free:    { bgcolor: '#0d0d0d', color: '#8888a8', border: '1px solid #2a2a2a' },
+  coffee:  { bgcolor: '#1a1100', color: '#f5a623', border: '1px solid #f5a623' },
+  beer:    { bgcolor: '#001033', color: '#4488ff', border: '1px solid #4488ff' },
+  wine:    { bgcolor: '#110022', color: '#8855ff', border: '1px solid #8855ff' },
+}
+
+export default function Badge({ variant = 'neutral', children, sx = {} }) {
   return (
-    <span
-      className={`inline-flex items-center px-2 py-0.5 text-xs font-medium rounded-md border ${variants[variant] || variants.neutral} ${className}`}
-    >
-      {children}
-    </span>
+    <Chip
+      label={children}
+      size="small"
+      sx={{ borderRadius: '4px', fontWeight: 700, fontSize: '0.7rem', ...VARIANT_SX[variant], ...sx }}
+    />
   )
 }

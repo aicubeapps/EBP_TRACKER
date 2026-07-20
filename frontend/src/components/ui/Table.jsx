@@ -1,35 +1,35 @@
-export function Table({ children, className = '' }) {
+import MuiTable from '@mui/material/Table'
+import TableContainer from '@mui/material/TableContainer'
+import MuiTableHead from '@mui/material/TableHead'
+import MuiTableBody from '@mui/material/TableBody'
+import MuiTableRow from '@mui/material/TableRow'
+import MuiTableCell from '@mui/material/TableCell'
+import Paper from '@mui/material/Paper'
+
+export function Table({ children, sx = {} }) {
   return (
-    <div className={`overflow-x-auto rounded-lg border border-border ${className}`}>
-      <table className="w-full text-sm">{children}</table>
-    </div>
+    <TableContainer component={Paper} sx={{ border: '1px solid #1a1a1a', ...sx }}>
+      <MuiTable size="small">{children}</MuiTable>
+    </TableContainer>
   )
 }
 
 export function THead({ children }) {
-  return (
-    <thead className="bg-bg-elevated border-b border-border text-text-secondary text-xs uppercase tracking-wider">
-      {children}
-    </thead>
-  )
+  return <MuiTableHead>{children}</MuiTableHead>
 }
 
 export function TBody({ children }) {
-  return <tbody className="divide-y divide-border-subtle">{children}</tbody>
+  return <MuiTableBody>{children}</MuiTableBody>
 }
 
-export function TR({ children, className = '' }) {
-  return (
-    <tr className={`transition-colors even:bg-bg-secondary odd:bg-bg-card hover:bg-bg-elevated ${className}`}>
-      {children}
-    </tr>
-  )
+export function TR({ children, sx = {} }) {
+  return <MuiTableRow sx={sx}>{children}</MuiTableRow>
 }
 
-export function TH({ children, className = '' }) {
-  return <th className={`px-4 py-3 text-left font-medium ${className}`}>{children}</th>
+export function TH({ children, sx = {} }) {
+  return <MuiTableCell component="th" sx={sx}>{children}</MuiTableCell>
 }
 
-export function TD({ children, className = '' }) {
-  return <td className={`px-4 py-3 text-text-primary tabular-nums ${className}`}>{children}</td>
+export function TD({ children, sx = {} }) {
+  return <MuiTableCell sx={{ color: '#e8e8f0', ...sx }}>{children}</MuiTableCell>
 }

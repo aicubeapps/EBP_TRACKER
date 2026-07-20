@@ -1,7 +1,22 @@
 import { useState } from 'react'
-import { MessageCircle, CheckCircle, ExternalLink, Send } from 'lucide-react'
-import Card from '../components/ui/Card.jsx'
-import Button from '../components/ui/Button.jsx'
+import Box from '@mui/material/Box'
+import Stack from '@mui/material/Stack'
+import Paper from '@mui/material/Paper'
+import Typography from '@mui/material/Typography'
+import TextField from '@mui/material/TextField'
+import Button from '@mui/material/Button'
+import Alert from '@mui/material/Alert'
+import FormControl from '@mui/material/FormControl'
+import RadioGroup from '@mui/material/RadioGroup'
+import FormControlLabel from '@mui/material/FormControlLabel'
+import Radio from '@mui/material/Radio'
+import Select from '@mui/material/Select'
+import MenuItem from '@mui/material/MenuItem'
+import Divider from '@mui/material/Divider'
+import TelegramIcon from '@mui/icons-material/Telegram'
+import SendOutlinedIcon from '@mui/icons-material/SendOutlined'
+
+const IS_WINE = false
 
 export default function Settings() {
   const [telegramConnected] = useState(false)
@@ -9,115 +24,96 @@ export default function Settings() {
   const [alertMode, setAlertMode] = useState('aligned')
 
   return (
-    <div className="max-w-2xl space-y-6">
-      {/* Telegram Section */}
-      <section>
-        <h2 className="text-sm font-semibold text-text-primary mb-3 uppercase tracking-wider">Telegram</h2>
-        <Card>
-          <div className="flex items-center gap-2 mb-4">
-            <MessageCircle size={16} className="text-accent-blue" />
-            <span className="text-sm font-medium text-text-primary">Telegram Connection</span>
-            {telegramConnected && (
-              <span className="flex items-center gap-1 ml-auto text-xs text-bull">
-                <CheckCircle size={12} /> Connected
-              </span>
-            )}
-          </div>
-
+    <Box sx={{ maxWidth: 600 }}>
+      <Stack spacing={3}>
+        {/* Telegram */}
+        <Paper sx={{ p: 3, border: '1px solid #1a1a1a' }}>
+          <Typography variant="h6" gutterBottom>Telegram Alerts</Typography>
           {telegramConnected ? (
-            <div className="space-y-3">
-              <div className="flex items-center justify-between p-3 bg-bg-elevated rounded-lg">
-                <span className="text-sm text-text-secondary">Chat ID</span>
-                <span className="text-sm font-mono text-text-muted">••••7823</span>
-              </div>
-              <div className="flex gap-2">
-                <Button variant="secondary" size="sm">
-                  <Send size={12} /> Send Test
-                </Button>
-                <Button variant="ghost" size="sm">Disconnect</Button>
-              </div>
-            </div>
+            <Alert severity="success" sx={{ '& .MuiAlert-message': { width: '100%' } }}>
+              <Stack direction="row" alignItems="center" justifyContent="space-between" flexWrap="wrap" gap={1}>
+                <span>Connected — chat ID ••••1234</span>
+                <Stack direction="row" spacing={1}>
+                  <Button size="small" variant="outlined" color="success" startIcon={<SendOutlinedIcon />}>
+                    Send Test
+                  </Button>
+                  <Button size="small" color="error">Disconnect</Button>
+                </Stack>
+              </Stack>
+            </Alert>
           ) : (
-            <div className="space-y-3">
-              <p className="text-sm text-text-secondary">
-                Connect your Telegram to receive EBP alerts directly in your chat.
-              </p>
-              <div className="p-3 bg-bg-elevated rounded-lg text-sm">
-                <p className="text-text-muted mb-2">1. Open the bot and send <span className="font-mono text-accent-blue">/start</span></p>
-                <a
-                  href="#"
-                  className="inline-flex items-center gap-1 text-accent-blue text-sm hover:underline"
-                >
-                  Open @EBPTrackerBot <ExternalLink size={12} />
-                </a>
-              </div>
-              <div>
-                <label className="block text-xs text-text-muted mb-1.5">2. Enter your verification code</label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={botCode}
-                    onChange={(e) => setBotCode(e.target.value)}
-                    placeholder="6-digit code"
-                    className="flex-1 px-3 py-2 bg-bg-elevated border border-border rounded-lg text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue font-mono"
-                  />
-                  <Button disabled={botCode.length < 4}>Verify</Button>
-                </div>
-              </div>
-            </div>
-          )}
-        </Card>
-      </section>
-
-      {/* Alert Mode */}
-      <section>
-        <h2 className="text-sm font-semibold text-text-primary mb-3 uppercase tracking-wider">Alert Mode</h2>
-        <Card>
-          <div className="space-y-2">
-            {[
-              { id: 'aligned', label: 'Trend Aligned Only', desc: 'Only fire alerts when EBP aligns with the higher timeframe trend bias.' },
-              { id: 'all', label: 'All Engulfing Bars', desc: 'Fire alerts for every engulfing bar print regardless of trend direction.' },
-            ].map((opt) => (
-              <label
-                key={opt.id}
-                className={`flex items-start gap-3 p-3 rounded-lg cursor-pointer border transition-colors ${
-                  alertMode === opt.id
-                    ? 'border-accent-blue/40 bg-accent-blue/5'
-                    : 'border-border hover:border-border/80 hover:bg-bg-elevated'
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="alertMode"
-                  value={opt.id}
-                  checked={alertMode === opt.id}
-                  onChange={() => setAlertMode(opt.id)}
-                  className="mt-0.5 accent-accent-blue"
+            <>
+              <Alert severity="info" sx={{ mb: 2 }}>
+                Open @EBPTrackerBot in Telegram, tap Start, and enter the code shown below.
+              </Alert>
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ sm: 'center' }}>
+                <Button variant="outlined" href="https://t.me/EBPTrackerBot" target="_blank" startIcon={<TelegramIcon />}>
+                  Open Bot
+                </Button>
+                <TextField
+                  placeholder="Enter 4-digit code"
+                  size="small"
+                  value={botCode}
+                  onChange={(e) => setBotCode(e.target.value)}
+                  inputProps={{ style: { fontFamily: 'monospace', letterSpacing: '0.2em' }, maxLength: 6 }}
+                  sx={{ flex: 1 }}
                 />
-                <div>
-                  <p className="text-sm font-medium text-text-primary">{opt.label}</p>
-                  <p className="text-xs text-text-muted mt-0.5">{opt.desc}</p>
-                </div>
-              </label>
-            ))}
-          </div>
-        </Card>
-      </section>
+                <Button variant="contained" disabled={botCode.length < 4}>Connect</Button>
+              </Stack>
+            </>
+          )}
+        </Paper>
 
-      {/* Timeframe Pairing — Wine only */}
-      <section className="opacity-50 pointer-events-none">
-        <div className="flex items-center gap-2 mb-3">
-          <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider">Timeframe Pairing</h2>
-          <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent-purple/20 text-accent-purple border border-accent-purple/30">
-            🍷 WINE
-          </span>
-        </div>
-        <Card>
-          <p className="text-sm text-text-muted">
-            Custom higher timeframe pairing is available on the Wine plan. Upgrade to configure custom HTF bias per asset.
-          </p>
-        </Card>
-      </section>
-    </div>
+        <Divider />
+
+        {/* Alert Mode */}
+        <Paper sx={{ p: 3, border: '1px solid #1a1a1a' }}>
+          <Typography variant="h6" gutterBottom>Alert Mode</Typography>
+          <FormControl>
+            <RadioGroup value={alertMode} onChange={(e) => setAlertMode(e.target.value)}>
+              {[
+                { value: 'aligned', label: 'Trend Aligned Only', desc: 'Alerts fire only when EBP matches TTrades HTF bias' },
+                { value: 'all',     label: 'All Engulfing Bars', desc: 'Alerts fire for every EBP regardless of trend' },
+              ].map((opt) => (
+                <FormControlLabel
+                  key={opt.value}
+                  value={opt.value}
+                  control={<Radio size="small" />}
+                  label={
+                    <Box sx={{ py: 0.5 }}>
+                      <Typography variant="body1" sx={{ color: '#e8e8f0' }}>{opt.label}</Typography>
+                      <Typography variant="caption">{opt.desc}</Typography>
+                    </Box>
+                  }
+                  sx={{ mb: 1, mr: 0, p: 1, borderRadius: 1, border: '1px solid', borderColor: alertMode === opt.value ? '#4488ff' : '#1a1a1a', bgcolor: alertMode === opt.value ? '#001033' : 'transparent', transition: 'all 0.15s' }}
+                />
+              ))}
+            </RadioGroup>
+          </FormControl>
+        </Paper>
+
+        {/* Timeframe Pairing — Wine only */}
+        <Paper sx={{ p: 3, border: '1px solid #1a1a1a', opacity: IS_WINE ? 1 : 0.4, pointerEvents: IS_WINE ? 'auto' : 'none' }}>
+          <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1.5 }}>
+            <Typography variant="h6">Custom TF Pairing</Typography>
+            <Box sx={{ px: 1, py: 0.25, bgcolor: '#110022', border: '1px solid #8855ff', borderRadius: '4px' }}>
+              <Typography variant="caption" sx={{ color: '#8855ff', fontSize: '0.65rem', fontWeight: 700 }}>🍷 WINE</Typography>
+            </Box>
+          </Stack>
+          <Typography variant="body2" sx={{ mb: 2 }}>Select HTF bias source for each alert timeframe</Typography>
+          {['M15', '1H', '4H', 'Daily'].map((tf) => (
+            <Stack key={tf} direction="row" alignItems="center" spacing={2} sx={{ mb: 1.5 }}>
+              <Typography variant="body2" sx={{ width: 48, color: '#e8e8f0' }}>{tf}</Typography>
+              <Select size="small" defaultValue="auto" sx={{ minWidth: 160 }}>
+                <MenuItem value="auto">Auto</MenuItem>
+                <MenuItem value="W">Weekly</MenuItem>
+                <MenuItem value="D">Daily</MenuItem>
+                <MenuItem value="4H">4H</MenuItem>
+              </Select>
+            </Stack>
+          ))}
+        </Paper>
+      </Stack>
+    </Box>
   )
 }

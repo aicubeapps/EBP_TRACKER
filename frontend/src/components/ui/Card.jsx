@@ -1,9 +1,12 @@
-export default function Card({ children, className = '', hover = false }) {
+import MuiCard from '@mui/material/Card'
+import CardContent from '@mui/material/CardContent'
+
+export default function Card({ children, sx = {}, contentSx = {} }) {
   return (
-    <div
-      className={`bg-bg-card border border-border rounded-lg p-4 ${hover ? 'card-hover cursor-pointer' : ''} ${className}`}
-    >
-      {children}
-    </div>
+    <MuiCard sx={sx}>
+      <CardContent sx={{ p: 2, '&:last-child': { pb: 2 }, ...contentSx }}>
+        {children}
+      </CardContent>
+    </MuiCard>
   )
 }

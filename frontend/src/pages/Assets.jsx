@@ -1,12 +1,40 @@
 import { useState } from 'react'
-import { Search, Plus, Trash2, BarChart2 } from 'lucide-react'
-import Button from '../components/ui/Button.jsx'
-import Modal from '../components/ui/Modal.jsx'
-import EmptyState from '../components/ui/EmptyState.jsx'
-import Badge from '../components/ui/Badge.jsx'
+import Box from '@mui/material/Box'
+import Stack from '@mui/material/Stack'
+import Paper from '@mui/material/Paper'
+import Typography from '@mui/material/Typography'
+import TextField from '@mui/material/TextField'
+import Select from '@mui/material/Select'
+import MenuItem from '@mui/material/MenuItem'
+import InputLabel from '@mui/material/InputLabel'
+import FormControl from '@mui/material/FormControl'
+import Button from '@mui/material/Button'
+import IconButton from '@mui/material/IconButton'
+import List from '@mui/material/List'
+import ListItem from '@mui/material/ListItem'
+import ListItemText from '@mui/material/ListItemText'
+import Alert from '@mui/material/Alert'
+import LinearProgress from '@mui/material/LinearProgress'
+import Dialog from '@mui/material/Dialog'
+import DialogTitle from '@mui/material/DialogTitle'
+import DialogContent from '@mui/material/DialogContent'
+import DialogActions from '@mui/material/DialogActions'
+import Chip from '@mui/material/Chip'
+import InputAdornment from '@mui/material/InputAdornment'
+import SearchOutlinedIcon from '@mui/icons-material/SearchOutlined'
+import DeleteOutlineOutlinedIcon from '@mui/icons-material/DeleteOutlineOutlined'
+import AddOutlinedIcon from '@mui/icons-material/AddOutlined'
 
 const ASSET_TYPES = ['Forex', 'Commodity', 'Index', 'NSE Asset', 'Crypto']
 const MAX_SLOTS = 3
+
+const TYPE_SX = {
+  Forex:       { bgcolor: '#001033', color: '#4488ff', border: '1px solid #4488ff' },
+  Commodity:   { bgcolor: '#1a1100', color: '#f5a623', border: '1px solid #f5a623' },
+  Index:       { bgcolor: '#110022', color: '#8855ff', border: '1px solid #8855ff' },
+  'NSE Asset': { bgcolor: '#0d0d0d', color: '#8888a8', border: '1px solid #2a2a2a' },
+  Crypto:      { bgcolor: '#1a1100', color: '#f5a623', border: '1px solid #f5a623' },
+}
 
 const PLACEHOLDER_ASSETS = [
   { id: 1, symbol: 'EURUSD', type: 'Forex' },
@@ -21,95 +49,110 @@ export default function Assets() {
   const [newType, setNewType] = useState('Forex')
   const [assets] = useState(PLACEHOLDER_ASSETS)
 
-  const filtered = assets.filter((a) =>
-    a.symbol.toLowerCase().includes(search.toLowerCase())
-  )
-
+  const filtered = assets.filter((a) => a.symbol.toLowerCase().includes(search.toLowerCase()))
   const slotsUsed = assets.length
   const slotPct = (slotsUsed / MAX_SLOTS) * 100
 
   return (
-    <div className="max-w-2xl">
-      <div className="flex items-center gap-3 mb-5">
-        <div className="relative flex-1">
-          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search symbol e.g. EURUSD, RELIANCE, BTC"
-            className="w-full pl-9 pr-4 py-2 bg-bg-card border border-border rounded-lg text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
-          />
-        </div>
-        <Button onClick={() => setModalOpen(true)} disabled={slotsUsed >= MAX_SLOTS} className="w-full lg:w-auto">
-          <Plus size={14} />
+    <Box sx={{ maxWidth: 600 }}>
+      {/* Search + Add */}
+      <Stack direction="row" spacing={1.5} sx={{ mb: 2.5 }}>
+        <TextField
+          fullWidth
+          size="small"
+          placeholder="Search symbol e.g. EURUSD, RELIANCE, BTC"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          InputProps={{
+            startAdornment: <InputAdornment position="start"><SearchOutlinedIcon sx={{ fontSize: 16, color: '#55556a' }} /></InputAdornment>,
+          }}
+        />
+        <Button
+          variant="contained"
+          startIcon={<AddOutlinedIcon />}
+          disabled={slotsUsed >= MAX_SLOTS}
+          onClick={() => setModalOpen(true)}
+          sx={{ whiteSpace: 'nowrap' }}
+        >
           Add Asset
         </Button>
-      </div>
+      </Stack>
 
       {/* Slot usage */}
-      <div className="mb-5 p-4 bg-bg-card border border-border rounded-lg">
-        <div className="flex items-center justify-between mb-2 text-sm">
-          <span className="text-text-secondary">Slot usage</span>
-          <span className="text-text-primary font-medium tabular-nums">
+      <Paper sx={{ p: 2, mb: 2.5, border: '1px solid #1a1a1a' }}>
+        <Stack direction="row" justifyContent="space-between" sx={{ mb: 1 }}>
+          <Typography variant="body2">Slot usage</Typography>
+          <Typography variant="caption" className="tabular-nums" sx={{ color: '#e8e8f0' }}>
             {slotsUsed} / {MAX_SLOTS} slots used
-          </span>
-        </div>
-        <div className="h-1.5 bg-bg-elevated rounded-full overflow-hidden">
-          <div
-            className="h-full bg-accent-blue rounded-full transition-all duration-300"
-            style={{ width: `${Math.min(slotPct, 100)}%` }}
-          />
-        </div>
-        <p className="text-xs text-text-muted mt-1.5">Upgrade your plan to track more assets.</p>
-      </div>
+          </Typography>
+        </Stack>
+        <LinearProgress variant="determinate" value={Math.min(slotPct, 100)} sx={{ height: 4, borderRadius: 2 }} />
+        <Typography variant="caption" sx={{ mt: 1, display: 'block' }}>Upgrade your plan to track more assets.</Typography>
+      </Paper>
 
-      {filtered.length === 0 ? (
-        <EmptyState icon={BarChart2} title="No assets found" description="Add your first asset or adjust your search." />
-      ) : (
-        <div className="space-y-2">
-          {filtered.map((asset) => (
-            <div key={asset.id} className="flex items-center justify-between px-4 py-3 bg-bg-card border border-border rounded-lg">
-              <div className="flex items-center gap-3">
-                <span className="text-sm font-semibold text-text-primary tabular-nums">{asset.symbol}</span>
-                <Badge variant="blue">{asset.type}</Badge>
-              </div>
-              <button className="p-1.5 text-text-muted hover:text-bear rounded transition-colors">
-                <Trash2 size={14} />
-              </button>
-            </div>
-          ))}
-        </div>
+      {slotsUsed >= MAX_SLOTS && (
+        <Alert severity="warning" sx={{ mb: 2 }}>Slot limit reached. Upgrade to add more assets.</Alert>
       )}
 
-      <Modal isOpen={modalOpen} onClose={() => setModalOpen(false)} title="Add Asset">
-        <div className="space-y-4">
-          <div>
-            <label className="block text-xs text-text-secondary mb-1.5">Symbol</label>
-            <input
-              type="text"
+      {/* Asset list */}
+      {filtered.length === 0 ? (
+        <Typography variant="body2" sx={{ textAlign: 'center', py: 4 }}>No assets found.</Typography>
+      ) : (
+        <Paper sx={{ border: '1px solid #1a1a1a' }}>
+          <List disablePadding>
+            {filtered.map((asset, idx) => (
+              <ListItem
+                key={asset.id}
+                divider={idx < filtered.length - 1}
+                sx={{ px: 2, py: 1.5 }}
+                secondaryAction={
+                  <IconButton size="small" edge="end" sx={{ '&:hover': { color: '#ff4466' } }}>
+                    <DeleteOutlineOutlinedIcon fontSize="small" />
+                  </IconButton>
+                }
+              >
+                <ListItemText
+                  primary={
+                    <Stack direction="row" alignItems="center" spacing={1.5}>
+                      <Typography variant="body1" sx={{ fontWeight: 600, color: '#e8e8f0' }} className="tabular-nums">
+                        {asset.symbol}
+                      </Typography>
+                      <Chip label={asset.type} size="small" sx={{ borderRadius: '4px', fontWeight: 600, fontSize: '0.7rem', height: 20, ...TYPE_SX[asset.type] }} />
+                    </Stack>
+                  }
+                />
+              </ListItem>
+            ))}
+          </List>
+        </Paper>
+      )}
+
+      {/* Add Asset Dialog */}
+      <Dialog open={modalOpen} onClose={() => setModalOpen(false)} fullWidth maxWidth="xs">
+        <DialogTitle>Add Asset</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2.5} sx={{ mt: 1 }}>
+            <TextField
+              label="Symbol"
+              fullWidth
               value={newSymbol}
               onChange={(e) => setNewSymbol(e.target.value.toUpperCase())}
               placeholder="e.g. EURUSD, RELIANCE, BTCUSDT"
-              className="w-full px-3 py-2 bg-bg-elevated border border-border rounded-lg text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
+              inputProps={{ style: { fontFamily: 'monospace' } }}
             />
-          </div>
-          <div>
-            <label className="block text-xs text-text-secondary mb-1.5">Asset Type</label>
-            <select
-              value={newType}
-              onChange={(e) => setNewType(e.target.value)}
-              className="w-full px-3 py-2 bg-bg-elevated border border-border rounded-lg text-sm text-text-primary focus:outline-none focus:border-accent-blue"
-            >
-              {ASSET_TYPES.map((t) => <option key={t}>{t}</option>)}
-            </select>
-          </div>
-          <div className="flex gap-2 pt-2">
-            <Button variant="secondary" className="flex-1" onClick={() => setModalOpen(false)}>Cancel</Button>
-            <Button className="flex-1" onClick={() => setModalOpen(false)}>Add Asset</Button>
-          </div>
-        </div>
-      </Modal>
-    </div>
+            <FormControl fullWidth size="small">
+              <InputLabel>Asset Type</InputLabel>
+              <Select value={newType} label="Asset Type" onChange={(e) => setNewType(e.target.value)}>
+                {ASSET_TYPES.map((t) => <MenuItem key={t} value={t}>{t}</MenuItem>)}
+              </Select>
+            </FormControl>
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button variant="text" onClick={() => setModalOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={() => setModalOpen(false)} disabled={!newSymbol}>Add</Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
   )
 }

@@ -1,34 +1,42 @@
+import Box from '@mui/material/Box'
+import Typography from '@mui/material/Typography'
+import Stack from '@mui/material/Stack'
+
 const TIMEFRAMES = ['M15', '1H', '4H', 'D', 'W']
 
-const dotColors = {
-  bull: 'bg-bull shadow-[0_0_6px_rgba(0,200,150,0.5)]',
-  bear: 'bg-bear shadow-[0_0_6px_rgba(255,68,102,0.5)]',
-  none: 'bg-text-muted',
-}
+const DOT_COLOR = { bull: '#00c896', bear: '#ff4466', none: '#2a2a2a' }
+const DOT_GLOW  = { bull: '0 0 6px #00c896', bear: '0 0 6px #ff4466', none: 'none' }
+const LABEL_COLOR = { bull: '#00c896', bear: '#ff4466', none: '#55556a' }
 
-const labelColors = {
-  bull: 'text-bull',
-  bear: 'text-bear',
-  none: 'text-text-muted',
+function TFCell({ tf, signal = 'none' }) {
+  return (
+    <Box sx={{
+      display: 'flex', flexDirection: 'column', alignItems: 'center',
+      px: 1.5, py: 1,
+      border: '1px solid #1a1a1a',
+      borderRadius: 1,
+      bgcolor: '#0a0a0a',
+      minWidth: 44,
+      flex: 1,
+    }}>
+      <Typography variant="overline" sx={{ fontSize: '0.6rem', color: LABEL_COLOR[signal], lineHeight: 1.2 }}>
+        {tf}
+      </Typography>
+      <Box sx={{
+        width: 8, height: 8, borderRadius: '50%', mt: 0.75,
+        bgcolor: DOT_COLOR[signal],
+        boxShadow: DOT_GLOW[signal],
+      }} />
+    </Box>
+  )
 }
 
 export default function TFGrid({ data = {} }) {
   return (
-    <div className="flex items-stretch gap-1.5">
-      {TIMEFRAMES.map((tf) => {
-        const signal = data[tf] || 'none'
-        return (
-          <div
-            key={tf}
-            className="flex flex-col items-center justify-center gap-1.5 flex-1 px-1 py-2 bg-bg-elevated border border-border rounded-md min-w-0"
-          >
-            <span className={`text-[10px] font-semibold uppercase tracking-wide ${labelColors[signal]}`}>
-              {tf}
-            </span>
-            <span className={`w-2 h-2 rounded-full shrink-0 ${dotColors[signal]}`} />
-          </div>
-        )
-      })}
-    </div>
+    <Stack direction="row" spacing={0.75}>
+      {TIMEFRAMES.map((tf) => (
+        <TFCell key={tf} tf={tf} signal={data[tf] || 'none'} />
+      ))}
+    </Stack>
   )
 }

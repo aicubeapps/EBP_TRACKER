@@ -1,17 +1,16 @@
-import { Link } from 'react-router-dom'
+import Box from '@mui/material/Box'
+import Typography from '@mui/material/Typography'
+import Button from '@mui/material/Button'
+import { useNavigate } from 'react-router-dom'
 
 export default function NotFound() {
+  const navigate = useNavigate()
   return (
-    <div className="min-h-screen bg-bg-primary flex flex-col items-center justify-center text-center px-4">
-      <p className="text-7xl font-bold text-border mb-4 tabular-nums">404</p>
-      <h1 className="text-xl font-semibold text-text-primary mb-2">Page not found</h1>
-      <p className="text-sm text-text-muted mb-6">The page you're looking for doesn't exist.</p>
-      <Link
-        to="/dashboard"
-        className="px-4 py-2 bg-accent-blue text-white text-sm font-medium rounded-lg hover:bg-accent-blue/90 transition-colors"
-      >
-        Return to Dashboard
-      </Link>
-    </div>
+    <Box sx={{ minHeight: '100vh', bgcolor: '#000000', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', px: 2 }}>
+      <Typography variant="h1" sx={{ fontSize: '5rem', fontWeight: 800, color: '#1a1a1a', mb: 1 }} className="tabular-nums">404</Typography>
+      <Typography variant="h4" sx={{ mb: 1 }}>Page not found</Typography>
+      <Typography variant="body2" sx={{ mb: 3 }}>The page you're looking for doesn't exist.</Typography>
+      <Button variant="contained" onClick={() => navigate('/dashboard')}>Return to Dashboard</Button>
+    </Box>
   )
 }

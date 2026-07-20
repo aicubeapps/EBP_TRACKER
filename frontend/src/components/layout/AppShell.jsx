@@ -1,54 +1,71 @@
 import { useState } from 'react'
 import { useLocation } from 'react-router-dom'
-import Sidebar from './Sidebar.jsx'
+import Box from '@mui/material/Box'
+import Drawer from '@mui/material/Drawer'
+import { useTheme } from '@mui/material/styles'
+import useMediaQuery from '@mui/material/useMediaQuery'
+import SidebarContent from './Sidebar.jsx'
 import Topbar from './Topbar.jsx'
 
-const pageTitles = {
+const PAGE_TITLES = {
   '/dashboard': 'Dashboard',
-  '/assets': 'Assets',
-  '/alerts': 'Alert History',
-  '/settings': 'Settings',
-  '/upgrade': 'Upgrade Plan',
-  '/admin': 'Admin Panel',
+  '/assets':    'Assets',
+  '/alerts':    'Alert History',
+  '/settings':  'Settings',
+  '/upgrade':   'Upgrade Plan',
+  '/admin':     'Admin Panel',
 }
+
+const DRAWER_W = 240
 
 export default function AppShell({ children }) {
   const { pathname } = useLocation()
-  const pageTitle = pageTitles[pathname] || ''
+  const theme = useTheme()
+  const isDesktop = useMediaQuery(theme.breakpoints.up('lg'))
   const [mobileOpen, setMobileOpen] = useState(false)
 
-  return (
-    <div className="flex h-screen bg-bg-primary overflow-hidden">
-      {/* Desktop sidebar */}
-      <div className="hidden lg:flex">
-        <Sidebar />
-      </div>
+  const pageTitle = PAGE_TITLES[pathname] || ''
 
-      {/* Mobile sidebar overlay */}
-      {mobileOpen && (
-        <>
-          <div
-            className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm lg:hidden"
-            onClick={() => setMobileOpen(false)}
-          />
-          <div className="fixed inset-y-0 left-0 z-50 lg:hidden">
-            <Sidebar mobile onClose={() => setMobileOpen(false)} />
-          </div>
-        </>
+  return (
+    <Box sx={{ display: 'flex', height: '100vh', bgcolor: '#000000', overflow: 'hidden' }}>
+      {/* Desktop permanent drawer */}
+      {isDesktop && (
+        <Drawer
+          variant="permanent"
+          sx={{
+            flexShrink: 0,
+            '& .MuiDrawer-paper': { position: 'relative', height: '100%', border: 'none', overflow: 'hidden' },
+          }}
+        >
+          <SidebarContent />
+        </Drawer>
       )}
 
-      {/* Main area */}
-      <div className="flex flex-col flex-1 min-w-0">
+      {/* Mobile temporary drawer */}
+      {!isDesktop && (
+        <Drawer
+          variant="temporary"
+          open={mobileOpen}
+          onClose={() => setMobileOpen(false)}
+          ModalProps={{ keepMounted: true }}
+          sx={{ '& .MuiDrawer-paper': { width: DRAWER_W, border: 'none' } }}
+        >
+          <SidebarContent mobile onClose={() => setMobileOpen(false)} />
+        </Drawer>
+      )}
+
+      {/* Main content area */}
+      <Box sx={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
         <Topbar
           pageTitle={pageTitle}
           plan="FREE"
           daysLeft={null}
           onMenuClick={() => setMobileOpen(true)}
         />
-        <main className="flex-1 overflow-y-auto px-4 py-5 lg:px-6 lg:py-6">
+        <Box component="main" sx={{ flex: 1, overflowY: 'auto', p: { xs: 2, lg: 3 }, bgcolor: '#000000' }}>
           {children}
-        </main>
-      </div>
-    </div>
+        </Box>
+      </Box>
+    </Box>
   )
 }

@@ -1,8 +1,12 @@
-export default function Spinner({ size = 'md', className = '' }) {
-  const sizes = { sm: 'w-4 h-4', md: 'w-6 h-6', lg: 'w-8 h-8' }
+import CircularProgress from '@mui/material/CircularProgress'
+import Box from '@mui/material/Box'
+
+const SIZE_MAP = { sm: 16, md: 24, lg: 32 }
+
+export default function Spinner({ size = 'md' }) {
   return (
-    <div
-      className={`${sizes[size]} border-2 border-border border-t-accent-blue rounded-full animate-spin ${className}`}
-    />
+    <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+      <CircularProgress size={SIZE_MAP[size]} color="primary" />
+    </Box>
   )
 }
