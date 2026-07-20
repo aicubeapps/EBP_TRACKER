@@ -1,119 +1,231 @@
-import { useState } from 'react'
-import Box from '@mui/material/Box'
-import Stack from '@mui/material/Stack'
-import Paper from '@mui/material/Paper'
-import Typography from '@mui/material/Typography'
-import TextField from '@mui/material/TextField'
-import Button from '@mui/material/Button'
-import Alert from '@mui/material/Alert'
-import FormControl from '@mui/material/FormControl'
-import RadioGroup from '@mui/material/RadioGroup'
-import FormControlLabel from '@mui/material/FormControlLabel'
-import Radio from '@mui/material/Radio'
-import Select from '@mui/material/Select'
-import MenuItem from '@mui/material/MenuItem'
-import Divider from '@mui/material/Divider'
-import TelegramIcon from '@mui/icons-material/Telegram'
-import SendOutlinedIcon from '@mui/icons-material/SendOutlined'
-
-const IS_WINE = false
+import { useState, useEffect } from 'react';
+import { useAuth } from '@clerk/clerk-react';
+import {
+  Container, Typography, Stack, Paper, Button, Alert,
+  Divider, RadioGroup, FormControlLabel, Radio,
+  FormControl, FormLabel, CircularProgress, Box, Chip
+} from '@mui/material';
+import {
+  CheckCircleOutlined,
+  LinkOffOutlined,
+  SendOutlined
+} from '@mui/icons-material';
+import api from '../lib/api';
 
 export default function Settings() {
-  const [telegramConnected] = useState(false)
-  const [botCode, setBotCode] = useState('')
-  const [alertMode, setAlertMode] = useState('aligned')
+  const { getToken }                = useAuth();
+  const [tgStatus, setTgStatus]     = useState(null);
+  const [linkCode, setLinkCode]     = useState('');
+  const [polling, setPolling]       = useState(false);
+  const [testing, setTesting]       = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [msg, setMsg]               = useState({ text: '', severity: 'info' });
+
+  const fetchTgStatus = async () => {
+    try {
+      const token = await getToken();
+      const data  = await api.get('/telegram/', token);
+      setTgStatus(data);
+      return data;
+    } catch {}
+  };
+
+  useEffect(() => {
+    fetchTgStatus();
+  }, []);
+
+  // Poll for verification every 3 seconds after code is shown
+  useEffect(() => {
+    if (!polling || !linkCode) return;
+    const interval = setInterval(async () => {
+      try {
+        const token = await getToken();
+        const data  = await api.post('/telegram/verify', {}, token);
+        if (data?.verified) {
+          setPolling(false);
+          setLinkCode('');
+          await fetchTgStatus();
+          setMsg({ text: 'Telegram connected successfully!', severity: 'success' });
+        }
+      } catch {}
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [polling, linkCode]);
+
+  const handleGetCode = async () => {
+    setGenerating(true);
+    setMsg({ text: '', severity: 'info' });
+    try {
+      const token = await getToken();
+      const data  = await api.post('/telegram/initlink', {}, token);
+      setLinkCode(data.code);
+      setPolling(true);
+    } catch (e) {
+      setMsg({ text: e.message, severity: 'error' });
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const handleTest = async () => {
+    setTesting(true);
+    setMsg({ text: '', severity: 'info' });
+    try {
+      const token = await getToken();
+      await api.post('/telegram/test', {}, token);
+      setMsg({ text: 'Test message sent! Check your Telegram.', severity: 'success' });
+    } catch (e) {
+      setMsg({ text: e.message, severity: 'error' });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    if (!window.confirm('Disconnect Telegram? You will stop receiving alerts.')) return;
+    try {
+      const token = await getToken();
+      await api.delete('/telegram/', token);
+      setTgStatus({ connected: false });
+      setMsg({ text: 'Telegram disconnected.', severity: 'info' });
+    } catch (e) {
+      setMsg({ text: e.message, severity: 'error' });
+    }
+  };
 
   return (
-    <Box sx={{ maxWidth: 600 }}>
-      <Stack spacing={3}>
-        {/* Telegram */}
-        <Paper sx={{ p: 3, border: '1px solid #1a1a1a' }}>
-          <Typography variant="h6" gutterBottom>Telegram Alerts</Typography>
-          {telegramConnected ? (
-            <Alert severity="success" sx={{ '& .MuiAlert-message': { width: '100%' } }}>
-              <Stack direction="row" alignItems="center" justifyContent="space-between" flexWrap="wrap" gap={1}>
-                <span>Connected — chat ID ••••1234</span>
-                <Stack direction="row" spacing={1}>
-                  <Button size="small" variant="outlined" color="success" startIcon={<SendOutlinedIcon />}>
-                    Send Test
-                  </Button>
-                  <Button size="small" color="error">Disconnect</Button>
-                </Stack>
-              </Stack>
-            </Alert>
-          ) : (
-            <>
-              <Alert severity="info" sx={{ mb: 2 }}>
-                Open @EBPTrackerBot in Telegram, tap Start, and enter the code shown below.
-              </Alert>
-              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ sm: 'center' }}>
-                <Button variant="outlined" href="https://t.me/EBPTrackerBot" target="_blank" startIcon={<TelegramIcon />}>
-                  Open Bot
-                </Button>
-                <TextField
-                  placeholder="Enter 4-digit code"
-                  size="small"
-                  value={botCode}
-                  onChange={(e) => setBotCode(e.target.value)}
-                  inputProps={{ style: { fontFamily: 'monospace', letterSpacing: '0.2em' }, maxLength: 6 }}
-                  sx={{ flex: 1 }}
-                />
-                <Button variant="contained" disabled={botCode.length < 4}>Connect</Button>
-              </Stack>
-            </>
+    <Container maxWidth="md" sx={{ py: 3 }}>
+      <Typography variant="h5" fontWeight={700} sx={{ mb: 3 }}>Settings</Typography>
+
+      {/* Telegram Section */}
+      <Paper sx={{ p: 3, mb: 3 }}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
+          <Typography variant="h6">Telegram Alerts</Typography>
+          {tgStatus?.connected && (
+            <Chip label="Connected" size="small"
+              icon={<CheckCircleOutlined />}
+              sx={{ bgcolor: '#001a12', color: '#00c896',
+                border: '1px solid #00c896', borderRadius: '4px' }} />
           )}
-        </Paper>
+        </Stack>
+        <Divider sx={{ mb: 2 }} />
 
-        <Divider />
-
-        {/* Alert Mode */}
-        <Paper sx={{ p: 3, border: '1px solid #1a1a1a' }}>
-          <Typography variant="h6" gutterBottom>Alert Mode</Typography>
-          <FormControl>
-            <RadioGroup value={alertMode} onChange={(e) => setAlertMode(e.target.value)}>
-              {[
-                { value: 'aligned', label: 'Trend Aligned Only', desc: 'Alerts fire only when EBP matches TTrades HTF bias' },
-                { value: 'all',     label: 'All Engulfing Bars', desc: 'Alerts fire for every EBP regardless of trend' },
-              ].map((opt) => (
-                <FormControlLabel
-                  key={opt.value}
-                  value={opt.value}
-                  control={<Radio size="small" />}
-                  label={
-                    <Box sx={{ py: 0.5 }}>
-                      <Typography variant="body1" sx={{ color: '#e8e8f0' }}>{opt.label}</Typography>
-                      <Typography variant="caption">{opt.desc}</Typography>
-                    </Box>
-                  }
-                  sx={{ mb: 1, mr: 0, p: 1, borderRadius: 1, border: '1px solid', borderColor: alertMode === opt.value ? '#4488ff' : '#1a1a1a', bgcolor: alertMode === opt.value ? '#001033' : 'transparent', transition: 'all 0.15s' }}
-                />
-              ))}
-            </RadioGroup>
-          </FormControl>
-        </Paper>
-
-        {/* Timeframe Pairing — Wine only */}
-        <Paper sx={{ p: 3, border: '1px solid #1a1a1a', opacity: IS_WINE ? 1 : 0.4, pointerEvents: IS_WINE ? 'auto' : 'none' }}>
-          <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1.5 }}>
-            <Typography variant="h6">Custom TF Pairing</Typography>
-            <Box sx={{ px: 1, py: 0.25, bgcolor: '#110022', border: '1px solid #8855ff', borderRadius: '4px' }}>
-              <Typography variant="caption" sx={{ color: '#8855ff', fontSize: '0.65rem', fontWeight: 700 }}>🍷 WINE</Typography>
-            </Box>
-          </Stack>
-          <Typography variant="body2" sx={{ mb: 2 }}>Select HTF bias source for each alert timeframe</Typography>
-          {['M15', '1H', '4H', 'Daily'].map((tf) => (
-            <Stack key={tf} direction="row" alignItems="center" spacing={2} sx={{ mb: 1.5 }}>
-              <Typography variant="body2" sx={{ width: 48, color: '#e8e8f0' }}>{tf}</Typography>
-              <Select size="small" defaultValue="auto" sx={{ minWidth: 160 }}>
-                <MenuItem value="auto">Auto</MenuItem>
-                <MenuItem value="W">Weekly</MenuItem>
-                <MenuItem value="D">Daily</MenuItem>
-                <MenuItem value="4H">4H</MenuItem>
-              </Select>
+        {tgStatus?.connected ? (
+          <Stack spacing={2}>
+            <Alert severity="success" icon={<CheckCircleOutlined />}>
+              Connected — chat ID {tgStatus.chatIdMasked}
+            </Alert>
+            <Stack direction="row" spacing={1}>
+              <Button variant="outlined" size="small"
+                startIcon={testing ? <CircularProgress size={14} /> : <SendOutlined />}
+                onClick={handleTest} disabled={testing}>
+                {testing ? 'Sending...' : 'Send Test Alert'}
+              </Button>
+              <Button variant="text" color="error" size="small"
+                startIcon={<LinkOffOutlined />}
+                onClick={handleDisconnect}>
+                Disconnect
+              </Button>
             </Stack>
-          ))}
-        </Paper>
-      </Stack>
-    </Box>
-  )
+          </Stack>
+        ) : (
+          <Stack spacing={2}>
+            <Alert severity="info">
+              Connect your Telegram to receive EBP alerts directly in your chat.
+            </Alert>
+
+            {!linkCode ? (
+              <Stack spacing={1}>
+                <Typography variant="body2" color="text.secondary">Steps:</Typography>
+                <Typography variant="body2" color="text.secondary">
+                  1. Open <strong>@EbP_Tracker_bot</strong> on Telegram and tap Start
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  2. Click the button below to get your 4-digit code
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  3. Send the code to the bot
+                </Typography>
+                <Box sx={{ pt: 1 }}>
+                  <Button variant="contained" onClick={handleGetCode}
+                    disabled={generating}
+                    startIcon={generating ? <CircularProgress size={14} /> : null}>
+                    {generating ? 'Generating...' : 'Get Connection Code'}
+                  </Button>
+                </Box>
+              </Stack>
+            ) : (
+              <Stack spacing={2}>
+                <Box sx={{
+                  p: 3, bgcolor: '#0a0a0a',
+                  border: '1px solid #2a2a2a',
+                  borderRadius: 2, textAlign: 'center',
+                }}>
+                  <Typography variant="caption" color="text.secondary" display="block">
+                    Send this code to @EbP_Tracker_bot on Telegram
+                  </Typography>
+                  <Typography variant="h2" sx={{
+                    fontFamily: 'monospace', color: '#4488ff',
+                    letterSpacing: '0.3em', my: 1,
+                  }}>
+                    {linkCode}
+                  </Typography>
+                  <Stack direction="row" alignItems="center"
+                    justifyContent="center" spacing={1}>
+                    <CircularProgress size={14} />
+                    <Typography variant="caption" color="text.secondary">
+                      Waiting for verification...
+                    </Typography>
+                  </Stack>
+                </Box>
+                <Button variant="text" size="small"
+                  onClick={() => { setLinkCode(''); setPolling(false); }}>
+                  Cancel
+                </Button>
+              </Stack>
+            )}
+          </Stack>
+        )}
+
+        {msg.text && (
+          <Alert severity={msg.severity} sx={{ mt: 2 }}>
+            {msg.text}
+          </Alert>
+        )}
+      </Paper>
+
+      {/* Alert Mode Section */}
+      <Paper sx={{ p: 3 }}>
+        <Typography variant="h6" gutterBottom>Alert Mode</Typography>
+        <Divider sx={{ mb: 2 }} />
+        <FormControl>
+          <FormLabel sx={{ color: 'text.secondary', mb: 1, fontSize: '0.875rem' }}>
+            EBP Alert Direction
+          </FormLabel>
+          <RadioGroup defaultValue="aligned">
+            <FormControlLabel value="aligned" control={<Radio size="small" />}
+              label={
+                <Box>
+                  <Typography variant="body2">Trend Aligned Only</Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    Alerts fire only when EBP matches TTrades HTF bias
+                  </Typography>
+                </Box>
+              }
+            />
+            <FormControlLabel value="all" control={<Radio size="small" />}
+              label={
+                <Box>
+                  <Typography variant="body2">All Engulfing Bars</Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    Alerts fire for every EBP regardless of trend
+                  </Typography>
+                </Box>
+              }
+            />
+          </RadioGroup>
+        </FormControl>
+      </Paper>
+    </Container>
+  );
 }
