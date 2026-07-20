@@ -1,0 +1,10 @@
+{
+  "name": "@ebp-tracker/core",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": {
+    "./ttrades":  "./ttrades.js",
+    "./datafeed": "./datafeed.js",
+    "./telegram": "./telegram.js"
+  }
+}

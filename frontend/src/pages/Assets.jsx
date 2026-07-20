@@ -20,13 +20,15 @@ import DialogTitle from '@mui/material/DialogTitle'
 import DialogContent from '@mui/material/DialogContent'
 import DialogActions from '@mui/material/DialogActions'
 import Chip from '@mui/material/Chip'
+import Skeleton from '@mui/material/Skeleton'
 import InputAdornment from '@mui/material/InputAdornment'
+import CircularProgress from '@mui/material/CircularProgress'
 import SearchOutlinedIcon from '@mui/icons-material/SearchOutlined'
 import DeleteOutlineOutlinedIcon from '@mui/icons-material/DeleteOutlineOutlined'
 import AddOutlinedIcon from '@mui/icons-material/AddOutlined'
+import { useAssets } from '../hooks/useAssets.js'
 
 const ASSET_TYPES = ['Forex', 'Commodity', 'Index', 'NSE Asset', 'Crypto']
-const MAX_SLOTS = 3
 
 const TYPE_SX = {
   Forex:       { bgcolor: '#001033', color: '#4488ff', border: '1px solid #4488ff' },
@@ -36,30 +38,46 @@ const TYPE_SX = {
   Crypto:      { bgcolor: '#1a1100', color: '#f5a623', border: '1px solid #f5a623' },
 }
 
-const PLACEHOLDER_ASSETS = [
-  { id: 1, symbol: 'EURUSD', type: 'Forex' },
-  { id: 2, symbol: 'XAUUSD', type: 'Commodity' },
-  // placeholder only — real data from Worker
-]
+const ASSET_LIMIT_MAP = { free: 3, coffee: 5, beer: 15, wine: 30 }
 
 export default function Assets() {
-  const [search, setSearch] = useState('')
+  const { assets, loading, error, addAsset, removeAsset } = useAssets()
+  const [search, setSearch]       = useState('')
   const [modalOpen, setModalOpen] = useState(false)
   const [newSymbol, setNewSymbol] = useState('')
-  const [newType, setNewType] = useState('Forex')
-  const [assets] = useState(PLACEHOLDER_ASSETS)
+  const [newType, setNewType]     = useState('Forex')
+  const [adding, setAdding]       = useState(false)
+  const [addError, setAddError]   = useState(null)
 
-  const filtered = assets.filter((a) => a.symbol.toLowerCase().includes(search.toLowerCase()))
+  const maxSlots = ASSET_LIMIT_MAP['free']
   const slotsUsed = assets.length
-  const slotPct = (slotsUsed / MAX_SLOTS) * 100
+  const slotPct = (slotsUsed / maxSlots) * 100
+  const filtered = assets.filter((a) =>
+    (a.symbol || '').toLowerCase().includes(search.toLowerCase()) ||
+    (a.display_name || '').toLowerCase().includes(search.toLowerCase())
+  )
+
+  const handleAdd = async () => {
+    if (!newSymbol.trim()) return
+    setAdding(true)
+    setAddError(null)
+    try {
+      await addAsset({ symbol: newSymbol.trim(), display_name: newSymbol.trim(), asset_type: newType })
+      setModalOpen(false)
+      setNewSymbol('')
+      setNewType('Forex')
+    } catch (e) {
+      setAddError(e.message)
+    } finally {
+      setAdding(false)
+    }
+  }
 
   return (
     <Box sx={{ maxWidth: 600 }}>
-      {/* Search + Add */}
       <Stack direction="row" spacing={1.5} sx={{ mb: 2.5 }}>
         <TextField
-          fullWidth
-          size="small"
+          fullWidth size="small"
           placeholder="Search symbol e.g. EURUSD, RELIANCE, BTC"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
@@ -70,7 +88,7 @@ export default function Assets() {
         <Button
           variant="contained"
           startIcon={<AddOutlinedIcon />}
-          disabled={slotsUsed >= MAX_SLOTS}
+          disabled={slotsUsed >= maxSlots || loading}
           onClick={() => setModalOpen(true)}
           sx={{ whiteSpace: 'nowrap' }}
         >
@@ -78,24 +96,27 @@ export default function Assets() {
         </Button>
       </Stack>
 
-      {/* Slot usage */}
       <Paper sx={{ p: 2, mb: 2.5, border: '1px solid #1a1a1a' }}>
         <Stack direction="row" justifyContent="space-between" sx={{ mb: 1 }}>
           <Typography variant="body2">Slot usage</Typography>
           <Typography variant="caption" className="tabular-nums" sx={{ color: '#e8e8f0' }}>
-            {slotsUsed} / {MAX_SLOTS} slots used
+            {slotsUsed} / {maxSlots} slots used
           </Typography>
         </Stack>
         <LinearProgress variant="determinate" value={Math.min(slotPct, 100)} sx={{ height: 4, borderRadius: 2 }} />
         <Typography variant="caption" sx={{ mt: 1, display: 'block' }}>Upgrade your plan to track more assets.</Typography>
       </Paper>
 
-      {slotsUsed >= MAX_SLOTS && (
+      {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+      {slotsUsed >= maxSlots && (
         <Alert severity="warning" sx={{ mb: 2 }}>Slot limit reached. Upgrade to add more assets.</Alert>
       )}
 
-      {/* Asset list */}
-      {filtered.length === 0 ? (
+      {loading ? (
+        <Stack spacing={1}>
+          {[1,2,3].map(i => <Skeleton key={i} variant="rounded" height={56} sx={{ bgcolor: '#0d0d0d' }} />)}
+        </Stack>
+      ) : filtered.length === 0 ? (
         <Typography variant="body2" sx={{ textAlign: 'center', py: 4 }}>No assets found.</Typography>
       ) : (
         <Paper sx={{ border: '1px solid #1a1a1a' }}>
@@ -106,7 +127,7 @@ export default function Assets() {
                 divider={idx < filtered.length - 1}
                 sx={{ px: 2, py: 1.5 }}
                 secondaryAction={
-                  <IconButton size="small" edge="end" sx={{ '&:hover': { color: '#ff4466' } }}>
+                  <IconButton size="small" edge="end" onClick={() => removeAsset(asset.id)} sx={{ '&:hover': { color: '#ff4466' } }}>
                     <DeleteOutlineOutlinedIcon fontSize="small" />
                   </IconButton>
                 }
@@ -117,7 +138,11 @@ export default function Assets() {
                       <Typography variant="body1" sx={{ fontWeight: 600, color: '#e8e8f0' }} className="tabular-nums">
                         {asset.symbol}
                       </Typography>
-                      <Chip label={asset.type} size="small" sx={{ borderRadius: '4px', fontWeight: 600, fontSize: '0.7rem', height: 20, ...TYPE_SX[asset.type] }} />
+                      <Chip
+                        label={asset.asset_type}
+                        size="small"
+                        sx={{ borderRadius: '4px', fontWeight: 600, fontSize: '0.7rem', height: 20, ...(TYPE_SX[asset.asset_type] || TYPE_SX['NSE Asset']) }}
+                      />
                     </Stack>
                   }
                 />
@@ -127,11 +152,11 @@ export default function Assets() {
         </Paper>
       )}
 
-      {/* Add Asset Dialog */}
-      <Dialog open={modalOpen} onClose={() => setModalOpen(false)} fullWidth maxWidth="xs">
+      <Dialog open={modalOpen} onClose={() => !adding && setModalOpen(false)} fullWidth maxWidth="xs">
         <DialogTitle>Add Asset</DialogTitle>
         <DialogContent>
           <Stack spacing={2.5} sx={{ mt: 1 }}>
+            {addError && <Alert severity="error">{addError}</Alert>}
             <TextField
               label="Symbol"
               fullWidth
@@ -139,18 +164,26 @@ export default function Assets() {
               onChange={(e) => setNewSymbol(e.target.value.toUpperCase())}
               placeholder="e.g. EURUSD, RELIANCE, BTCUSDT"
               inputProps={{ style: { fontFamily: 'monospace' } }}
+              disabled={adding}
             />
             <FormControl fullWidth size="small">
               <InputLabel>Asset Type</InputLabel>
-              <Select value={newType} label="Asset Type" onChange={(e) => setNewType(e.target.value)}>
+              <Select value={newType} label="Asset Type" onChange={(e) => setNewType(e.target.value)} disabled={adding}>
                 {ASSET_TYPES.map((t) => <MenuItem key={t} value={t}>{t}</MenuItem>)}
               </Select>
             </FormControl>
           </Stack>
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button variant="text" onClick={() => setModalOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={() => setModalOpen(false)} disabled={!newSymbol}>Add</Button>
+          <Button variant="text" onClick={() => setModalOpen(false)} disabled={adding}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={handleAdd}
+            disabled={!newSymbol.trim() || adding}
+            startIcon={adding ? <CircularProgress size={14} color="inherit" /> : null}
+          >
+            {adding ? 'Validating…' : 'Add'}
+          </Button>
         </DialogActions>
       </Dialog>
     </Box>

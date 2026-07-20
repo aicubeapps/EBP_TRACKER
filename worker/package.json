@@ -8,9 +8,10 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "hono": "latest"
+    "@clerk/backend": "^1.21.0",
+    "hono": "^4.6.0"
   },
   "devDependencies": {
-    "wrangler": "latest"
+    "wrangler": "^3.99.0"
   }
 }

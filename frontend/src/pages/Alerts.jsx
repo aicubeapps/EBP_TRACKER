@@ -1,17 +1,15 @@
+import { useState, useEffect, useCallback } from 'react'
 import Box from '@mui/material/Box'
 import Typography from '@mui/material/Typography'
 import Chip from '@mui/material/Chip'
+import Alert from '@mui/material/Alert'
 import CheckCircleOutlinedIcon from '@mui/icons-material/CheckCircleOutlined'
 import WarningAmberOutlinedIcon from '@mui/icons-material/WarningAmberOutlined'
 import NotificationsNoneOutlinedIcon from '@mui/icons-material/NotificationsNoneOutlined'
 import Paper from '@mui/material/Paper'
 import { DataGrid } from '@mui/x-data-grid'
-
-const PLACEHOLDER_ALERTS = [
-  { id: 1, firedAt: '2026-07-20 14:30', symbol: 'EURUSD',   timeframe: '1H', direction: 'bull', trendAligned: true,  candleTime: '2026-07-20 14:00' },
-  { id: 2, firedAt: '2026-07-20 10:15', symbol: 'XAUUSD',   timeframe: '4H', direction: 'bear', trendAligned: false, candleTime: '2026-07-20 08:00' },
-  { id: 3, firedAt: '2026-07-19 21:00', symbol: 'RELIANCE', timeframe: 'D',  direction: 'bull', trendAligned: true,  candleTime: '2026-07-19 00:00' },
-]
+import { useAuth } from '@clerk/clerk-react'
+import { api } from '../lib/api.js'
 
 function NoRowsOverlay() {
   return (
@@ -22,10 +20,15 @@ function NoRowsOverlay() {
   )
 }
 
+function fmtTime(ms) {
+  if (!ms) return '—'
+  return new Date(ms).toISOString().replace('T', ' ').slice(0, 16)
+}
+
 const columns = [
   {
-    field: 'firedAt', headerName: 'Time', width: 160,
-    renderCell: (p) => <Typography variant="caption" sx={{ fontFamily: 'monospace', color: '#8888a8' }}>{p.value}</Typography>,
+    field: 'fired_at', headerName: 'Time', width: 160,
+    renderCell: (p) => <Typography variant="caption" sx={{ fontFamily: 'monospace', color: '#8888a8' }}>{fmtTime(p.value)}</Typography>,
   },
   {
     field: 'symbol', headerName: 'Symbol', width: 120,
@@ -53,29 +56,57 @@ const columns = [
     ),
   },
   {
-    field: 'trendAligned', headerName: 'Aligned', width: 90,
-    renderCell: (p) => p.value
-      ? <CheckCircleOutlinedIcon sx={{ color: '#00c896', fontSize: 18 }} />
-      : <WarningAmberOutlinedIcon sx={{ color: '#f5a623', fontSize: 18 }} />,
+    field: 'trend_bias', headerName: 'HTF Bias', width: 110,
+    renderCell: (p) => {
+      const aligned = p.row.direction === 'bull' ? p.value === 'bullish' : p.value === 'bearish'
+      return aligned
+        ? <CheckCircleOutlinedIcon sx={{ color: '#00c896', fontSize: 18 }} />
+        : <WarningAmberOutlinedIcon sx={{ color: '#f5a623', fontSize: 18 }} />
+    },
   },
   {
-    field: 'candleTime', headerName: 'Candle', width: 160,
-    renderCell: (p) => <Typography variant="caption" sx={{ fontFamily: 'monospace', color: '#55556a' }}>{p.value}</Typography>,
+    field: 'candle_time', headerName: 'Candle', width: 160,
+    renderCell: (p) => <Typography variant="caption" sx={{ fontFamily: 'monospace', color: '#55556a' }}>{fmtTime(p.value)}</Typography>,
   },
 ]
 
 export default function Alerts() {
+  const { getToken } = useAuth()
+  const [rows, setRows]     = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError]   = useState(null)
+
+  const fetchAlerts = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const token = await getToken()
+      const data  = await api.get('/alerts/history?limit=200', token)
+      setRows(data)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }, [getToken])
+
+  useEffect(() => { fetchAlerts() }, [fetchAlerts])
+
   return (
-    <Paper sx={{ border: '1px solid #1a1a1a', height: 600 }}>
-      <DataGrid
-        rows={PLACEHOLDER_ALERTS}
-        columns={columns}
-        initialState={{ pagination: { paginationModel: { pageSize: 25 } } }}
-        pageSizeOptions={[25, 50, 100]}
-        disableRowSelectionOnClick
-        slots={{ noRowsOverlay: NoRowsOverlay }}
-        sx={{ border: 'none', height: '100%', '--DataGrid-overlayHeight': '300px' }}
-      />
-    </Paper>
+    <Box>
+      {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+      <Paper sx={{ border: '1px solid #1a1a1a', height: 600 }}>
+        <DataGrid
+          rows={rows}
+          columns={columns}
+          loading={loading}
+          initialState={{ pagination: { paginationModel: { pageSize: 25 } } }}
+          pageSizeOptions={[25, 50, 100]}
+          disableRowSelectionOnClick
+          slots={{ noRowsOverlay: NoRowsOverlay }}
+          sx={{ border: 'none', height: '100%', '--DataGrid-overlayHeight': '300px' }}
+        />
+      </Paper>
+    </Box>
   )
 }
