@@ -24,7 +24,7 @@ const NAV_ITEMS = [
   { to: '/assets',    label: 'Assets',    Icon: ShowChartOutlinedIcon },
   { to: '/alerts',    label: 'Alerts',    Icon: NotificationsOutlinedIcon },
   { to: '/settings',  label: 'Settings',  Icon: SettingsOutlinedIcon },
-  { to: '/upgrade',   label: 'Upgrade',   Icon: BoltOutlinedIcon },
+  { to: '/upgrade',   label: 'Upgrade',   Icon: BoltOutlinedIcon, highlight: true },
   { to: '/admin',     label: 'Admin',     Icon: AdminPanelSettingsOutlinedIcon },
 ]
 
@@ -65,21 +65,23 @@ export default function SidebarContent({ mobile = false, onClose }) {
 
       {/* Nav */}
       <List sx={{ flex: 1, py: 1, px: collapsed && !mobile ? 0 : 0 }}>
-        {NAV_ITEMS.map(({ to, label, Icon }) => {
+        {NAV_ITEMS.map(({ to, label, Icon, highlight }) => {
           const active = pathname === to
+          const iconColor = active ? '#4488ff' : highlight ? '#f5a623' : '#8888a8'
+          const textColor = active ? '#e8e8f0' : highlight ? '#f5a623' : '#8888a8'
           const btn = (
             <ListItemButton
               selected={active}
               onClick={() => handleNav(to)}
               sx={{ justifyContent: collapsed && !mobile ? 'center' : 'flex-start', px: collapsed && !mobile ? 0 : undefined, minHeight: 40 }}
             >
-              <ListItemIcon sx={{ minWidth: collapsed && !mobile ? 0 : 36, justifyContent: 'center', color: active ? '#4488ff' : '#8888a8' }}>
+              <ListItemIcon sx={{ minWidth: collapsed && !mobile ? 0 : 36, justifyContent: 'center', color: iconColor }}>
                 <Icon fontSize="small" />
               </ListItemIcon>
               {(!collapsed || mobile) && (
                 <ListItemText
                   primary={label}
-                  primaryTypographyProps={{ fontSize: '0.875rem', fontWeight: active ? 600 : 400, color: active ? '#e8e8f0' : '#8888a8' }}
+                  primaryTypographyProps={{ fontSize: '0.875rem', fontWeight: active ? 600 : 400, color: textColor }}
                 />
               )}
             </ListItemButton>

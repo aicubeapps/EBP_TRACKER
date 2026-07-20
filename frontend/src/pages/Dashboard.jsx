@@ -1,8 +1,9 @@
 import { useNavigate } from 'react-router-dom';
 import {
   Box, Container, Typography, Card, CardContent,
-  Stack, Chip, Alert, Skeleton, Button, Grid
+  Stack, Chip, Alert, Skeleton, Button, Grid, Divider
 } from '@mui/material';
+import BoltOutlinedIcon from '@mui/icons-material/BoltOutlined';
 import { AddOutlined } from '@mui/icons-material';
 import { useAssets } from '../hooks/useAssets';
 import { useUser } from '../hooks/useUser';
@@ -167,11 +168,32 @@ export default function Dashboard() {
       )}
 
       {user?.active === 0 && (
-        <Alert severity="error" sx={{ mb: 2 }}>
-          Account expired.
-          <Button size="small" sx={{ ml: 1 }}
-            onClick={() => navigate('/upgrade')}>Renew Now</Button>
-        </Alert>
+        <Box sx={{
+          position: 'fixed', inset: 0, zIndex: 1300,
+          bgcolor: 'rgba(0,0,0,0.85)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          backdropFilter: 'blur(4px)',
+        }}>
+          <Card sx={{ maxWidth: 400, width: '90%', textAlign: 'center', p: 1 }}>
+            <CardContent>
+              <BoltOutlinedIcon sx={{ fontSize: 48, color: '#f5a623', mb: 1 }} />
+              <Typography variant="h5" fontWeight={700} sx={{ mb: 1 }}>
+                Plan Expired
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                Your EBP Tracker subscription has expired. Renew to continue
+                receiving alerts and monitoring your assets.
+              </Typography>
+              <Divider sx={{ mb: 2 }} />
+              <Button variant="contained" size="large" fullWidth
+                startIcon={<BoltOutlinedIcon />}
+                onClick={() => navigate('/upgrade')}
+                sx={{ bgcolor: '#f5a623', '&:hover': { bgcolor: '#d4891f' } }}>
+                Renew Plan
+              </Button>
+            </CardContent>
+          </Card>
+        </Box>
       )}
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
