@@ -1,4 +1,4 @@
-const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'http://localhost:8787';
+const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'https://ebp-tracker-worker.aicube-apps.workers.dev';
 
 async function request(path, options = {}, token = null) {
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
