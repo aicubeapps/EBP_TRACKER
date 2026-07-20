@@ -5,12 +5,13 @@ import Modal from '../components/ui/Modal.jsx'
 import EmptyState from '../components/ui/EmptyState.jsx'
 import Badge from '../components/ui/Badge.jsx'
 
-const ASSET_TYPES = ['Forex', 'Commodity', 'Index', 'Indian Stock', 'Crypto']
+const ASSET_TYPES = ['Forex', 'Commodity', 'Index', 'NSE Asset', 'Crypto']
 const MAX_SLOTS = 3
 
 const PLACEHOLDER_ASSETS = [
   { id: 1, symbol: 'EURUSD', type: 'Forex' },
   { id: 2, symbol: 'XAUUSD', type: 'Commodity' },
+  // placeholder only — real data from Worker
 ]
 
 export default function Assets() {
@@ -40,7 +41,7 @@ export default function Assets() {
             className="w-full pl-9 pr-4 py-2 bg-bg-card border border-border rounded-lg text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue"
           />
         </div>
-        <Button onClick={() => setModalOpen(true)} disabled={slotsUsed >= MAX_SLOTS}>
+        <Button onClick={() => setModalOpen(true)} disabled={slotsUsed >= MAX_SLOTS} className="w-full lg:w-auto">
           <Plus size={14} />
           Add Asset
         </Button>

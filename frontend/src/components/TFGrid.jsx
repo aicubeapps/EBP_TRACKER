@@ -6,15 +6,26 @@ const dotColors = {
   none: 'bg-text-muted',
 }
 
+const labelColors = {
+  bull: 'text-bull',
+  bear: 'text-bear',
+  none: 'text-text-muted',
+}
+
 export default function TFGrid({ data = {} }) {
   return (
-    <div className="flex items-center gap-1">
+    <div className="flex items-stretch gap-1.5">
       {TIMEFRAMES.map((tf) => {
         const signal = data[tf] || 'none'
         return (
-          <div key={tf} className="flex flex-col items-center gap-1">
-            <span className={`w-2.5 h-2.5 rounded-full ${dotColors[signal]}`} />
-            <span className="text-[9px] text-text-muted font-medium">{tf}</span>
+          <div
+            key={tf}
+            className="flex flex-col items-center justify-center gap-1.5 flex-1 px-1 py-2 bg-bg-elevated border border-border rounded-md min-w-0"
+          >
+            <span className={`text-[10px] font-semibold uppercase tracking-wide ${labelColors[signal]}`}>
+              {tf}
+            </span>
+            <span className={`w-2 h-2 rounded-full shrink-0 ${dotColors[signal]}`} />
           </div>
         )
       })}

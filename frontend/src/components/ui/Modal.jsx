@@ -11,9 +11,10 @@ export default function Modal({ isOpen, onClose, title, children }) {
   if (!isOpen) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-50 flex items-end lg:items-center justify-center">
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-bg-card border border-border rounded-lg shadow-2xl w-full max-w-md">
+      {/* Mobile: full-screen sheet from bottom; Desktop: centered card */}
+      <div className="relative bg-bg-card border border-border shadow-2xl z-10 w-full rounded-t-xl lg:rounded-lg lg:max-w-md lg:mx-auto">
         <div className="flex items-center justify-between px-5 py-4 border-b border-border">
           <h2 className="text-base font-semibold text-text-primary">{title}</h2>
           <button
