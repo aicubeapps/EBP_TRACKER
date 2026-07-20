@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useAuth } from '@clerk/clerk-react'
 import Box from '@mui/material/Box'
 import Stack from '@mui/material/Stack'
@@ -23,31 +23,33 @@ const PLAN_SX = {
 }
 
 export default function Admin() {
-  const { getToken } = useAuth()
-  const [tab, setTab]           = useState(0)
-  const [isAdmin, setIsAdmin]   = useState(null)
-  const [users, setUsers]       = useState([])
-  const [payments, setPayments] = useState([])
-  const [tokens, setTokens]     = useState([])
-  const [loading, setLoading]   = useState(true)
+  const { getToken }              = useAuth()
+  const [tab, setTab]             = useState(0)
+  const [isAdmin, setIsAdmin]     = useState(null)
+  const [users, setUsers]         = useState([])
+  const [payments, setPayments]   = useState([])
+  const [tokens, setTokens]       = useState([])
+  const [loading, setLoading]     = useState(true)
 
   useEffect(() => {
     (async () => {
       try {
         const token = await getToken()
-        const me = await api.get('/user/me', token)
-        setIsAdmin(me.is_admin === 1)
-        if (me.is_admin === 1) {
+        const me    = await api.get('/user/me', token)
+        const admin = me.is_admin === 1
+        setIsAdmin(admin)
+        if (admin) {
           const [u, p, t] = await Promise.all([
-            api.get('/admin/users', token),
+            api.get('/admin/users',    token),
             api.get('/admin/payments', token),
-            api.get('/admin/tokens', token),
+            api.get('/admin/tokens',   token),
           ])
           setUsers(Array.isArray(u) ? u : [])
           setPayments(Array.isArray(p) ? p : [])
           setTokens(Array.isArray(t) ? t : [])
         }
       } catch (e) {
+        console.error('Admin load error:', e)
         setIsAdmin(false)
       } finally {
         setLoading(false)
@@ -72,13 +74,13 @@ export default function Admin() {
   const handleGenerateToken = async () => {
     const token = await getToken()
     const data  = await api.post('/admin/invite', {}, token)
-    alert(`New invite token: ${data.url}`)
+    alert(`New invite URL:\n${data.url}`)
     const t = await api.get('/admin/tokens', token)
     setTokens(Array.isArray(t) ? t : [])
   }
 
   const handleExpire = async (userId) => {
-    if (!confirm('Expire this user account?')) return
+    if (!window.confirm('Expire this user account?')) return
     const token = await getToken()
     await api.post(`/admin/expire/${userId}`, {}, token)
     const u = await api.get('/admin/users', token)
@@ -87,25 +89,31 @@ export default function Admin() {
 
   if (loading) {
     return (
-      <Box sx={{ display:'flex', alignItems:'center', justifyContent:'center', py:10 }}>
-        <Typography variant="body2" color="text.secondary">Loading...</Typography>
+      <Box sx={{ display: 'flex', alignItems: 'center',
+        justifyContent: 'center', py: 10 }}>
+        <Typography variant="body2" color="text.secondary">
+          Loading...
+        </Typography>
       </Box>
     )
   }
 
   if (!isAdmin) {
     return (
-      <Box sx={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', py:10 }}>
-        <BlockOutlinedIcon sx={{ fontSize:48, color:'#ff4466', mb:2 }} />
-        <Typography variant="h4" sx={{ mb:0.5 }}>Access Denied</Typography>
-        <Typography variant="body2">This panel is restricted to administrators.</Typography>
+      <Box sx={{ display: 'flex', flexDirection: 'column',
+        alignItems: 'center', justifyContent: 'center', py: 10 }}>
+        <BlockOutlinedIcon sx={{ fontSize: 48, color: '#ff4466', mb: 2 }} />
+        <Typography variant="h4" sx={{ mb: 0.5 }}>Access Denied</Typography>
+        <Typography variant="body2">
+          This panel is restricted to administrators.
+        </Typography>
       </Box>
     )
   }
 
   return (
     <Box>
-      <Box sx={{ borderBottom:'1px solid #1a1a1a', mb:3 }}>
+      <Box sx={{ borderBottom: '1px solid #1a1a1a', mb: 3 }}>
         <Tabs value={tab} onChange={(_, v) => setTab(v)}>
           <Tab label="Users" />
           <Tab label="Payments" />
@@ -113,29 +121,48 @@ export default function Admin() {
         </Tabs>
       </Box>
 
+      {/* Users Tab */}
       {tab === 0 && (
         <Table>
           <THead>
-            <TR><TH>Email</TH><TH>Plan</TH><TH>Expiry</TH><TH>Assets</TH><TH>Alerts</TH><TH>Telegram</TH><TH>Actions</TH></TR>
+            <TR>
+              <TH>Email</TH><TH>Plan</TH><TH>Expiry</TH>
+              <TH>Assets</TH><TH>Alerts</TH><TH>Telegram</TH><TH>Actions</TH>
+            </TR>
           </THead>
           <TBody>
-            {users.map(u => (
-              <TR key={u.id}>
-                <TD sx={{ color:'#8888a8' }}>{u.email || u.id.slice(0,12)}</TD>
-                <TD>
-                  <Chip label={u.plan?.toUpperCase() ?? 'FREE'} size="small"
-                    sx={{ borderRadius:'4px', fontWeight:700, fontSize:'0.7rem', height:20,
-                      ...(PLAN_SX[u.plan?.toUpperCase()] ?? PLAN_SX.FREE) }} />
+            {users.length === 0 ? (
+              <TR>
+                <TD colSpan={7} sx={{ textAlign: 'center', color: '#55556a' }}>
+                  No users yet
                 </TD>
-                <TD sx={{ color:'#55556a' }} className="tabular-nums">
+              </TR>
+            ) : users.map(u => (
+              <TR key={u.id}>
+                <TD sx={{ color: '#8888a8' }}>
+                  {u.email || u.id.slice(0, 16) + '...'}
+                </TD>
+                <TD>
+                  <Chip
+                    label={u.plan?.toUpperCase() ?? 'FREE'}
+                    size="small"
+                    sx={{
+                      borderRadius: '4px', fontWeight: 700,
+                      fontSize: '0.7rem', height: 20,
+                      ...(PLAN_SX[u.plan?.toUpperCase()] ?? PLAN_SX.FREE),
+                    }}
+                  />
+                </TD>
+                <TD sx={{ color: '#55556a' }} className="tabular-nums">
                   {new Date(u.expires_at).toLocaleDateString()}
                 </TD>
                 <TD className="tabular-nums">{u.asset_count}</TD>
                 <TD className="tabular-nums">{u.alert_count}</TD>
                 <TD>
                   {u.telegram_verified
-                    ? <CheckCircleOutlinedIcon sx={{ color:'#00c896', fontSize:16 }} />
-                    : <CloseOutlinedIcon sx={{ color:'#55556a', fontSize:16 }} />}
+                    ? <CheckCircleOutlinedIcon sx={{ color: '#00c896', fontSize: 16 }} />
+                    : <CloseOutlinedIcon sx={{ color: '#55556a', fontSize: 16 }} />
+                  }
                 </TD>
                 <TD>
                   <Button variant="outlined" color="error" size="small"
@@ -150,21 +177,31 @@ export default function Admin() {
         </Table>
       )}
 
+      {/* Payments Tab */}
       {tab === 1 && (
         <Table>
           <THead>
-            <TR><TH>Email</TH><TH>Tier</TH><TH>Amount</TH><TH>UTR Ref</TH><TH>Submitted</TH><TH>Actions</TH></TR>
+            <TR>
+              <TH>Email</TH><TH>Tier</TH><TH>Amount</TH>
+              <TH>UTR Ref</TH><TH>Submitted</TH><TH>Actions</TH>
+            </TR>
           </THead>
           <TBody>
             {payments.length === 0 ? (
-              <TR><TD colSpan={6} sx={{ textAlign:'center', color:'#55556a' }}>No payments yet</TD></TR>
+              <TR>
+                <TD colSpan={6} sx={{ textAlign: 'center', color: '#55556a' }}>
+                  No payments yet
+                </TD>
+              </TR>
             ) : payments.map(p => (
               <TR key={p.id}>
-                <TD sx={{ color:'#8888a8' }}>{p.email}</TD>
+                <TD sx={{ color: '#8888a8' }}>{p.email}</TD>
                 <TD>{p.tier}</TD>
                 <TD className="tabular-nums">₹{p.amount_inr}</TD>
-                <TD sx={{ fontFamily:'monospace', color:'#55556a' }}>{p.upi_ref || '—'}</TD>
-                <TD sx={{ color:'#55556a' }}>
+                <TD sx={{ fontFamily: 'monospace', color: '#55556a' }}>
+                  {p.upi_ref || '—'}
+                </TD>
+                <TD sx={{ color: '#55556a' }}>
                   {new Date(p.submitted_at).toLocaleDateString()}
                 </TD>
                 <TD>
@@ -182,11 +219,16 @@ export default function Admin() {
                       </Button>
                     </Stack>
                   ) : (
-                    <Chip label={p.status.toUpperCase()} size="small"
-                      sx={{ borderRadius:'4px', fontWeight:600, fontSize:'0.7rem', height:20,
-                        bgcolor: p.status==='approved' ? '#001a12' : '#1a0008',
-                        color:   p.status==='approved' ? '#00c896' : '#ff4466',
-                        border:  `1px solid ${p.status==='approved' ? '#00c896' : '#ff4466'}` }} />
+                    <Chip
+                      label={p.status.toUpperCase()} size="small"
+                      sx={{
+                        borderRadius: '4px', fontWeight: 600,
+                        fontSize: '0.7rem', height: 20,
+                        bgcolor: p.status === 'approved' ? '#001a12' : '#1a0008',
+                        color:   p.status === 'approved' ? '#00c896' : '#ff4466',
+                        border:  `1px solid ${p.status === 'approved' ? '#00c896' : '#ff4466'}`,
+                      }}
+                    />
                   )}
                 </TD>
               </TR>
@@ -195,9 +237,10 @@ export default function Admin() {
         </Table>
       )}
 
+      {/* Invite Tokens Tab */}
       {tab === 2 && (
         <Box>
-          <Stack direction="row" justifyContent="flex-end" sx={{ mb:2 }}>
+          <Stack direction="row" justifyContent="flex-end" sx={{ mb: 2 }}>
             <Button variant="contained" startIcon={<AddOutlinedIcon />}
               onClick={handleGenerateToken}>
               Generate Token
@@ -205,24 +248,37 @@ export default function Admin() {
           </Stack>
           <Table>
             <THead>
-              <TR><TH>Token</TH><TH>Status</TH><TH>Used By</TH><TH>Created</TH></TR>
+              <TR>
+                <TH>Token</TH><TH>Status</TH><TH>Used By</TH><TH>Created</TH>
+              </TR>
             </THead>
             <TBody>
               {tokens.length === 0 ? (
-                <TR><TD colSpan={4} sx={{ textAlign:'center', color:'#55556a' }}>No tokens yet</TD></TR>
+                <TR>
+                  <TD colSpan={4} sx={{ textAlign: 'center', color: '#55556a' }}>
+                    No tokens yet
+                  </TD>
+                </TR>
               ) : tokens.map(t => (
                 <TR key={t.token}>
-                  <TD sx={{ fontFamily:'monospace', color:'#4488ff' }}>{t.token}</TD>
+                  <TD sx={{ fontFamily: 'monospace', color: '#4488ff' }}>
+                    {t.token}
+                  </TD>
                   <TD>
                     <Chip
                       label={t.used_by ? 'Used' : 'Unused'} size="small"
-                      sx={{ borderRadius:'4px', fontWeight:600, fontSize:'0.7rem', height:20,
+                      sx={{
+                        borderRadius: '4px', fontWeight: 600,
+                        fontSize: '0.7rem', height: 20,
                         ...(t.used_by
-                          ? { bgcolor:'#0d0d0d', color:'#55556a', border:'1px solid #2a2a2a' }
-                          : { bgcolor:'#001a12', color:'#00c896', border:'1px solid #00c896' }) }} />
+                          ? { bgcolor: '#0d0d0d', color: '#55556a', border: '1px solid #2a2a2a' }
+                          : { bgcolor: '#001a12', color: '#00c896', border: '1px solid #00c896' }
+                        ),
+                      }}
+                    />
                   </TD>
-                  <TD sx={{ color:'#55556a' }}>{t.used_by || '—'}</TD>
-                  <TD sx={{ color:'#55556a' }}>
+                  <TD sx={{ color: '#55556a' }}>{t.used_by || '—'}</TD>
+                  <TD sx={{ color: '#55556a' }}>
                     {new Date(t.created_at).toLocaleDateString()}
                   </TD>
                 </TR>
