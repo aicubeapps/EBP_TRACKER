@@ -3,13 +3,17 @@ import { useAuth } from '@clerk/clerk-react';
 import api from '../lib/api';
 
 export function useUser() {
-  const { getToken, isSignedIn } = useAuth();
+  const { getToken, isLoaded, isSignedIn } = useAuth();
   const [user, setUser]       = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState(null);
 
   useEffect(() => {
-    if (!isSignedIn) { setLoading(false); return; }
+    if (!isLoaded) return;
+    if (!isSignedIn) {
+      setLoading(false);
+      return;
+    }
     (async () => {
       try {
         const token = await getToken();
@@ -21,7 +25,7 @@ export function useUser() {
         setLoading(false);
       }
     })();
-  }, [isSignedIn]);
+  }, [isLoaded, isSignedIn, getToken]);
 
   return { user, loading, error };
 }
