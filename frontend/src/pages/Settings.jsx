@@ -3,7 +3,7 @@ import { useAuth } from '@clerk/clerk-react';
 import {
   Container, Typography, Stack, Paper, Button, Alert,
   Divider, RadioGroup, FormControlLabel, Radio,
-  FormControl, FormLabel, CircularProgress, Box, Chip
+  FormControl, FormLabel, CircularProgress, Box, Chip, Switch
 } from '@mui/material';
 import { useUser } from '../hooks/useUser';
 import {
@@ -16,12 +16,21 @@ import api from '../lib/api';
 export default function Settings() {
   const { getToken } = useAuth();
   const { user }     = useUser();
+
+  // Telegram state
   const [tgStatus, setTgStatus]     = useState(null);
   const [linkCode, setLinkCode]     = useState('');
   const [polling, setPolling]       = useState(false);
   const [testing, setTesting]       = useState(false);
   const [generating, setGenerating] = useState(false);
   const [msg, setMsg]               = useState({ text: '', severity: 'info' });
+
+  // Sweep state
+  const [sweepEnabled, setSweepEnabled] = useState(false);
+  const [sweepTFs, setSweepTFs]         = useState(['4H', '1H', 'M15']);
+  const [sweepMode, setSweepMode]       = useState('aligned');
+  const [savingSweep, setSavingSweep]   = useState(false);
+  const [sweepSaveMsg, setSweepSaveMsg] = useState('');
 
   const fetchTgStatus = async () => {
     try {
@@ -36,7 +45,6 @@ export default function Settings() {
     fetchTgStatus();
   }, []);
 
-  // Poll for verification every 3 seconds after code is shown
   useEffect(() => {
     if (!polling || !linkCode) return;
     const interval = setInterval(async () => {
@@ -59,7 +67,7 @@ export default function Settings() {
     setMsg({ text: '', severity: 'info' });
     try {
       const token = await getToken();
-      const data  = await api.post('/user/telegram/initlink', {}, token);
+      const data  = await api.post('/telegram/initlink', {}, token);
       setLinkCode(data.code);
       setPolling(true);
     } catch (e) {
@@ -92,6 +100,34 @@ export default function Settings() {
       setMsg({ text: 'Telegram disconnected.', severity: 'info' });
     } catch (e) {
       setMsg({ text: e.message, severity: 'error' });
+    }
+  };
+
+  const toggleSweepTF = (tf) => {
+    setSweepTFs(prev =>
+      prev.includes(tf) ? prev.filter(t => t !== tf) : [...prev, tf]
+    );
+  };
+
+  const handleSaveSweepDefaults = async () => {
+    setSavingSweep(true);
+    setSweepSaveMsg('');
+    try {
+      const token  = await getToken();
+      const assets = await api.get('/user/assets', token);
+      await Promise.all(assets.map(asset =>
+        api.patch(`/user/assets/${asset.id}/sweep`, {
+          enabled:    sweepEnabled,
+          timeframes: sweepTFs.join(','),
+          alertMode:  sweepMode,
+        }, token)
+      ));
+      setSweepSaveMsg('Sweep defaults saved to all assets.');
+      setTimeout(() => setSweepSaveMsg(''), 3000);
+    } catch (e) {
+      setSweepSaveMsg('Error: ' + e.message);
+    } finally {
+      setSavingSweep(false);
     }
   };
 
@@ -194,6 +230,121 @@ export default function Settings() {
             {msg.text}
           </Alert>
         )}
+      </Paper>
+
+      {/* Sweep Alerts — Global Settings */}
+      <Paper sx={{ p: 3, mb: 3 }}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
+          <Typography variant="h6">Sweep Alerts</Typography>
+          <Chip
+            label="GLOBAL DEFAULT"
+            size="small"
+            sx={{ borderRadius: '4px', fontSize: '0.65rem', bgcolor: '#1a1a2a', color: '#8888a8' }}
+          />
+        </Stack>
+        <Divider sx={{ mb: 2 }} />
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          Default sweep settings applied to all assets. Wine subscribers can override per asset.
+        </Typography>
+
+        <Stack spacing={2}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center">
+            <Box>
+              <Typography variant="body2">Enable Sweep Alerts</Typography>
+              <Typography variant="caption" color="text.secondary">
+                Detect liquidity sweeps — wick beyond prior high/low, close back inside
+              </Typography>
+            </Box>
+            <Switch
+              checked={sweepEnabled}
+              onChange={e => setSweepEnabled(e.target.checked)}
+            />
+          </Stack>
+
+          {sweepEnabled && (
+            <>
+              <Box>
+                <Typography variant="body2" sx={{ mb: 1 }}>Active Timeframes</Typography>
+                <Stack direction="row" spacing={1} flexWrap="wrap">
+                  {['4H', '1H', 'M30', 'M15', 'M5'].map(tf => (
+                    <Chip
+                      key={tf}
+                      label={tf}
+                      size="small"
+                      onClick={() => toggleSweepTF(tf)}
+                      sx={{
+                        borderRadius: '4px',
+                        cursor: 'pointer',
+                        bgcolor: sweepTFs.includes(tf) ? '#001a33' : '#0a0a0a',
+                        color:   sweepTFs.includes(tf) ? '#4488ff' : '#55556a',
+                        border:  `1px solid ${sweepTFs.includes(tf) ? '#4488ff' : '#2a2a2a'}`,
+                        fontWeight: sweepTFs.includes(tf) ? 700 : 400,
+                      }}
+                    />
+                  ))}
+                </Stack>
+              </Box>
+
+              <FormControl>
+                <FormLabel sx={{ color: 'text.secondary', mb: 1, fontSize: '0.875rem' }}>
+                  Sweep Alert Mode
+                </FormLabel>
+                <RadioGroup
+                  value={sweepMode}
+                  onChange={e => setSweepMode(e.target.value)}
+                >
+                  <FormControlLabel value="aligned" control={<Radio size="small" />}
+                    label={
+                      <Box>
+                        <Typography variant="body2">Trend Aligned Only</Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          Sweep alerts fire only when direction matches TTrades HTF bias
+                        </Typography>
+                      </Box>
+                    }
+                  />
+                  <FormControlLabel value="price_action" control={<Radio size="small" />}
+                    label={
+                      <Box>
+                        <Typography variant="body2">Price Action Only</Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          Alerts fire for any sweep regardless of HTF bias
+                        </Typography>
+                      </Box>
+                    }
+                  />
+                  <FormControlLabel value="all" control={<Radio size="small" />}
+                    label={
+                      <Box>
+                        <Typography variant="body2">All Sweeps</Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          All sweeps fire with trend label shown in message
+                        </Typography>
+                      </Box>
+                    }
+                  />
+                </RadioGroup>
+              </FormControl>
+
+              <Button
+                variant="contained"
+                size="small"
+                onClick={handleSaveSweepDefaults}
+                disabled={savingSweep}
+                startIcon={savingSweep ? <CircularProgress size={14} /> : null}
+                sx={{ alignSelf: 'flex-start' }}
+              >
+                {savingSweep ? 'Saving...' : 'Save Sweep Defaults'}
+              </Button>
+
+              {sweepSaveMsg && (
+                <Alert severity={sweepSaveMsg.startsWith('Error') ? 'error' : 'success'} sx={{ py: 0.5 }}>
+                  {sweepSaveMsg}
+                </Alert>
+              )}
+            </>
+          )}
+        </Stack>
       </Paper>
 
       {/* Account Info */}
