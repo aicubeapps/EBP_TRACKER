@@ -157,10 +157,31 @@ const theme = createTheme({
     MuiChip: {
       styleOverrides: {
         root: {
-          borderRadius: 4,
+          borderRadius: 3,
           fontSize: '0.75rem',
           fontWeight: 600,
-          height: 22,
+          height: 20,
+        },
+        label: {
+          paddingLeft: 6,
+          paddingRight: 6,
+        },
+      },
+    },
+    MuiListItem: {
+      styleOverrides: {
+        root: {
+          paddingTop: 8,
+          paddingBottom: 8,
+        },
+      },
+    },
+    MuiCardContent: {
+      styleOverrides: {
+        root: {
+          '&:last-child': {
+            paddingBottom: 12,
+          },
         },
       },
     },
