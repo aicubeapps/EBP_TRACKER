@@ -245,7 +245,7 @@ export default function Assets() {
     setAdding(true)
     setAddError(null)
     try {
-      await addAsset({ symbol: newSymbol.trim(), display_name: newSymbol.trim(), asset_type: newType })
+      await addAsset(newSymbol.trim(), newSymbol.trim(), newType.toLowerCase())
       setModalOpen(false)
       setNewSymbol('')
       setNewType('Forex')
