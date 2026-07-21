@@ -50,7 +50,7 @@ export default function Settings() {
     const interval = setInterval(async () => {
       try {
         const token = await getToken();
-        const data  = await api.post('/telegram/verify', {}, token);
+        const data  = await api.post('/user/telegram/verify', {}, token);
         if (data?.verified) {
           setPolling(false);
           setLinkCode('');
@@ -67,7 +67,7 @@ export default function Settings() {
     setMsg({ text: '', severity: 'info' });
     try {
       const token = await getToken();
-      const data  = await api.post('/telegram/initlink', {}, token);
+      const data  = await api.post('/user/telegram/initlink', {}, token);
       setLinkCode(data.code);
       setPolling(true);
     } catch (e) {
