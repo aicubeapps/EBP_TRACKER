@@ -34,6 +34,7 @@ import SearchOutlinedIcon from '@mui/icons-material/SearchOutlined'
 import DeleteOutlineOutlinedIcon from '@mui/icons-material/DeleteOutlineOutlined'
 import { useAssets } from '../hooks/useAssets.js'
 import api from '../lib/api.js'
+import { useUser } from '../hooks/useUser.js'
 
 const ASSET_TYPES = ['Forex', 'Commodity', 'Index', 'NSE Asset', 'Crypto']
 
@@ -232,7 +233,8 @@ export default function Assets() {
   const [adding, setAdding]           = useState(false)
   const [addError, setAddError]       = useState(null)
 
-  const maxSlots  = ASSET_LIMIT_MAP['free']
+  const { user } = useUser()
+  const maxSlots  = user?.asset_limit ?? 3
   const slotsUsed = assets.length
   const slotPct   = (slotsUsed / maxSlots) * 100
   const filtered  = assets.filter((a) =>
