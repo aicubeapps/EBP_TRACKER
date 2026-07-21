@@ -5,6 +5,7 @@ import {
   LinearProgress, Box, ToggleButtonGroup, ToggleButton
 } from '@mui/material';
 import { DataGrid } from '@mui/x-data-grid';
+import { useTheme } from '@mui/material/styles';
 import api from '../lib/api';
 
 function NoRows() {
@@ -18,7 +19,9 @@ function NoRows() {
   );
 }
 
-const columns = [
+function useColumns() {
+  const theme = useTheme();
+  return [
   {
     field: 'fired_at', headerName: 'Time', width: 160,
     renderCell: p => (
@@ -44,8 +47,8 @@ const columns = [
   {
     field: 'alert_type', headerName: 'Type', width: 100,
     renderCell: p => {
-      const colors = { ebp:'#4488ff', sweep:'#8855ff', combined:'#f5a623' };
-      const c = colors[p.value] ?? '#888';
+      const colors = { ebp: theme.palette.primary.main, sweep: theme.palette.secondary.main, combined: theme.palette.warning.main };
+      const c = colors[p.value] ?? theme.palette.text.disabled;
       return (
         <Chip label={p.value?.toUpperCase()} size="small" sx={{
           bgcolor:`${c}22`, color:c,
@@ -62,9 +65,9 @@ const columns = [
         label={p.value === 'bull' ? 'BULL' : 'BEAR'}
         size="small"
         sx={{
-          bgcolor: p.value === 'bull' ? '#001a12' : '#1a0008',
-          color:   p.value === 'bull' ? '#00c896' : '#ff4466',
-          border:  `1px solid ${p.value === 'bull' ? '#00c896' : '#ff4466'}`,
+          bgcolor: p.value === 'bull' ? `${theme.palette.success.main}20` : `${theme.palette.error.main}20`,
+          color:   p.value === 'bull' ? theme.palette.success.main : theme.palette.error.main,
+          border:  `1px solid ${p.value === 'bull' ? theme.palette.success.main : theme.palette.error.main}`,
           borderRadius:'4px', fontWeight:700,
         }}
       />
@@ -74,8 +77,8 @@ const columns = [
     field: 'trend_bias', headerName: 'Trend', width: 100,
     renderCell: p => (
       <Typography variant="caption" sx={{
-        color: p.value==='bullish' ? '#00c896'
-          : p.value==='bearish' ? '#ff4466' : '#888',
+        color: p.value==='bullish' ? theme.palette.success.main
+          : p.value==='bearish' ? theme.palette.error.main : theme.palette.text.disabled,
       }}>
         {p.value}
       </Typography>
@@ -93,9 +96,12 @@ const columns = [
       </Typography>
     ),
   },
-];
+  ];
+}
 
 export default function Alerts() {
+  const theme = useTheme();
+  const columns = useColumns();
   const { getToken }          = useAuth();
   const [alerts, setAlerts]   = useState([]);
   const [loading, setLoading] = useState(true);
@@ -126,7 +132,13 @@ export default function Alerts() {
         alignItems="center" sx={{ mb: 3 }}>
         <Typography variant="h5" fontWeight={700}>Alert History</Typography>
         <ToggleButtonGroup value={filter} exclusive size="small"
-          onChange={(_, v) => v && setFilter(v)}>
+          onChange={(_, v) => v && setFilter(v)}
+          sx={{ '& .MuiToggleButton-root': {
+            fontSize: '0.75rem', px: 1.5, py: 0.5,
+            color: theme.palette.text.secondary,
+            borderColor: theme.palette.divider,
+            '&.Mui-selected': { color: theme.palette.primary.main, bgcolor: `${theme.palette.primary.main}15` },
+          }}}>
           <ToggleButton value="all">All</ToggleButton>
           <ToggleButton value="ebp">EBP</ToggleButton>
           <ToggleButton value="sweep">Sweep</ToggleButton>
@@ -145,7 +157,7 @@ export default function Alerts() {
         disableRowSelectionOnClick
         autoHeight
         slots={{ noRowsOverlay: NoRows }}
-        sx={{ border:'none', bgcolor:'#000000', minHeight:400 }}
+        sx={{ border:'none', bgcolor:'background.default', minHeight:400 }}
       />
     </Container>
   );

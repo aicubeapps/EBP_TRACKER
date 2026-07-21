@@ -15,11 +15,13 @@ import {
   LightModeOutlined,
 } from '@mui/icons-material';
 import api from '../lib/api';
+import { useTheme } from '@mui/material/styles';
 
 export default function Settings() {
   const { getToken }          = useAuth();
   const { user }              = useUser();
   const { mode, toggleTheme } = useThemeMode();
+  const theme                 = useTheme();
 
   // Telegram state
   const [tgStatus, setTgStatus]     = useState(null);
@@ -171,8 +173,8 @@ export default function Settings() {
           {tgStatus?.connected && (
             <Chip label="Connected" size="small"
               icon={<CheckCircleOutlined />}
-              sx={{ bgcolor: '#001a12', color: '#00c896',
-                border: '1px solid #00c896', borderRadius: '4px' }} />
+              sx={{ bgcolor: `${theme.palette.success.main}15`, color: theme.palette.success.main,
+                border: `1px solid ${theme.palette.success.main}`, borderRadius: '4px' }} />
           )}
         </Stack>
         <Divider sx={{ mb: 2 }} />
@@ -224,15 +226,15 @@ export default function Settings() {
             ) : (
               <Stack spacing={2}>
                 <Box sx={{
-                  p: 3, bgcolor: '#0a0a0a',
-                  border: '1px solid #2a2a2a',
+                  p: 3, bgcolor: 'background.default',
+                  border: `1px solid ${theme.palette.divider}`,
                   borderRadius: 2, textAlign: 'center',
                 }}>
                   <Typography variant="caption" color="text.secondary" display="block">
                     Send this code to @EbP_Tracker_bot on Telegram
                   </Typography>
                   <Typography variant="h2" sx={{
-                    fontFamily: 'monospace', color: '#4488ff',
+                    fontFamily: 'monospace', color: 'primary.main',
                     letterSpacing: '0.3em', my: 1,
                   }}>
                     {linkCode}
@@ -268,7 +270,7 @@ export default function Settings() {
           <Chip
             label="GLOBAL DEFAULT"
             size="small"
-            sx={{ borderRadius: '4px', fontSize: '0.65rem', bgcolor: '#1a1a2a', color: '#8888a8' }}
+            sx={{ borderRadius: '4px', fontSize: '0.65rem', bgcolor: 'background.default', color: 'text.disabled' }}
           />
         </Stack>
         <Divider sx={{ mb: 2 }} />
@@ -305,9 +307,9 @@ export default function Settings() {
                       sx={{
                         borderRadius: '4px',
                         cursor: 'pointer',
-                        bgcolor: sweepTFs.includes(tf) ? '#001a33' : '#0a0a0a',
-                        color:   sweepTFs.includes(tf) ? '#4488ff' : '#55556a',
-                        border:  `1px solid ${sweepTFs.includes(tf) ? '#4488ff' : '#2a2a2a'}`,
+                        bgcolor: sweepTFs.includes(tf) ? `${theme.palette.primary.main}20` : 'background.default',
+                        color:   sweepTFs.includes(tf) ? theme.palette.primary.main : theme.palette.text.disabled,
+                        border:  `1px solid ${sweepTFs.includes(tf) ? theme.palette.primary.main : theme.palette.divider}`,
                         fontWeight: sweepTFs.includes(tf) ? 700 : 400,
                       }}
                     />
@@ -389,10 +391,10 @@ export default function Settings() {
               size="small"
               sx={{
                 borderRadius: '4px', fontWeight: 700, fontSize: '0.7rem',
-                bgcolor: { free:'#1a1a1a', coffee:'#2a1f00',
-                  beer:'#1a1200', wine:'#1a0020' }[user?.plan] ?? '#1a1a1a',
-                color: { free:'#888', coffee:'#f5a623',
-                  beer:'#ff8c00', wine:'#8855ff' }[user?.plan] ?? '#888',
+                bgcolor: { free: `${theme.palette.text.disabled}20`, coffee: `${theme.palette.warning.main}20`,
+                  beer: `${theme.palette.warning.main}20`, wine: `${theme.palette.secondary.main}20` }[user?.plan] ?? 'background.default',
+                color: { free: theme.palette.text.disabled, coffee: theme.palette.warning.main,
+                  beer: theme.palette.warning.main, wine: theme.palette.secondary.main }[user?.plan] ?? theme.palette.text.disabled,
               }}
             />
           </Stack>

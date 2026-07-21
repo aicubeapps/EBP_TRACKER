@@ -35,16 +35,9 @@ import DeleteOutlineOutlinedIcon from '@mui/icons-material/DeleteOutlineOutlined
 import { useAssets } from '../hooks/useAssets.js'
 import api from '../lib/api.js'
 import { useUser } from '../hooks/useUser.js'
+import { useTheme } from '@mui/material/styles'
 
 const ASSET_TYPES = ['Forex', 'Commodity', 'Index', 'NSE Asset', 'Crypto']
-
-const TYPE_SX = {
-  Forex:       { bgcolor: '#001033', color: '#4488ff', border: '1px solid #4488ff' },
-  Commodity:   { bgcolor: '#1a1100', color: '#f5a623', border: '1px solid #f5a623' },
-  Index:       { bgcolor: '#110022', color: '#8855ff', border: '1px solid #8855ff' },
-  'NSE Asset': { bgcolor: '#0d0d0d', color: '#8888a8', border: '1px solid #2a2a2a' },
-  Crypto:      { bgcolor: '#1a1100', color: '#f5a623', border: '1px solid #f5a623' },
-}
 
 const ASSET_LIMIT_MAP = { free: 3, coffee: 5, beer: 15, wine: 30 }
 
@@ -57,6 +50,7 @@ const VALID_PAIRS = {
 }
 
 function CombinedPairBuilder({ asset, onSave }) {
+  const theme = useTheme()
   const [open, setOpen]       = useState(false)
   const [enabled, setEnabled] = useState(asset.combined_enabled === 1)
   const [pairs, setPairs]     = useState(() => {
@@ -93,7 +87,7 @@ function CombinedPairBuilder({ asset, onSave }) {
         size="small" variant="text"
         onClick={() => setOpen(o => !o)}
         sx={{
-          color: '#8855ff', fontSize: '0.7rem',
+          color: theme.palette.secondary.main, fontSize: '0.7rem',
           p: 0, mt: 0.5, minWidth: 0,
           justifyContent: 'flex-start',
           '&:hover': { bgcolor: 'transparent', textDecoration: 'underline' },
@@ -106,8 +100,8 @@ function CombinedPairBuilder({ asset, onSave }) {
       {open && (
         <Box sx={{
           mt: 1, p: 1.5,
-          bgcolor: '#0a0a12',
-          border: '1px solid #2a2a3a',
+          bgcolor: 'background.default',
+          border: `1px solid ${theme.palette.divider}`,
           borderRadius: 1,
         }}>
           <Stack spacing={1.5}>
@@ -174,8 +168,9 @@ function CombinedPairBuilder({ asset, onSave }) {
                             onDelete={() => removePair(i)}
                             sx={{
                               borderRadius: '4px', fontSize: '0.7rem',
-                              bgcolor: '#1a0a2a', color: '#8855ff',
-                              border: '1px solid #8855ff44',
+                              bgcolor: `${theme.palette.secondary.main}20`,
+                              color: theme.palette.secondary.main,
+                              border: `1px solid ${theme.palette.secondary.main}44`,
                             }}
                           />
                         </Box>
@@ -199,8 +194,8 @@ function CombinedPairBuilder({ asset, onSave }) {
                       { value: 240, label: '4h' },
                     ]}
                     sx={{
-                      color: '#8855ff',
-                      '& .MuiSlider-markLabel': { fontSize: '0.6rem', color: '#55556a' },
+                      color: theme.palette.secondary.main,
+                      '& .MuiSlider-markLabel': { fontSize: '0.6rem', color: theme.palette.text.disabled },
                     }}
                   />
                 </Box>
@@ -211,7 +206,7 @@ function CombinedPairBuilder({ asset, onSave }) {
               variant="contained" size="small"
               onClick={handleSave} disabled={saving}
               startIcon={saving ? <CircularProgress size={12} /> : null}
-              sx={{ alignSelf: 'flex-start', bgcolor: '#8855ff', '&:hover': { bgcolor: '#9966ff' } }}
+              sx={{ alignSelf: 'flex-start' }}
             >
               {saving ? 'Saving...' : 'Save'}
             </Button>
@@ -223,9 +218,18 @@ function CombinedPairBuilder({ asset, onSave }) {
 }
 
 export default function Assets() {
+  const theme = useTheme()
   const navigate = useNavigate()
   const { getToken } = useAuth()
   const { assets, loading, error, addAsset, removeAsset, refetch } = useAssets()
+
+  const TYPE_SX = {
+    Forex:       { bgcolor: `${theme.palette.primary.main}20`,   color: theme.palette.primary.main,   border: `1px solid ${theme.palette.primary.main}` },
+    Commodity:   { bgcolor: `${theme.palette.warning.main}20`,   color: theme.palette.warning.main,   border: `1px solid ${theme.palette.warning.main}` },
+    Index:       { bgcolor: `${theme.palette.secondary.main}20`, color: theme.palette.secondary.main, border: `1px solid ${theme.palette.secondary.main}` },
+    'NSE Asset': { bgcolor: `${theme.palette.text.disabled}20`,  color: theme.palette.text.secondary, border: `1px solid ${theme.palette.divider}` },
+    Crypto:      { bgcolor: `${theme.palette.warning.main}20`,   color: theme.palette.warning.main,   border: `1px solid ${theme.palette.warning.main}` },
+  }
   const [searchQuery, setSearchQuery] = useState('')
   const [modalOpen, setModalOpen]     = useState(false)
   const [newSymbol, setNewSymbol]     = useState('')
@@ -277,7 +281,7 @@ export default function Assets() {
           InputProps={{
             startAdornment: (
               <InputAdornment position="start">
-                <SearchOutlinedIcon sx={{ fontSize: 16, color: '#55556a' }} />
+                <SearchOutlinedIcon sx={{ fontSize: 16, color: 'text.disabled' }} />
               </InputAdornment>
             ),
           }}
@@ -294,7 +298,7 @@ export default function Assets() {
       </Stack>
 
       {/* Slot usage */}
-      <Paper sx={{ p: 2, mb: 2, border: '1px solid #1a1a1a' }}>
+      <Paper sx={{ p: 2, mb: 2 }}>
         <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
           <Typography variant="body2" color="text.secondary">Asset slots used</Typography>
           <Typography variant="body2" fontWeight={600}>
@@ -311,14 +315,14 @@ export default function Assets() {
 
       {loading ? (
         <Stack spacing={1}>
-          {[1,2,3].map(i => <Skeleton key={i} variant="rounded" height={56} sx={{ bgcolor: '#0d0d0d' }} />)}
+          {[1,2,3].map(i => <Skeleton key={i} variant="rounded" height={56} />)}
         </Stack>
       ) : filtered.length === 0 ? (
-        <Typography variant="body2" sx={{ textAlign: 'center', py: 4, color: '#55556a' }}>
+        <Typography variant="body2" sx={{ textAlign: 'center', py: 4 }} color="text.disabled">
           No assets found.
         </Typography>
       ) : (
-        <Paper sx={{ border: '1px solid #1a1a1a' }}>
+        <Paper variant="outlined">
           <List disablePadding>
             {filtered.map((asset, idx) => (
               <Box key={asset.id}>
@@ -360,7 +364,7 @@ export default function Assets() {
                   />
                 </ListItem>
                 {idx < filtered.length - 1 && (
-                  <Box sx={{ borderBottom: '1px solid #1a1a1a' }} />
+                  <Box sx={{ borderBottom: `1px solid ${theme.palette.divider}` }} />
                 )}
               </Box>
             ))}
@@ -369,9 +373,9 @@ export default function Assets() {
       )}
 
       {slotsUsed >= maxSlots && (
-        <Card sx={{ border: '1px solid #f5a623', mt: 2, bgcolor: '#1a1100' }}>
+        <Card sx={{ border: `1px solid ${theme.palette.warning.main}`, mt: 2, bgcolor: `${theme.palette.warning.main}10` }}>
           <CardContent sx={{ textAlign: 'center', py: 3 }}>
-            <Typography variant="body1" sx={{ color: '#f5a623', mb: 1 }}>
+            <Typography variant="body1" sx={{ color: 'warning.main', mb: 1 }}>
               All {maxSlots} slots used
             </Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>

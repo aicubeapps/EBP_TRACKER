@@ -11,6 +11,7 @@ import {
 } from '@mui/icons-material';
 import api from '../lib/api';
 import { useUser } from '../hooks/useUser';
+import { useTheme } from '@mui/material/styles';
 
 const TIERS = [
   {
@@ -64,6 +65,7 @@ const UPI_ID = '8087778493@ybl';
 export default function Upgrade() {
   const { getToken }                      = useAuth();
   const { user }                          = useUser();
+  const theme                             = useTheme();
   const [selectedTier, setSelectedTier]   = useState(null);
   const [upiRef, setUpiRef]               = useState('');
   const [submitting, setSubmitting]       = useState(false);
@@ -173,10 +175,10 @@ export default function Upgrade() {
               onClick={() => setSelectedTier(tier.id)}
               sx={{
                 border: selectedTier === tier.id
-                  ? '2px solid #4488ff'
+                  ? `2px solid ${theme.palette.primary.main}`
                   : tier.recommended
-                  ? '1px solid #2a2a5a'
-                  : '1px solid #1a1a1a',
+                  ? `1px solid ${theme.palette.primary.dark ?? theme.palette.primary.main}44`
+                  : `1px solid ${theme.palette.divider}`,
                 cursor: 'pointer',
                 position: 'relative',
                 height: '100%',
@@ -185,8 +187,8 @@ export default function Upgrade() {
                   ? '0 0 16px rgba(68,136,255,0.2)'
                   : 'none',
                 '&:hover': {
-                  borderColor: '#4488ff',
-                  boxShadow: '0 0 12px rgba(68,136,255,0.15)',
+                  borderColor: theme.palette.primary.main,
+                  boxShadow: `0 0 12px ${theme.palette.primary.main}26`,
                 },
               }}
             >
@@ -197,7 +199,7 @@ export default function Upgrade() {
                   sx={{
                     position: 'absolute', top: -10,
                     left: '50%', transform: 'translateX(-50%)',
-                    bgcolor: '#4488ff', color: '#fff',
+                    bgcolor: theme.palette.primary.main, color: '#fff',
                     fontWeight: 700, borderRadius: '4px',
                     fontSize: '0.65rem',
                   }}
@@ -207,14 +209,14 @@ export default function Upgrade() {
                 <CheckCircleOutlined
                   sx={{
                     position: 'absolute', top: 12, right: 12,
-                    color: '#4488ff', fontSize: 20,
+                    color: 'primary.main', fontSize: 20,
                   }}
                 />
               )}
               <CardContent sx={{ textAlign: 'center', p: { xs: 2, md: 3 } }}>
                 <Typography sx={{ fontSize: '2.5rem', mb: 1 }}>{tier.emoji}</Typography>
                 <Typography variant="h5" fontWeight={700}>{tier.name}</Typography>
-                <Typography variant="h3" sx={{ my: 2, color: '#4488ff', fontWeight: 700 }}>
+                <Typography variant="h3" sx={{ my: 2, color: 'primary.main', fontWeight: 700 }}>
                   ₹{tier.price}
                 </Typography>
                 <Typography variant="caption" color="text.secondary">
@@ -224,7 +226,7 @@ export default function Upgrade() {
                 <Stack spacing={1} sx={{ textAlign: 'left' }}>
                   {tier.features.map(f => (
                     <Stack key={f} direction="row" spacing={1} alignItems="center">
-                      <CheckCircleOutlined sx={{ color: '#00c896', fontSize: 14, flexShrink: 0 }} />
+                      <CheckCircleOutlined sx={{ color: 'success.main', fontSize: 14, flexShrink: 0 }} />
                       <Typography variant="body2" color="text.secondary">{f}</Typography>
                     </Stack>
                   ))}
@@ -262,7 +264,7 @@ export default function Upgrade() {
                 alt="UPI QR Code"
                 sx={{
                   width: 200, height: 200,
-                  border: '1px solid #2a2a2a',
+                  border: `1px solid ${theme.palette.divider}`,
                   borderRadius: 2, p: 1,
                   bgcolor: '#fff',
                 }}
@@ -271,13 +273,13 @@ export default function Upgrade() {
             </Box>
 
             {/* UPI ID */}
-            <Box sx={{ p: 2, bgcolor: '#0a0a0a', border: '1px solid #2a2a2a', borderRadius: 1 }}>
+            <Box sx={{ p: 2, bgcolor: 'background.default', border: `1px solid ${theme.palette.divider}`, borderRadius: 1 }}>
               <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.5 }}>
                 UPI ID
               </Typography>
               <Stack direction="row" alignItems="center" justifyContent="space-between">
                 <Typography variant="body1"
-                  sx={{ fontFamily: 'monospace', color: '#4488ff', fontWeight: 600 }}>
+                  sx={{ fontFamily: 'monospace', color: 'primary.main', fontWeight: 600 }}>
                   {UPI_ID}
                 </Typography>
                 <Button
