@@ -1,16 +1,17 @@
+// ============================================================
+// TTrades Closure Bias Engine
+// Port of Pine Script TTrades closure mechanic.
+// Shared between EBP Worker and Sweep Worker.
+// ============================================================
+
 /**
- * TTrades Closure Bias Engine
- * Port of Pine Script TTrades closure mechanic.
- *
- * @param {Object} htfCandles - { bar0, bar1, bar2 } each with { open, high, low, close, time }
- *   bar0 = most recent closed candle
- *   bar1 = previous candle (the one being evaluated)
+ * Calculate TTrades closure bias from HTF candles.
+ * @param {Object} p - { bar1, bar2 } each { open, high, low, close, time }
+ *   bar1 = most recently closed HTF candle
  *   bar2 = candle before that (reference high/low)
  * @returns {{ bias: 'bullish'|'bearish'|'neutral', closure: string, closePos: number }}
  */
-export function calcTTradesBias(htfCandles) {
-  const { bar1, bar2 } = htfCandles;
-
+export function calcTTradesBias({ bar1, bar2 }) {
   const c0    = bar1.close;
   const h0    = bar1.high;
   const l0    = bar1.low;
@@ -20,7 +21,7 @@ export function calcTTradesBias(htfCandles) {
   const sweptH   = h0 > prevH && c0 <= prevH;
   const sweptL   = l0 < prevL && c0 >= prevL;
   const insideD  = h0 <= prevH && l0 >= prevL;
-  const outsideD = h0 > prevH && l0 < prevL;
+  const outsideD = h0 > prevH  && l0 < prevL;
   const aboveH   = c0 > prevH;
   const belowL   = c0 < prevL;
 
@@ -51,9 +52,24 @@ export function calcTTradesBias(htfCandles) {
 }
 
 /**
- * Get HTF timeframe string for a given alert TF (preset pairings)
+ * Get HTF timeframe string for a given sweep alert TF (preset pairings).
+ * Sweep Worker uses different pairings than EBP Worker.
  */
-export function getHTFForTF(tf) {
+export function getHTFForSweepTF(tf) {
+  const map = {
+    'M5':  '1H',
+    'M15': '1H',
+    'M30': '4H',
+    '1H':  'D',
+    '4H':  'W',
+  };
+  return map[tf] ?? null;
+}
+
+/**
+ * Get HTF timeframe string for a given EBP alert TF (preset pairings).
+ */
+export function getHTFForEBPTF(tf) {
   const map = {
     'M15': '4H',
     '1H':  'D',
@@ -65,9 +81,9 @@ export function getHTFForTF(tf) {
 }
 
 /**
- * Map TF string to Twelve Data interval param
+ * Map internal TF string to Twelve Data interval parameter.
  */
-export function tfToInterval(tf) {
+export function tfToTwelveInterval(tf) {
   const map = {
     'M5':  '5min',
     'M15': '15min',
@@ -78,4 +94,24 @@ export function tfToInterval(tf) {
     'W':   '1week',
   };
   return map[tf] ?? '1h';
+}
+
+/**
+ * DST helper — returns true if US is on Daylight Saving Time.
+ * DST: 2nd Sunday March → 1st Sunday November
+ */
+export function isUSDST(date = new Date()) {
+  const y      = date.getUTCFullYear();
+  const m3     = new Date(Date.UTC(y, 2, 1));
+  const dstStart = new Date(Date.UTC(y, 2, 1 + (7 - m3.getUTCDay()) % 7 + 7));
+  const m11    = new Date(Date.UTC(y, 10, 1));
+  const dstEnd = new Date(Date.UTC(y, 10, 1 + (7 - m11.getUTCDay()) % 7));
+  return date >= dstStart && date < dstEnd;
+}
+
+/**
+ * Returns UTC hour of NY market close (17:00 EST/EDT).
+ */
+export function getNYCloseUTCHour(date = new Date()) {
+  return isUSDST(date) ? 21 : 22;
 }

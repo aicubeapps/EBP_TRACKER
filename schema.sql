@@ -100,6 +100,19 @@ CREATE TABLE IF NOT EXISTS invite_tokens (
   active     INTEGER DEFAULT 1
 );
 
+-- Sweep Candle Cache (separate from EBP cache — different TF set)
+CREATE TABLE IF NOT EXISTS sweep_candle_cache (
+  symbol        TEXT NOT NULL,
+  timeframe     TEXT NOT NULL,
+  bar_0_open    REAL, bar_0_high REAL, bar_0_low REAL, bar_0_close REAL,
+  bar_1_open    REAL, bar_1_high REAL, bar_1_low REAL, bar_1_close REAL,
+  bar_2_open    REAL, bar_2_high REAL, bar_2_low REAL, bar_2_close REAL,
+  bar_0_time    INTEGER,
+  bar_1_time    INTEGER,
+  updated_at    INTEGER NOT NULL,
+  PRIMARY KEY (symbol, timeframe)
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_ua_user_id      ON user_assets(user_id);
 CREATE INDEX IF NOT EXISTS idx_ua_symbol       ON user_assets(symbol);
