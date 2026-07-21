@@ -196,7 +196,7 @@ export default function Upgrade() {
                   }}
                 />
               )}
-              <CardContent sx={{ textAlign: 'center', p: 3 }}>
+              <CardContent sx={{ textAlign: 'center', p: { xs: 2, md: 3 } }}>
                 <Typography sx={{ fontSize: '2.5rem', mb: 1 }}>{tier.emoji}</Typography>
                 <Typography variant="h5" fontWeight={700}>{tier.name}</Typography>
                 <Typography variant="h3" sx={{ my: 2, color: '#4488ff', fontWeight: 700 }}>
@@ -298,8 +298,9 @@ export default function Upgrade() {
               onClick={handleSubmit}
               disabled={submitting || !upiRef.trim()}
               startIcon={submitting ? <CircularProgress size={16} /> : null}
+              sx={{ whiteSpace: 'nowrap' }}
             >
-              {submitting ? 'Submitting...' : 'Submit Payment for Verification'}
+              {submitting ? 'Submitting...' : 'Submit for Verification'}
             </Button>
 
             {msg.text && <Alert severity={msg.severity}>{msg.text}</Alert>}

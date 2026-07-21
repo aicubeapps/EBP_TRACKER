@@ -29,9 +29,9 @@ import InputAdornment from '@mui/material/InputAdornment'
 import CircularProgress from '@mui/material/CircularProgress'
 import Slider from '@mui/material/Slider'
 import Switch from '@mui/material/Switch'
+import AddOutlined from '@mui/icons-material/AddOutlined'
 import SearchOutlinedIcon from '@mui/icons-material/SearchOutlined'
 import DeleteOutlineOutlinedIcon from '@mui/icons-material/DeleteOutlineOutlined'
-import AddOutlinedIcon from '@mui/icons-material/AddOutlined'
 import { useAssets } from '../hooks/useAssets.js'
 import api from '../lib/api.js'
 
@@ -87,24 +87,29 @@ function CombinedPairBuilder({ asset, onSave }) {
   }
 
   return (
-    <Box sx={{ mt: 1 }}>
+    <Box>
       <Button
         size="small" variant="text"
         onClick={() => setOpen(o => !o)}
-        sx={{ color: '#8855ff', fontSize: '0.7rem', p: 0 }}
-        startIcon={<span>⚡</span>}
+        sx={{
+          color: '#8855ff', fontSize: '0.7rem',
+          p: 0, mt: 0.5, minWidth: 0,
+          justifyContent: 'flex-start',
+          '&:hover': { bgcolor: 'transparent', textDecoration: 'underline' },
+        }}
+        startIcon={<span style={{ fontSize: '0.8rem' }}>⚡</span>}
       >
         {open ? 'Hide' : 'Configure'} Combined Signals
       </Button>
 
       {open && (
         <Box sx={{
-          mt: 1, p: 2,
+          mt: 1, p: 1.5,
           bgcolor: '#0a0a12',
           border: '1px solid #2a2a3a',
           borderRadius: 1,
         }}>
-          <Stack spacing={2}>
+          <Stack spacing={1.5}>
             <Stack direction="row" justifyContent="space-between" alignItems="center">
               <Typography variant="body2">Combined Signal Alerts</Typography>
               <Switch
@@ -220,19 +225,19 @@ export default function Assets() {
   const navigate = useNavigate()
   const { getToken } = useAuth()
   const { assets, loading, error, addAsset, removeAsset, refetch } = useAssets()
-  const [search, setSearch]       = useState('')
-  const [modalOpen, setModalOpen] = useState(false)
-  const [newSymbol, setNewSymbol] = useState('')
-  const [newType, setNewType]     = useState('Forex')
-  const [adding, setAdding]       = useState(false)
-  const [addError, setAddError]   = useState(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [modalOpen, setModalOpen]     = useState(false)
+  const [newSymbol, setNewSymbol]     = useState('')
+  const [newType, setNewType]         = useState('Forex')
+  const [adding, setAdding]           = useState(false)
+  const [addError, setAddError]       = useState(null)
 
   const maxSlots  = ASSET_LIMIT_MAP['free']
   const slotsUsed = assets.length
   const slotPct   = (slotsUsed / maxSlots) * 100
   const filtered  = assets.filter((a) =>
-    (a.symbol || '').toLowerCase().includes(search.toLowerCase()) ||
-    (a.display_name || '').toLowerCase().includes(search.toLowerCase())
+    (a.symbol || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (a.display_name || '').toLowerCase().includes(searchQuery.toLowerCase())
   )
 
   const handleAdd = async () => {
@@ -259,36 +264,45 @@ export default function Assets() {
 
   return (
     <Box sx={{ maxWidth: 600 }}>
-      <Stack direction="row" spacing={1.5} sx={{ mb: 2.5 }}>
+      {/* Search + Add */}
+      <Stack direction="row" spacing={1} alignItems="stretch" sx={{ mb: 2 }}>
         <TextField
-          fullWidth size="small"
-          placeholder="Search symbol e.g. EURUSD, RELIANCE, BTC"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search symbol e.g. EUR/USD, RELIANCE.NS"
+          size="small"
+          fullWidth
+          value={searchQuery}
+          onChange={e => setSearchQuery(e.target.value)}
           InputProps={{
-            startAdornment: <InputAdornment position="start"><SearchOutlinedIcon sx={{ fontSize: 16, color: '#55556a' }} /></InputAdornment>,
+            startAdornment: (
+              <InputAdornment position="start">
+                <SearchOutlinedIcon sx={{ fontSize: 16, color: '#55556a' }} />
+              </InputAdornment>
+            ),
           }}
         />
         <Button
           variant="contained"
-          startIcon={<AddOutlinedIcon />}
+          startIcon={<AddOutlined />}
           disabled={slotsUsed >= maxSlots || loading}
           onClick={() => setModalOpen(true)}
-          sx={{ whiteSpace: 'nowrap' }}
+          sx={{ whiteSpace: 'nowrap', flexShrink: 0 }}
         >
           Add Asset
         </Button>
       </Stack>
 
-      <Paper sx={{ p: 2, mb: 2.5, border: '1px solid #1a1a1a' }}>
-        <Stack direction="row" justifyContent="space-between" sx={{ mb: 1 }}>
-          <Typography variant="body2">Slot usage</Typography>
-          <Typography variant="caption" className="tabular-nums" sx={{ color: '#e8e8f0' }}>
-            {slotsUsed} / {maxSlots} slots used
+      {/* Slot usage */}
+      <Paper sx={{ p: 2, mb: 2, border: '1px solid #1a1a1a' }}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
+          <Typography variant="body2" color="text.secondary">Asset slots used</Typography>
+          <Typography variant="body2" fontWeight={600}>
+            {slotsUsed} / {maxSlots}
           </Typography>
         </Stack>
         <LinearProgress variant="determinate" value={Math.min(slotPct, 100)} sx={{ height: 4, borderRadius: 2 }} />
-        <Typography variant="caption" sx={{ mt: 1, display: 'block' }}>Upgrade your plan to track more assets.</Typography>
+        <Typography variant="caption" color="text.disabled" sx={{ mt: 0.75, display: 'block' }}>
+          Upgrade to track more assets.
+        </Typography>
       </Paper>
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
@@ -298,42 +312,51 @@ export default function Assets() {
           {[1,2,3].map(i => <Skeleton key={i} variant="rounded" height={56} sx={{ bgcolor: '#0d0d0d' }} />)}
         </Stack>
       ) : filtered.length === 0 ? (
-        <Typography variant="body2" sx={{ textAlign: 'center', py: 4 }}>No assets found.</Typography>
+        <Typography variant="body2" sx={{ textAlign: 'center', py: 4, color: '#55556a' }}>
+          No assets found.
+        </Typography>
       ) : (
         <Paper sx={{ border: '1px solid #1a1a1a' }}>
           <List disablePadding>
             {filtered.map((asset, idx) => (
               <Box key={asset.id}>
                 <ListItem
-                  divider={false}
-                  sx={{ px: 2, py: 1.5 }}
+                  sx={{ py: 1, px: 1.5, alignItems: 'flex-start' }}
                   secondaryAction={
-                    <IconButton size="small" edge="end" onClick={() => removeAsset(asset.id)} sx={{ '&:hover': { color: '#ff4466' } }}>
+                    <IconButton
+                      size="small" edge="end"
+                      onClick={() => removeAsset(asset.id)}
+                      sx={{ '&:hover': { color: '#ff4466' } }}
+                    >
                       <DeleteOutlineOutlinedIcon fontSize="small" />
                     </IconButton>
                   }
                 >
                   <ListItemText
+                    disableTypography
                     primary={
-                      <Stack direction="row" alignItems="center" spacing={1.5}>
-                        <Typography variant="body1" sx={{ fontWeight: 600, color: '#e8e8f0' }} className="tabular-nums">
+                      <Stack direction="row" alignItems="center" spacing={1}>
+                        <Typography variant="body1" fontWeight={700}
+                          sx={{ fontFamily: 'monospace', letterSpacing: '-0.01em' }}>
                           {asset.symbol}
                         </Typography>
                         <Chip
-                          label={asset.asset_type}
+                          label={asset.asset_type?.replace('_', ' ').toUpperCase()}
                           size="small"
-                          sx={{ borderRadius: '4px', fontWeight: 600, fontSize: '0.7rem', height: 20, ...(TYPE_SX[asset.asset_type] || TYPE_SX['NSE Asset']) }}
+                          sx={{
+                            borderRadius: '3px', fontSize: '0.6rem', fontWeight: 600,
+                            height: 16,
+                            '& .MuiChip-label': { px: 0.75 },
+                            ...(TYPE_SX[asset.asset_type] || TYPE_SX['NSE Asset']),
+                          }}
                         />
                       </Stack>
                     }
+                    secondary={
+                      <CombinedPairBuilder asset={asset} onSave={handleSaveCombined} />
+                    }
                   />
                 </ListItem>
-                <Box sx={{ px: 2, pb: 1.5 }}>
-                  <CombinedPairBuilder
-                    asset={asset}
-                    onSave={handleSaveCombined}
-                  />
-                </Box>
                 {idx < filtered.length - 1 && (
                   <Box sx={{ borderBottom: '1px solid #1a1a1a' }} />
                 )}

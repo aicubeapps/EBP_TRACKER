@@ -138,7 +138,7 @@ export default function Settings() {
       {/* Telegram Section */}
       <Paper sx={{ p: 3, mb: 3 }}>
         <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
-          <Typography variant="h6">Telegram Alerts</Typography>
+          <Typography variant="subtitle1" fontWeight={600}>Telegram Alerts</Typography>
           {tgStatus?.connected && (
             <Chip label="Connected" size="small"
               icon={<CheckCircleOutlined />}
@@ -235,7 +235,7 @@ export default function Settings() {
       {/* Sweep Alerts — Global Settings */}
       <Paper sx={{ p: 3, mb: 3 }}>
         <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
-          <Typography variant="h6">Sweep Alerts</Typography>
+          <Typography variant="subtitle1" fontWeight={600}>Sweep Alerts</Typography>
           <Chip
             label="GLOBAL DEFAULT"
             size="small"
@@ -248,7 +248,7 @@ export default function Settings() {
         </Typography>
 
         <Stack spacing={2}>
-          <Stack direction="row" justifyContent="space-between" alignItems="center">
+          <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
             <Box>
               <Typography variant="body2">Enable Sweep Alerts</Typography>
               <Typography variant="caption" color="text.secondary">
@@ -256,6 +256,7 @@ export default function Settings() {
               </Typography>
             </Box>
             <Switch
+              size="small"
               checked={sweepEnabled}
               onChange={e => setSweepEnabled(e.target.checked)}
             />
@@ -295,7 +296,7 @@ export default function Settings() {
                 >
                   <FormControlLabel value="aligned" control={<Radio size="small" />}
                     label={
-                      <Box>
+                      <Box sx={{ py: 0.5 }}>
                         <Typography variant="body2">Trend Aligned Only</Typography>
                         <Typography variant="caption" color="text.secondary">
                           Sweep alerts fire only when direction matches TTrades HTF bias
@@ -305,7 +306,7 @@ export default function Settings() {
                   />
                   <FormControlLabel value="price_action" control={<Radio size="small" />}
                     label={
-                      <Box>
+                      <Box sx={{ py: 0.5 }}>
                         <Typography variant="body2">Price Action Only</Typography>
                         <Typography variant="caption" color="text.secondary">
                           Alerts fire for any sweep regardless of HTF bias
@@ -315,7 +316,7 @@ export default function Settings() {
                   />
                   <FormControlLabel value="all" control={<Radio size="small" />}
                     label={
-                      <Box>
+                      <Box sx={{ py: 0.5 }}>
                         <Typography variant="body2">All Sweeps</Typography>
                         <Typography variant="caption" color="text.secondary">
                           All sweeps fire with trend label shown in message
@@ -349,10 +350,10 @@ export default function Settings() {
 
       {/* Account Info */}
       <Paper sx={{ p: 3, mb: 3 }}>
-        <Typography variant="h6" gutterBottom>Account</Typography>
+        <Typography variant="subtitle1" fontWeight={600} gutterBottom>Account</Typography>
         <Divider sx={{ mb: 2 }} />
         <Stack spacing={1}>
-          <Stack direction="row" justifyContent="space-between">
+          <Stack direction="row" justifyContent="space-between" alignItems="center">
             <Typography variant="body2" color="text.secondary">Plan</Typography>
             <Chip
               label={user?.plan?.toUpperCase() ?? 'FREE'}
@@ -366,11 +367,11 @@ export default function Settings() {
               }}
             />
           </Stack>
-          <Stack direction="row" justifyContent="space-between">
+          <Stack direction="row" justifyContent="space-between" alignItems="center">
             <Typography variant="body2" color="text.secondary">Asset slots</Typography>
             <Typography variant="body2">{user?.asset_limit ?? 3}</Typography>
           </Stack>
-          <Stack direction="row" justifyContent="space-between">
+          <Stack direction="row" justifyContent="space-between" alignItems="center">
             <Typography variant="body2" color="text.secondary">Expires</Typography>
             <Typography variant="body2">
               {user?.expires_at
@@ -385,7 +386,7 @@ export default function Settings() {
 
       {/* Alert Mode Section */}
       <Paper sx={{ p: 3 }}>
-        <Typography variant="h6" gutterBottom>Alert Mode</Typography>
+        <Typography variant="subtitle1" fontWeight={600} gutterBottom>Alert Mode</Typography>
         <Divider sx={{ mb: 2 }} />
         <FormControl>
           <FormLabel sx={{ color: 'text.secondary', mb: 1, fontSize: '0.875rem' }}>
@@ -394,7 +395,7 @@ export default function Settings() {
           <RadioGroup defaultValue="aligned">
             <FormControlLabel value="aligned" control={<Radio size="small" />}
               label={
-                <Box>
+                <Box sx={{ py: 0.5 }}>
                   <Typography variant="body2">Trend Aligned Only</Typography>
                   <Typography variant="caption" color="text.secondary">
                     Alerts fire only when EBP matches TTrades HTF bias
@@ -404,7 +405,7 @@ export default function Settings() {
             />
             <FormControlLabel value="all" control={<Radio size="small" />}
               label={
-                <Box>
+                <Box sx={{ py: 0.5 }}>
                   <Typography variant="body2">All Engulfing Bars</Typography>
                   <Typography variant="caption" color="text.secondary">
                     Alerts fire for every EBP regardless of trend

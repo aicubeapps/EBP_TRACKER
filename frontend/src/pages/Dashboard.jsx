@@ -26,18 +26,18 @@ function TFCell({ tf, signal, disabled = false }) {
   return (
     <Box sx={{
       display: 'flex', flexDirection: 'column', alignItems: 'center',
-      px: 1.5, py: 1,
-      border: `1px solid ${disabled ? '#111' : '#1a1a1a'}`,
+      px: 1, py: 0.75,
+      border: `1px solid ${disabled ? '#111' : '#1e1e1e'}`,
       borderRadius: 1,
-      bgcolor: disabled ? '#050505' : '#0a0a0a',
-      minWidth: 44, opacity: disabled ? 0.4 : 1,
+      bgcolor: disabled ? '#050505' : '#080808',
+      minWidth: 38, opacity: disabled ? 0.35 : 1,
     }}>
       <Typography variant="overline"
         sx={{ fontSize: '0.6rem', color: disabled ? '#333' : '#55556a', lineHeight: 1.2 }}>
         {tf}
       </Typography>
       <Box sx={{
-        width: 8, height: 8, borderRadius: '50%', mt: 0.5,
+        width: 7, height: 7, borderRadius: '50%', mt: 0.5,
         bgcolor: color, boxShadow: glow,
       }} />
     </Box>
@@ -55,15 +55,18 @@ function AssetCard({ asset, onRemove, sweepStatus }) {
   const hasBullSwp = sweepOn && Object.values(swpStatus).some(s => s === 'bull');
   const hasBearSwp = sweepOn && Object.values(swpStatus).some(s => s === 'bear');
 
-  const border = (hasBullEBP || hasBullSwp)
-    ? '1px solid #00c896'
-    : (hasBearEBP || hasBearSwp)
-    ? '1px solid #ff4466'
-    : '1px solid #1a1a1a';
+  const hasBull = hasBullEBP || hasBullSwp;
+  const hasBear = hasBearEBP || hasBearSwp;
 
-  const shadow = (hasBullEBP || hasBullSwp)
+  const border = hasBull
+    ? '1px solid #00c896'
+    : hasBear
+    ? '1px solid #ff4466'
+    : '1px solid #222222';
+
+  const shadow = hasBull
     ? '0 0 12px rgba(0,200,150,0.15)'
-    : (hasBearEBP || hasBearSwp)
+    : hasBear
     ? '0 0 12px rgba(255,68,102,0.15)'
     : 'none';
 
@@ -74,32 +77,41 @@ function AssetCard({ asset, onRemove, sweepStatus }) {
   const typeColor = typeColors[asset.asset_type] ?? '#4488ff';
 
   return (
-    <Card sx={{ border, boxShadow: shadow, mb: 2 }}>
-      <CardContent sx={{ py: 2 }}>
-        <Grid container alignItems="center" spacing={2}>
+    <Card sx={{
+      border,
+      boxShadow: shadow,
+      mb: 1.5,
+      bgcolor: '#000000',
+      '&:hover': {
+        borderColor: hasBull ? '#00c896' : hasBear ? '#ff4466' : '#333',
+      },
+    }}>
+      <CardContent sx={{ py: 1.5, '&:last-child': { pb: 1.5 } }}>
+        <Grid container alignItems="center" spacing={1.5}>
 
           <Grid item xs={12} lg={3}>
             <Typography variant="h5"
-              sx={{ fontWeight: 700, fontFamily: 'monospace' }}>
+              sx={{ fontWeight: 700, fontFamily: 'monospace', fontSize: '1rem' }}>
               {asset.symbol}
             </Typography>
             <Chip
               label={asset.asset_type?.toUpperCase().replace('_', ' ')}
               size="small"
               sx={{
-                mt: 0.5, borderRadius: '4px',
-                fontSize: '0.65rem', fontWeight: 700, height: 18,
-                bgcolor: `${typeColor}22`, color: typeColor,
-                border: `1px solid ${typeColor}44`,
+                mt: 0.5, borderRadius: '3px',
+                fontSize: '0.6rem', fontWeight: 600, height: 16,
+                bgcolor: `${typeColor}18`, color: typeColor,
+                border: `1px solid ${typeColor}33`,
+                '& .MuiChip-label': { px: 0.75 },
               }}
             />
           </Grid>
 
           <Grid item xs={12} lg={6}>
             {/* EBP row */}
-            <Stack direction="row" alignItems="center" spacing={0.5} sx={{ mb: 0.75 }}>
+            <Stack direction="row" alignItems="center" spacing={0.5} sx={{ mb: 0.5 }}>
               <Typography variant="overline"
-                sx={{ fontSize: '0.55rem', color: '#4488ff', width: 28, flexShrink: 0 }}>
+                sx={{ fontSize: '0.55rem', color: '#4488ff', width: 32, minWidth: 32, flexShrink: 0, lineHeight: 1 }}>
                 EBP
               </Typography>
               <Stack direction="row" spacing={0.5}>
@@ -112,7 +124,7 @@ function AssetCard({ asset, onRemove, sweepStatus }) {
             {/* Sweep row */}
             <Stack direction="row" alignItems="center" spacing={0.5}>
               <Typography variant="overline"
-                sx={{ fontSize: '0.55rem', color: '#8855ff', width: 28, flexShrink: 0 }}>
+                sx={{ fontSize: '0.55rem', color: '#8855ff', width: 32, minWidth: 32, flexShrink: 0, lineHeight: 1 }}>
                 SWP
               </Typography>
               <Stack direction="row" spacing={0.5}>
@@ -134,7 +146,7 @@ function AssetCard({ asset, onRemove, sweepStatus }) {
               alignItems={{ xs: 'center', lg: 'flex-end' }}
               justifyContent="space-between" spacing={1}>
               {asset.last_alert_at ? (
-                <Typography variant="caption" color="text.secondary">
+                <Typography sx={{ fontSize: '0.65rem', color: '#55556a' }}>
                   {new Date(asset.last_alert_at).toLocaleString('en-US', {
                     timeZone: 'America/New_York',
                     month: 'short', day: 'numeric',
@@ -142,13 +154,13 @@ function AssetCard({ asset, onRemove, sweepStatus }) {
                   })} NY
                 </Typography>
               ) : (
-                <Typography variant="caption" color="text.disabled">
+                <Typography sx={{ fontSize: '0.65rem', color: '#333' }}>
                   No alerts yet
                 </Typography>
               )}
-              <Button size="small" color="error" variant="outlined"
+              <Button size="small" color="error" variant="text"
                 onClick={() => onRemove(asset.id)}
-                sx={{ minWidth: 0, px: 1, fontSize: '0.7rem' }}>
+                sx={{ minWidth: 0, px: 0.5, fontSize: '0.7rem', opacity: 0.7 }}>
                 Remove
               </Button>
             </Stack>
@@ -173,7 +185,7 @@ export default function Dashboard() {
   return (
     <Container maxWidth="xl" sx={{ py: 3 }}>
       <Stack direction="row" justifyContent="space-between"
-        alignItems="center" sx={{ mb: 1 }}>
+        alignItems="center" sx={{ mb: 2 }}>
         <Typography variant="h5" fontWeight={700}>Dashboard</Typography>
         {user && (
           <Stack direction="row" spacing={1} alignItems="center">
@@ -197,14 +209,6 @@ export default function Dashboard() {
           </Stack>
         )}
       </Stack>
-
-      <Typography variant="caption" color="text.disabled" sx={{ mb: 2, display: 'block' }}>
-        Auto-refreshes every 60s
-        {lastUpdated && ` · Last updated ${new Date(lastUpdated).toLocaleTimeString('en-US', {
-          hour: '2-digit', minute: '2-digit', hour12: true,
-          timeZone: 'America/New_York',
-        })} NY`}
-      </Typography>
 
       {user?.active === 0 && (
         <Box sx={{
@@ -238,31 +242,31 @@ export default function Dashboard() {
       <ApiErrorAlert error={error} />
 
       {loading ? (
-        <Stack spacing={2}>
+        <Stack spacing={1.5}>
           {[1, 2, 3].map(i => (
-            <Card key={i} sx={{ border: '1px solid #1a1a1a' }}>
-              <CardContent sx={{ py: 2 }}>
-                <Grid container alignItems="center" spacing={2}>
+            <Card key={i} sx={{ border: '1px solid #222', bgcolor: '#000' }}>
+              <CardContent sx={{ py: 1.5 }}>
+                <Grid container alignItems="center" spacing={1.5}>
                   <Grid item xs={12} lg={3}>
-                    <Skeleton variant="text" width={120} height={32} />
-                    <Skeleton variant="text" width={60} height={20} />
+                    <Skeleton variant="text" width={100} height={24} />
+                    <Skeleton variant="text" width={50} height={16} />
                   </Grid>
                   <Grid item xs={12} lg={6}>
-                    <Stack direction="row" spacing={1} sx={{ mb: 0.75 }}>
+                    <Stack direction="row" spacing={0.5} sx={{ mb: 0.5 }}>
                       {[1,2,3,4,5].map(j => (
                         <Skeleton key={j} variant="rectangular"
-                          width={44} height={52} sx={{ borderRadius: 1 }} />
+                          width={38} height={44} sx={{ borderRadius: 1 }} />
                       ))}
                     </Stack>
-                    <Stack direction="row" spacing={1}>
+                    <Stack direction="row" spacing={0.5}>
                       {[1,2,3,4,5].map(j => (
                         <Skeleton key={j} variant="rectangular"
-                          width={44} height={52} sx={{ borderRadius: 1 }} />
+                          width={38} height={44} sx={{ borderRadius: 1 }} />
                       ))}
                     </Stack>
                   </Grid>
                   <Grid item xs={12} lg={3}>
-                    <Skeleton variant="text" width={100} height={20} />
+                    <Skeleton variant="text" width={80} height={16} />
                   </Grid>
                 </Grid>
               </CardContent>
@@ -270,7 +274,7 @@ export default function Dashboard() {
           ))}
         </Stack>
       ) : assets.length === 0 ? (
-        <Card sx={{ border: '1px solid #1a1a1a' }}>
+        <Card sx={{ border: '1px solid #222', bgcolor: '#000' }}>
           <CardContent sx={{ textAlign: 'center', py: 6 }}>
             <Typography variant="h6" color="text.secondary" gutterBottom>
               No assets tracked yet
