@@ -7,12 +7,20 @@ import Tabs from '@mui/material/Tabs'
 import Tab from '@mui/material/Tab'
 import Button from '@mui/material/Button'
 import Chip from '@mui/material/Chip'
+import Paper from '@mui/material/Paper'
+import TextField from '@mui/material/TextField'
+import IconButton from '@mui/material/IconButton'
+import Alert from '@mui/material/Alert'
+import CircularProgress from '@mui/material/CircularProgress'
 import { Table, THead, TBody, TR, TH, TD } from '../components/ui/Table.jsx'
 import CheckOutlinedIcon from '@mui/icons-material/CheckOutlined'
 import CloseOutlinedIcon from '@mui/icons-material/CloseOutlined'
 import AddOutlinedIcon from '@mui/icons-material/AddOutlined'
 import BlockOutlinedIcon from '@mui/icons-material/BlockOutlined'
 import CheckCircleOutlinedIcon from '@mui/icons-material/CheckCircleOutlined'
+import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
+import SaveOutlinedIcon from '@mui/icons-material/SaveOutlined'
+import CancelOutlinedIcon from '@mui/icons-material/CancelOutlined'
 import api from '../lib/api'
 
 const PLAN_SX = {
@@ -29,7 +37,11 @@ export default function Admin() {
   const [users, setUsers]         = useState([])
   const [payments, setPayments]   = useState([])
   const [tokens, setTokens]       = useState([])
+  const [tiers, setTiers]         = useState([])
   const [loading, setLoading]     = useState(true)
+  const [editingTier, setEditingTier] = useState(null)
+  const [tierForm, setTierForm]   = useState({})
+  const [savingTier, setSavingTier] = useState(false)
 
   useEffect(() => {
     (async () => {
@@ -39,14 +51,16 @@ export default function Admin() {
         const admin = me.is_admin === 1
         setIsAdmin(admin)
         if (admin) {
-          const [u, p, t] = await Promise.all([
+          const [u, p, t, tc] = await Promise.all([
             api.get('/admin/users',    token),
             api.get('/admin/payments', token),
             api.get('/admin/tokens',   token),
+            api.get('/admin/tiers',    token),
           ])
           setUsers(Array.isArray(u) ? u : [])
           setPayments(Array.isArray(p) ? p : [])
           setTokens(Array.isArray(t) ? t : [])
+          setTiers(Array.isArray(tc) ? tc : [])
         }
       } catch (e) {
         console.error('Admin load error:', e)
@@ -118,6 +132,7 @@ export default function Admin() {
           <Tab label="Users" />
           <Tab label="Payments" />
           <Tab label="Invite Tokens" />
+          <Tab label="Tier Config" />
         </Tabs>
       </Box>
 
@@ -285,6 +300,123 @@ export default function Admin() {
               ))}
             </TBody>
           </Table>
+        </Box>
+      )}
+
+      {/* Tier Config Tab */}
+      {tab === 3 && (
+        <Box>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Modify tier pricing and asset slot limits.
+            Changes take effect immediately for new payments.
+            Existing approved users are not affected.
+          </Typography>
+
+          <Stack spacing={2}>
+            {tiers.map(tier => (
+              <Paper key={tier.tier} sx={{ p: 2.5, border: '1px solid', borderColor: 'divider' }}>
+                {editingTier === tier.tier ? (
+                  <Stack spacing={2}>
+                    <Stack direction="row" alignItems="center" spacing={1}>
+                      <Typography variant="h6">{tier.emoji}</Typography>
+                      <Typography variant="subtitle1" fontWeight={600}>
+                        {tier.label}
+                      </Typography>
+                    </Stack>
+
+                    <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
+                      <TextField
+                        label="Price (₹)"
+                        type="number"
+                        size="small"
+                        value={tierForm.price_inr}
+                        onChange={e => setTierForm(f => ({ ...f, price_inr: parseInt(e.target.value) }))}
+                        inputProps={{ min: 1 }}
+                        sx={{ width: 140 }}
+                      />
+                      <TextField
+                        label="Asset Slots"
+                        type="number"
+                        size="small"
+                        value={tierForm.asset_limit}
+                        onChange={e => setTierForm(f => ({ ...f, asset_limit: parseInt(e.target.value) }))}
+                        inputProps={{ min: 1, max: 100 }}
+                        sx={{ width: 140 }}
+                      />
+                    </Stack>
+
+                    <Stack direction="row" spacing={1}>
+                      <Button
+                        variant="contained" size="small"
+                        startIcon={savingTier ? <CircularProgress size={12} /> : <SaveOutlinedIcon />}
+                        disabled={savingTier}
+                        onClick={async () => {
+                          setSavingTier(true)
+                          try {
+                            const token = await getToken()
+                            await api.patch(`/admin/tiers/${tier.tier}`, {
+                              ...tier,
+                              ...tierForm,
+                            }, token)
+                            const tc = await api.get('/admin/tiers', token)
+                            setTiers(Array.isArray(tc) ? tc : [])
+                            setEditingTier(null)
+                          } catch (e) {
+                            console.error(e)
+                          } finally {
+                            setSavingTier(false)
+                          }
+                        }}
+                      >
+                        Save
+                      </Button>
+                      <Button
+                        variant="outlined" size="small"
+                        startIcon={<CancelOutlinedIcon />}
+                        onClick={() => setEditingTier(null)}
+                      >
+                        Cancel
+                      </Button>
+                    </Stack>
+                  </Stack>
+                ) : (
+                  <Stack direction="row" justifyContent="space-between" alignItems="center">
+                    <Stack direction="row" alignItems="center" spacing={2}>
+                      <Typography variant="h5">{tier.emoji}</Typography>
+                      <Box>
+                        <Typography variant="subtitle1" fontWeight={600}>
+                          {tier.label}
+                        </Typography>
+                        <Stack direction="row" spacing={2}>
+                          <Typography variant="body2" color="text.secondary">
+                            ₹{tier.price_inr} / 30 days
+                          </Typography>
+                          <Typography variant="body2" color="text.secondary">
+                            {tier.asset_limit} asset slots
+                          </Typography>
+                        </Stack>
+                      </Box>
+                    </Stack>
+                    <IconButton
+                      size="small"
+                      onClick={() => {
+                        setEditingTier(tier.tier)
+                        setTierForm({ price_inr: tier.price_inr, asset_limit: tier.asset_limit })
+                      }}
+                    >
+                      <EditOutlinedIcon fontSize="small" />
+                    </IconButton>
+                  </Stack>
+                )}
+              </Paper>
+            ))}
+
+            {tiers.length === 0 && (
+              <Alert severity="info">
+                No tier config found. Run the SQL migration in D1 Console first.
+              </Alert>
+            )}
+          </Stack>
         </Box>
       )}
     </Box>

@@ -19,15 +19,7 @@ import BoltOutlinedIcon from '@mui/icons-material/BoltOutlined'
 import AdminPanelSettingsOutlinedIcon from '@mui/icons-material/AdminPanelSettingsOutlined'
 import ChevronLeftOutlinedIcon from '@mui/icons-material/ChevronLeftOutlined'
 import ChevronRightOutlinedIcon from '@mui/icons-material/ChevronRightOutlined'
-
-const NAV_ITEMS = [
-  { to: '/dashboard', label: 'Dashboard', Icon: DashboardOutlinedIcon },
-  { to: '/assets',    label: 'Assets',    Icon: ShowChartOutlinedIcon },
-  { to: '/alerts',    label: 'Alerts',    Icon: NotificationsOutlinedIcon },
-  { to: '/settings',  label: 'Settings',  Icon: SettingsOutlinedIcon },
-  { to: '/upgrade',   label: 'Upgrade',   Icon: BoltOutlinedIcon, highlight: true },
-  { to: '/admin',     label: 'Admin',     Icon: AdminPanelSettingsOutlinedIcon },
-]
+import { useUser } from '../../hooks/useUser'
 
 const EXPANDED_W = 240
 const COLLAPSED_W = 56
@@ -36,6 +28,16 @@ export default function SidebarContent({ mobile = false, onClose }) {
   const { pathname } = useLocation()
   const navigate = useNavigate()
   const theme = useTheme()
+  const { user } = useUser()
+
+  const NAV_ITEMS = [
+    { to: '/dashboard', label: 'Dashboard', Icon: DashboardOutlinedIcon },
+    { to: '/assets',    label: 'Assets',    Icon: ShowChartOutlinedIcon },
+    { to: '/alerts',    label: 'Alerts',    Icon: NotificationsOutlinedIcon },
+    { to: '/settings',  label: 'Settings',  Icon: SettingsOutlinedIcon },
+    { to: '/upgrade',   label: 'Upgrade',   Icon: BoltOutlinedIcon, highlight: true },
+    ...(user?.is_admin === 1 ? [{ to: '/admin', label: 'Admin', Icon: AdminPanelSettingsOutlinedIcon }] : []),
+  ]
 
   const [collapsed, setCollapsed] = useState(() => {
     if (mobile) return false

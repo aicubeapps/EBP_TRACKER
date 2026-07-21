@@ -8,24 +8,29 @@ export function useUser() {
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState(null);
 
-  useEffect(() => {
-    if (!isLoaded) return;
-    if (!isSignedIn) {
+  const fetchUser = async () => {
+    if (!isLoaded || !isSignedIn) {
       setLoading(false);
       return;
     }
-    (async () => {
-      try {
-        const token = await getToken();
-        const data  = await api.get('/user/me', token);
-        setUser(data);
-      } catch (e) {
-        setError(e.message);
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [isLoaded, isSignedIn, getToken]);
+    try {
+      const token = await getToken();
+      const data  = await api.get('/user/me', token);
+      setUser(data);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-  return { user, loading, error };
+  useEffect(() => {
+    if (!isLoaded) return;
+    fetchUser();
+    // Refresh every 2 minutes to pick up plan changes
+    const interval = setInterval(fetchUser, 120_000);
+    return () => clearInterval(interval);
+  }, [isLoaded, isSignedIn]);
+
+  return { user, loading, error, refetch: fetchUser };
 }

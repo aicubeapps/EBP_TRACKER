@@ -70,6 +70,7 @@ export default function Upgrade() {
   const [paymentStatus, setPaymentStatus] = useState(null);
   const [msg, setMsg]                     = useState({ text: '', severity: 'info' });
   const [copied, setCopied]               = useState(false);
+  const [tierConfig, setTierConfig]       = useState([]);
 
   useEffect(() => {
     (async () => {
@@ -82,6 +83,20 @@ export default function Upgrade() {
       } catch {}
     })();
   }, []);
+
+  useEffect(() => {
+    api.get('/tiers')
+      .then(data => { if (Array.isArray(data)) setTierConfig(data); })
+      .catch(() => {}); // fall back to hardcoded TIERS constant
+  }, []);
+
+  const displayTiers = tierConfig.length > 0
+    ? tierConfig.map(tc => ({
+        ...TIERS.find(t => t.id === tc.tier),
+        price: tc.price_inr,
+        assets: tc.asset_limit,
+      }))
+    : TIERS;
 
   const handleCopyUPI = () => {
     navigator.clipboard.writeText(UPI_ID);
@@ -152,7 +167,7 @@ export default function Upgrade() {
 
       {/* Tier cards */}
       <Grid container spacing={3} justifyContent="center" sx={{ mb: 4 }}>
-        {TIERS.map(tier => (
+        {displayTiers.map(tier => (
           <Grid item xs={12} sm={6} md={4} key={tier.id}>
             <Card
               onClick={() => setSelectedTier(tier.id)}
@@ -232,11 +247,11 @@ export default function Upgrade() {
             <Alert severity="info">
               You selected:{' '}
               <strong>
-                {TIERS.find(t => t.id === selectedTier)?.emoji}{' '}
+                {displayTiers.find(t => t.id === selectedTier)?.emoji}{' '}
                 {selectedTier.charAt(0).toUpperCase() + selectedTier.slice(1)}
               </strong>
               {' — '}
-              <strong>₹{TIERS.find(t => t.id === selectedTier)?.price}</strong>
+              <strong>₹{displayTiers.find(t => t.id === selectedTier)?.price}</strong>
             </Alert>
 
             {/* QR Code */}
