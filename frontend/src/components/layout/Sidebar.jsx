@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
+import { useTheme } from '@mui/material/styles'
 import Box from '@mui/material/Box'
 import List from '@mui/material/List'
 import ListItem from '@mui/material/ListItem'
@@ -34,6 +35,7 @@ const COLLAPSED_W = 56
 export default function SidebarContent({ mobile = false, onClose }) {
   const { pathname } = useLocation()
   const navigate = useNavigate()
+  const theme = useTheme()
 
   const [collapsed, setCollapsed] = useState(() => {
     if (mobile) return false
@@ -52,12 +54,12 @@ export default function SidebarContent({ mobile = false, onClose }) {
   }
 
   return (
-    <Box sx={{ width, display: 'flex', flexDirection: 'column', height: '100%', bgcolor: '#000000', transition: 'width 0.2s', overflow: 'hidden' }}>
+    <Box sx={{ width, display: 'flex', flexDirection: 'column', height: '100%', bgcolor: 'background.default', transition: 'width 0.2s', overflow: 'hidden' }}>
       {/* Logo */}
-      <Box sx={{ px: collapsed && !mobile ? 0 : 2, py: 2.5, display: 'flex', alignItems: 'center', gap: 1.5, justifyContent: collapsed && !mobile ? 'center' : 'flex-start', minHeight: 56, borderBottom: '1px solid #1a1a1a' }}>
+      <Box sx={{ px: collapsed && !mobile ? 0 : 2, py: 2.5, display: 'flex', alignItems: 'center', gap: 1.5, justifyContent: collapsed && !mobile ? 'center' : 'flex-start', minHeight: 56, borderBottom: `1px solid ${theme.palette.divider}` }}>
         <img src="/favicon.svg" alt="EBP" style={{ width: 28, height: 28, flexShrink: 0 }} />
         {(!collapsed || mobile) && (
-          <Typography variant="body1" sx={{ fontWeight: 700, color: '#e8e8f0', whiteSpace: 'nowrap', letterSpacing: '0.02em' }}>
+          <Typography variant="body1" sx={{ fontWeight: 700, color: 'text.primary', whiteSpace: 'nowrap', letterSpacing: '0.02em' }}>
             EBP Tracker
           </Typography>
         )}
@@ -67,8 +69,8 @@ export default function SidebarContent({ mobile = false, onClose }) {
       <List sx={{ flex: 1, py: 1, px: collapsed && !mobile ? 0 : 0 }}>
         {NAV_ITEMS.map(({ to, label, Icon, highlight }) => {
           const active = pathname === to
-          const iconColor = active ? '#4488ff' : highlight ? '#f5a623' : '#8888a8'
-          const textColor = active ? '#e8e8f0' : highlight ? '#f5a623' : '#8888a8'
+          const iconColor = active ? theme.palette.primary.main : highlight ? theme.palette.warning.main : theme.palette.text.secondary
+          const textColor = active ? theme.palette.text.primary : highlight ? theme.palette.warning.main : theme.palette.text.secondary
           const btn = (
             <ListItemButton
               selected={active}

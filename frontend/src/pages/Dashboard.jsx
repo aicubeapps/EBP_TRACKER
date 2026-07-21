@@ -3,6 +3,7 @@ import {
   Box, Container, Typography, Card, CardContent,
   Stack, Chip, Skeleton, Button, Grid, Divider
 } from '@mui/material';
+import { useTheme } from '@mui/material/styles';
 import { AddOutlined } from '@mui/icons-material';
 import BoltOutlinedIcon from '@mui/icons-material/BoltOutlined';
 import { useAssets } from '../hooks/useAssets';
@@ -14,37 +15,52 @@ const EBP_TFS   = ['M15', '1H', '4H', 'D', 'W'];
 const SWEEP_TFS = ['M5', 'M15', 'M30', '1H', '4H'];
 
 function TFCell({ tf, signal, disabled = false }) {
+  const theme = useTheme();
+  const isDark = theme.palette.mode === 'dark';
+
   const color = disabled
-    ? '#1a1a1a'
-    : signal === 'bull' ? '#00c896'
-    : signal === 'bear' ? '#ff4466'
-    : '#2a2a2a';
+    ? (isDark ? '#1c2128' : '#e2dbd0')
+    : signal === 'bull' ? theme.palette.success.main
+    : signal === 'bear' ? theme.palette.error.main
+    : (isDark ? '#30363d' : '#c8bfb0');
+
   const glow = disabled ? 'none'
-    : signal === 'bull' ? '0 0 6px #00c896'
-    : signal === 'bear' ? '0 0 6px #ff4466'
+    : signal === 'bull' ? `0 0 6px ${theme.palette.success.main}60`
+    : signal === 'bear' ? `0 0 6px ${theme.palette.error.main}60`
     : 'none';
+
   return (
     <Box sx={{
       display: 'flex', flexDirection: 'column', alignItems: 'center',
       px: 1, py: 0.75,
-      border: `1px solid ${disabled ? '#111' : '#1e1e1e'}`,
+      border: `1px solid ${disabled
+        ? (isDark ? '#1c2128' : '#e2dbd0')
+        : (isDark ? '#21262d' : '#d5cec4')}`,
       borderRadius: 1,
-      bgcolor: disabled ? '#050505' : '#080808',
-      minWidth: 38, opacity: disabled ? 0.35 : 1,
+      bgcolor: disabled
+        ? (isDark ? '#0d1117' : '#ebe5db')
+        : (isDark ? '#161b22' : '#f2ede4'),
+      minWidth: 38,
+      opacity: disabled ? 0.35 : 1,
+      transition: 'none',
     }}>
       <Typography variant="overline"
-        sx={{ fontSize: '0.6rem', color: disabled ? '#333' : '#55556a', lineHeight: 1.2 }}>
+        sx={{ fontSize: '0.55rem', lineHeight: 1.2 }}>
         {tf}
       </Typography>
       <Box sx={{
-        width: 7, height: 7, borderRadius: '50%', mt: 0.5,
-        bgcolor: color, boxShadow: glow,
+        width: 8, height: 8, borderRadius: '50%',
+        mt: 0.5, bgcolor: color, boxShadow: glow,
+        transition: 'none',
       }} />
     </Box>
   );
 }
 
 function AssetCard({ asset, onRemove, sweepStatus }) {
+  const theme  = useTheme();
+  const isDark = theme.palette.mode === 'dark';
+
   const ebpStatus = asset.ebpStatus ?? {};
   const swpStatus = sweepStatus ?? {};
   const sweepTFs  = asset.sweep_timeframes?.split(',').map(t => t.trim()) ?? [];
@@ -59,31 +75,33 @@ function AssetCard({ asset, onRemove, sweepStatus }) {
   const hasBear = hasBearEBP || hasBearSwp;
 
   const border = hasBull
-    ? '1px solid #00c896'
+    ? `1px solid ${theme.palette.success.main}`
     : hasBear
-    ? '1px solid #ff4466'
-    : '1px solid #222222';
+    ? `1px solid ${theme.palette.error.main}`
+    : `1px solid ${theme.palette.divider}`;
 
   const shadow = hasBull
-    ? '0 0 12px rgba(0,200,150,0.15)'
+    ? `0 0 12px ${theme.palette.success.main}25`
     : hasBear
-    ? '0 0 12px rgba(255,68,102,0.15)'
+    ? `0 0 12px ${theme.palette.error.main}25`
     : 'none';
 
-  const typeColors = {
-    forex: '#4488ff', commodity: '#f5a623',
-    index: '#8855ff', nse_asset: '#00c896', crypto: '#ff8c00',
+  const typeColors = isDark ? {
+    forex: '#58a6ff', commodity: '#d29922',
+    index: '#bc8cff', nse_asset: '#3fb950', crypto: '#f0883e',
+  } : {
+    forex: '#0969da', commodity: '#92620a',
+    index: '#7c3aed', nse_asset: '#1a7f37', crypto: '#bc4c00',
   };
-  const typeColor = typeColors[asset.asset_type] ?? '#4488ff';
+  const typeColor = typeColors[asset.asset_type] ?? typeColors.forex;
 
   return (
     <Card sx={{
       border,
       boxShadow: shadow,
       mb: 1.5,
-      bgcolor: '#000000',
       '&:hover': {
-        borderColor: hasBull ? '#00c896' : hasBear ? '#ff4466' : '#333',
+        borderColor: hasBull ? theme.palette.success.main : hasBear ? theme.palette.error.main : theme.palette.text.disabled,
       },
     }}>
       <CardContent sx={{ py: 1.5, '&:last-child': { pb: 1.5 } }}>
@@ -111,7 +129,7 @@ function AssetCard({ asset, onRemove, sweepStatus }) {
             {/* EBP row */}
             <Stack direction="row" alignItems="center" spacing={0.5} sx={{ mb: 0.5 }}>
               <Typography variant="overline"
-                sx={{ fontSize: '0.55rem', color: '#4488ff', width: 32, minWidth: 32, flexShrink: 0, lineHeight: 1 }}>
+                sx={{ fontSize: '0.55rem', color: 'primary.main', width: 32, minWidth: 32, flexShrink: 0, lineHeight: 1 }}>
                 EBP
               </Typography>
               <Stack direction="row" spacing={0.5}>
@@ -124,7 +142,7 @@ function AssetCard({ asset, onRemove, sweepStatus }) {
             {/* Sweep row */}
             <Stack direction="row" alignItems="center" spacing={0.5}>
               <Typography variant="overline"
-                sx={{ fontSize: '0.55rem', color: '#8855ff', width: 32, minWidth: 32, flexShrink: 0, lineHeight: 1 }}>
+                sx={{ fontSize: '0.55rem', color: 'secondary.main', width: 32, minWidth: 32, flexShrink: 0, lineHeight: 1 }}>
                 SWP
               </Typography>
               <Stack direction="row" spacing={0.5}>
@@ -146,7 +164,7 @@ function AssetCard({ asset, onRemove, sweepStatus }) {
               alignItems={{ xs: 'center', lg: 'flex-end' }}
               justifyContent="space-between" spacing={1}>
               {asset.last_alert_at ? (
-                <Typography sx={{ fontSize: '0.65rem', color: '#55556a' }}>
+                <Typography sx={{ fontSize: '0.65rem', color: 'text.disabled' }}>
                   {new Date(asset.last_alert_at).toLocaleString('en-US', {
                     timeZone: 'America/New_York',
                     month: 'short', day: 'numeric',
@@ -154,7 +172,7 @@ function AssetCard({ asset, onRemove, sweepStatus }) {
                   })} NY
                 </Typography>
               ) : (
-                <Typography sx={{ fontSize: '0.65rem', color: '#333' }}>
+                <Typography sx={{ fontSize: '0.65rem', color: 'text.disabled' }}>
                   No alerts yet
                 </Typography>
               )}
@@ -194,10 +212,9 @@ export default function Dashboard() {
               size="small"
               sx={{
                 fontWeight: 700, borderRadius: '4px',
-                bgcolor: { free:'#1a1a1a', coffee:'#2a1f00',
-                  beer:'#1a1200', wine:'#1a0020' }[user.plan] ?? '#1a1a1a',
-                color: { free:'#888', coffee:'#f5a623',
-                  beer:'#ff8c00', wine:'#8855ff' }[user.plan] ?? '#888',
+                bgcolor: 'background.default',
+                color: { free:'text.secondary', coffee:'warning.main',
+                  beer:'warning.main', wine:'secondary.main' }[user.plan] ?? 'text.secondary',
               }}
             />
             {daysLeft !== null && (
@@ -213,13 +230,13 @@ export default function Dashboard() {
       {user?.active === 0 && (
         <Box sx={{
           position: 'fixed', inset: 0, zIndex: 1300,
-          bgcolor: 'rgba(0,0,0,0.85)',
+          bgcolor: 'rgba(0,0,0,0.75)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           backdropFilter: 'blur(4px)',
         }}>
           <Card sx={{ maxWidth: 400, width: '90%', textAlign: 'center', p: 1 }}>
             <CardContent>
-              <BoltOutlinedIcon sx={{ fontSize: 48, color: '#f5a623', mb: 1 }} />
+              <BoltOutlinedIcon sx={{ fontSize: 48, color: 'warning.main', mb: 1 }} />
               <Typography variant="h5" fontWeight={700} sx={{ mb: 1 }}>
                 Plan Expired
               </Typography>
@@ -231,7 +248,7 @@ export default function Dashboard() {
               <Button variant="contained" size="large" fullWidth
                 startIcon={<BoltOutlinedIcon />}
                 onClick={() => navigate('/upgrade')}
-                sx={{ bgcolor: '#f5a623', '&:hover': { bgcolor: '#d4891f' } }}>
+                sx={{ bgcolor: 'warning.main', '&:hover': { bgcolor: 'warning.dark' } }}>
                 Renew Plan
               </Button>
             </CardContent>
@@ -244,7 +261,7 @@ export default function Dashboard() {
       {loading ? (
         <Stack spacing={1.5}>
           {[1, 2, 3].map(i => (
-            <Card key={i} sx={{ border: '1px solid #222', bgcolor: '#000' }}>
+            <Card key={i} sx={{ border: '1px solid', borderColor: 'divider' }}>
               <CardContent sx={{ py: 1.5 }}>
                 <Grid container alignItems="center" spacing={1.5}>
                   <Grid item xs={12} lg={3}>
@@ -274,7 +291,7 @@ export default function Dashboard() {
           ))}
         </Stack>
       ) : assets.length === 0 ? (
-        <Card sx={{ border: '1px solid #222', bgcolor: '#000' }}>
+        <Card sx={{ border: '1px solid', borderColor: 'divider' }}>
           <CardContent sx={{ textAlign: 'center', py: 6 }}>
             <Typography variant="h6" color="text.secondary" gutterBottom>
               No assets tracked yet

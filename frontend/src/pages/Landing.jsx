@@ -3,47 +3,54 @@ import Typography from '@mui/material/Typography'
 import Button from '@mui/material/Button'
 import { SignInButton } from '@clerk/clerk-react'
 import { useParams } from 'react-router-dom'
+import { useTheme } from '@mui/material/styles'
 
 export default function Landing() {
   const { token } = useParams()
+  const theme = useTheme()
+  const isDark = theme.palette.mode === 'dark'
 
   return (
     <Box sx={{
       minHeight: '100vh',
-      bgcolor: '#000000',
+      bgcolor: 'background.default',
       display: 'flex',
       flexDirection: 'column',
       alignItems: 'center',
       justifyContent: 'center',
-      backgroundImage: 'radial-gradient(circle at 1px 1px, #1a1a1a 1px, transparent 0)',
-      backgroundSize: '32px 32px',
+      backgroundImage: isDark
+        ? 'radial-gradient(circle at 1px 1px, #21262d 1px, transparent 0)'
+        : 'radial-gradient(circle at 1px 1px, #c8bfb0 1px, transparent 0)',
+      backgroundSize: '28px 28px',
       px: 2,
       position: 'relative',
       '&::before': {
         content: '""',
         position: 'absolute',
         inset: 0,
-        background: 'radial-gradient(ellipse at center, rgba(68,136,255,0.05) 0%, transparent 70%)',
+        background: isDark
+          ? 'radial-gradient(ellipse at center, rgba(88,166,255,0.06) 0%, transparent 70%)'
+          : 'radial-gradient(ellipse at center, rgba(9,105,218,0.05) 0%, transparent 70%)',
         pointerEvents: 'none',
       },
     }}>
       <Box sx={{ position: 'relative', textAlign: 'center', maxWidth: 480 }}>
         <img src="/favicon.svg" alt="EBP Tracker" style={{ width: 64, height: 64, marginBottom: 24 }} />
 
-        <Typography variant="h2" sx={{ fontSize: { xs: '2rem', sm: '2.5rem' }, fontWeight: 700, color: '#e8e8f0', mb: 1.5, letterSpacing: '-0.03em' }}>
+        <Typography variant="h2" sx={{ fontSize: { xs: '2rem', sm: '2.5rem' }, fontWeight: 700, color: 'text.primary', mb: 1.5, letterSpacing: '-0.03em' }}>
           EBP Tracker
         </Typography>
 
-        <Typography variant="body1" sx={{ color: '#8888a8', mb: 0.75 }}>
+        <Typography variant="body1" sx={{ color: 'text.secondary', mb: 0.75 }}>
           Precision alerts for engulfing bar prints.
         </Typography>
-        <Typography variant="caption" sx={{ color: '#55556a', display: 'block', mb: 4 }}>
+        <Typography variant="caption" sx={{ color: 'text.disabled', display: 'block', mb: 4 }}>
           Forex · Commodities · Indices · Indian Markets
         </Typography>
 
         {token && (
-          <Box sx={{ mb: 3, px: 2, py: 1.5, bgcolor: '#001033', border: '1px solid #4488ff', borderRadius: 1 }}>
-            <Typography variant="caption" sx={{ color: '#4488ff' }}>
+          <Box sx={{ mb: 3, px: 2, py: 1.5, bgcolor: 'background.paper', border: `1px solid ${theme.palette.primary.main}`, borderRadius: 1 }}>
+            <Typography variant="caption" sx={{ color: 'primary.main' }}>
               Invite token active: <strong style={{ fontFamily: 'monospace' }}>{token}</strong>
             </Typography>
           </Box>
@@ -53,7 +60,7 @@ export default function Landing() {
           <Button
             variant="contained"
             size="large"
-            sx={{ px: 4, py: 1.5, fontSize: '0.9375rem', fontWeight: 600, borderRadius: 2, boxShadow: '0 4px 24px rgba(68,136,255,0.3)' }}
+            sx={{ px: 4, py: 1.5, fontSize: '0.9375rem', fontWeight: 600, borderRadius: 2, boxShadow: '0 4px 24px rgba(88,166,255,0.25)' }}
             startIcon={
               <svg viewBox="0 0 24 24" style={{ width: 20, height: 20 }} fill="white">
                 <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
@@ -67,7 +74,7 @@ export default function Landing() {
           </Button>
         </SignInButton>
 
-        <Typography variant="caption" sx={{ display: 'block', mt: 4, color: '#55556a' }}>
+        <Typography variant="caption" sx={{ display: 'block', mt: 4, color: 'text.disabled' }}>
           Invite only access · By invitation only
         </Typography>
       </Box>

@@ -1,21 +1,18 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import { ThemeProvider } from '@mui/material/styles'
-import CssBaseline from '@mui/material/CssBaseline'
 import { ClerkProvider } from '@clerk/clerk-react'
+import { AppThemeProvider } from './context/ThemeContext'
 import App from './App.jsx'
-import theme from './theme.js'
 import './index.css'
 
 const CLERK_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY || 'pk_test_placeholder'
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
-    <ThemeProvider theme={theme}>
-      <CssBaseline />
-      <ClerkProvider publishableKey={CLERK_KEY}>
+    <ClerkProvider publishableKey={CLERK_KEY}>
+      <AppThemeProvider>
         <App />
-      </ClerkProvider>
-    </ThemeProvider>
+      </AppThemeProvider>
+    </ClerkProvider>
   </React.StrictMode>
 )

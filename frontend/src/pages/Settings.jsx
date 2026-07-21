@@ -6,16 +6,20 @@ import {
   FormControl, FormLabel, CircularProgress, Box, Chip, Switch
 } from '@mui/material';
 import { useUser } from '../hooks/useUser';
+import { useThemeMode } from '../context/ThemeContext';
 import {
   CheckCircleOutlined,
   LinkOffOutlined,
-  SendOutlined
+  SendOutlined,
+  DarkModeOutlined,
+  LightModeOutlined,
 } from '@mui/icons-material';
 import api from '../lib/api';
 
 export default function Settings() {
-  const { getToken } = useAuth();
-  const { user }     = useUser();
+  const { getToken }          = useAuth();
+  const { user }              = useUser();
+  const { mode, toggleTheme } = useThemeMode();
 
   // Telegram state
   const [tgStatus, setTgStatus]     = useState(null);
@@ -134,6 +138,31 @@ export default function Settings() {
   return (
     <Container maxWidth="md" sx={{ py: 3 }}>
       <Typography variant="h5" fontWeight={700} sx={{ mb: 3 }}>Settings</Typography>
+
+      {/* Appearance */}
+      <Paper sx={{ p: 3, mb: 3 }}>
+        <Typography variant="subtitle1" fontWeight={600} gutterBottom>Appearance</Typography>
+        <Divider sx={{ mb: 2 }} />
+        <Stack direction="row" justifyContent="space-between" alignItems="center">
+          <Box>
+            <Typography variant="body2" fontWeight={500}>Theme</Typography>
+            <Typography variant="caption" color="text.secondary" display="block">
+              {mode === 'dark'
+                ? 'Dark mode — easy on eyes in low light'
+                : 'Light mode — warm ivory, easy in bright environments'}
+            </Typography>
+          </Box>
+          <Stack direction="row" alignItems="center" spacing={1}>
+            <DarkModeOutlined sx={{ fontSize: 16, color: mode === 'dark' ? 'primary.main' : 'text.disabled' }} />
+            <Switch
+              checked={mode === 'light'}
+              onChange={toggleTheme}
+              size="small"
+            />
+            <LightModeOutlined sx={{ fontSize: 16, color: mode === 'light' ? 'warning.main' : 'text.disabled' }} />
+          </Stack>
+        </Stack>
+      </Paper>
 
       {/* Telegram Section */}
       <Paper sx={{ p: 3, mb: 3 }}>
