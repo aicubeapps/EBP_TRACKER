@@ -312,6 +312,125 @@ async function cleanupExpiredSignals(db) {
   await db.prepare('DELETE FROM pending_signals WHERE expires_at < ?').bind(Date.now()).run();
 }
 
+// ── Swing State + MSS Engine (Phase 1.5 + 2, inlined) ────────
+
+function getCandleDirection(candle, priorDirection) {
+  if (candle.close > candle.open) return 'bull';
+  if (candle.close < candle.open) return 'bear';
+  return priorDirection;
+}
+
+async function updateSwingState(db, symbol, timeframe, candles) {
+  const currentCandle = candles[2];
+  const now = Date.now();
+
+  const state = await db.prepare(
+    `SELECT * FROM swing_state WHERE symbol=? AND timeframe=?`
+  ).bind(symbol, timeframe).first();
+
+  if (!state) {
+    const dir = currentCandle.close >= currentCandle.open ? 'bull' : 'bear';
+    await db.prepare(
+      `INSERT INTO swing_state
+       (symbol,timeframe,run_direction,run_start,run_extreme,extreme_time,updated_at)
+       VALUES (?,?,?,?,?,?,?)`
+    ).bind(
+      symbol, timeframe, dir, currentCandle.time,
+      dir === 'bull' ? currentCandle.high : currentCandle.low,
+      currentCandle.time, now
+    ).run();
+    return null;
+  }
+
+  const currentDir = getCandleDirection(currentCandle, state.run_direction);
+  let newState = { ...state };
+
+  if (currentDir === state.run_direction) {
+    if (currentDir === 'bull' && currentCandle.high > state.run_extreme) {
+      newState.run_extreme  = currentCandle.high;
+      newState.extreme_time = currentCandle.time;
+    } else if (currentDir === 'bear' && currentCandle.low < state.run_extreme) {
+      newState.run_extreme  = currentCandle.low;
+      newState.extreme_time = currentCandle.time;
+    }
+  } else {
+    if (state.run_direction === 'bull') {
+      newState.confirmed_swing_high      = state.run_extreme;
+      newState.confirmed_swing_high_time = state.extreme_time;
+    } else {
+      newState.confirmed_swing_low      = state.run_extreme;
+      newState.confirmed_swing_low_time = state.extreme_time;
+    }
+    newState.run_direction = currentDir;
+    newState.run_start     = currentCandle.time;
+    newState.run_extreme   = currentDir === 'bull' ? currentCandle.high : currentCandle.low;
+    newState.extreme_time  = currentCandle.time;
+  }
+
+  newState.updated_at = now;
+
+  await db.prepare(
+    `INSERT INTO swing_state
+     (symbol,timeframe,run_direction,run_start,run_extreme,extreme_time,
+      confirmed_swing_high,confirmed_swing_high_time,
+      confirmed_swing_low,confirmed_swing_low_time,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)
+     ON CONFLICT(symbol,timeframe) DO UPDATE SET
+       run_direction=excluded.run_direction,
+       run_start=excluded.run_start,
+       run_extreme=excluded.run_extreme,
+       extreme_time=excluded.extreme_time,
+       confirmed_swing_high=excluded.confirmed_swing_high,
+       confirmed_swing_high_time=excluded.confirmed_swing_high_time,
+       confirmed_swing_low=excluded.confirmed_swing_low,
+       confirmed_swing_low_time=excluded.confirmed_swing_low_time,
+       updated_at=excluded.updated_at`
+  ).bind(
+    symbol, timeframe,
+    newState.run_direction, newState.run_start, newState.run_extreme, newState.extreme_time,
+    newState.confirmed_swing_high ?? null, newState.confirmed_swing_high_time ?? null,
+    newState.confirmed_swing_low  ?? null, newState.confirmed_swing_low_time  ?? null,
+    newState.updated_at
+  ).run();
+
+  return detectMSS(newState, currentCandle);
+}
+
+function detectMSS(swingState, currentCandle) {
+  if (
+    swingState.run_direction === 'bear' &&
+    swingState.confirmed_swing_high != null &&
+    currentCandle.close > swingState.confirmed_swing_high
+  ) {
+    return { direction: 'bull', level: swingState.confirmed_swing_high, candle_time: currentCandle.time };
+  }
+  if (
+    swingState.run_direction === 'bull' &&
+    swingState.confirmed_swing_low != null &&
+    currentCandle.close < swingState.confirmed_swing_low
+  ) {
+    return { direction: 'bear', level: swingState.confirmed_swing_low, candle_time: currentCandle.time };
+  }
+  return null;
+}
+
+function formatMSSAlert(symbol, tf, mss, htfBias, htfLabelStr) {
+  const emoji      = mss.direction === 'bull' ? '🟢' : '🔴';
+  const label      = mss.direction === 'bull' ? 'BULL MSS' : 'BEAR MSS';
+  const swingLabel = mss.direction === 'bull' ? 'Swing high reclaimed' : 'Swing low reclaimed';
+  const aligned    = (mss.direction === 'bull' && htfBias === 'bullish') ||
+                     (mss.direction === 'bear' && htfBias === 'bearish') ||
+                     htfBias === 'neutral';
+  return `${emoji} <b>${label} — ${symbol}</b>
+⏱ Timeframe: ${tf}
+🕐 Candle: ${fmtNY(mss.candle_time)} NY
+📊 Trend: ${htfBias} (${htfLabelStr} bias) ${aligned ? '✅' : '⚠️'}
+━━━━━━━━━━━━━━
+${swingLabel}: ${mss.level?.toFixed(5)}
+━━━━━━━━━━━━━━
+<i>EBP Tracker</i>`;
+}
+
 // ── FVG Engine (Phase 1, inlined) ────────────────────────────
 
 function detectFVG(candles) {
@@ -445,9 +564,40 @@ export async function handleSweepCron(tf, env) {
 
       await updateSweepCandleCache(env.DB, symbol, tf, candles);
 
-      // FVG Phase 1 — candles are newest-first; processFVGs needs oldest-first
+      // FVG Phase 1 + Swing/MSS Phase 1.5+2 — candles are newest-first; need oldest-first
       if (candles.length >= 3) {
-        await processFVGs(env.DB, symbol, tf, [candles[2], candles[1], candles[0]], candles[0]);
+        const oldestFirst = [candles[2], candles[1], candles[0]];
+        await processFVGs(env.DB, symbol, tf, oldestFirst, candles[0]);
+
+        const mssResult = await updateSwingState(env.DB, symbol, tf, oldestFirst);
+        if (mssResult) {
+          const htfLabelStr = getHTFLabel(tf);
+          for (const row of userRows) {
+            const alertMode  = row.sweep_alert_mode ?? 'aligned';
+            const biasMatch  = (mssResult.direction === 'bull' && htfBias === 'bullish') ||
+                               (mssResult.direction === 'bear' && htfBias === 'bearish');
+            const shouldAlert = alertMode === 'all' || alertMode === 'price_action' ||
+                                biasMatch || htfBias === 'neutral';
+            if (!shouldAlert) continue;
+
+            const tg = await env.DB.prepare(
+              'SELECT chat_id FROM user_telegram WHERE user_id = ? AND verified = 1'
+            ).bind(row.user_id).first();
+            if (!tg?.chat_id) continue;
+
+            const msg = formatMSSAlert(symbol, tf, mssResult, htfBias, htfLabelStr);
+            await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, msg);
+
+            await env.DB.prepare(
+              `INSERT INTO alert_history
+               (id,user_id,symbol,timeframe,direction,trend_bias,candle_time,fired_at,alert_type)
+               VALUES (?,?,?,?,?,?,?,?,'mss')`
+            ).bind(
+              crypto.randomUUID(), row.user_id, symbol, tf,
+              mssResult.direction, htfBias, mssResult.candle_time, Date.now()
+            ).run();
+          }
+        }
       }
 
       const sweep = detectSweep(candles);

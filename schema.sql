@@ -140,3 +140,21 @@ CREATE TABLE IF NOT EXISTS detected_fvgs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_fvg_lookup ON detected_fvgs(symbol, timeframe, mitigated, expires_at);
+
+-- Swing State Table (Phase 1.5)
+CREATE TABLE IF NOT EXISTS swing_state (
+  symbol                    TEXT NOT NULL,
+  timeframe                 TEXT NOT NULL,
+  run_direction             TEXT NOT NULL,
+  run_start                 INTEGER NOT NULL,
+  run_extreme               REAL NOT NULL,
+  extreme_time              INTEGER NOT NULL,
+  confirmed_swing_high      REAL,
+  confirmed_swing_high_time INTEGER,
+  confirmed_swing_low       REAL,
+  confirmed_swing_low_time  INTEGER,
+  updated_at                INTEGER NOT NULL,
+  PRIMARY KEY (symbol, timeframe)
+);
+
+CREATE INDEX IF NOT EXISTS idx_swing_state_lookup ON swing_state(symbol, timeframe);
