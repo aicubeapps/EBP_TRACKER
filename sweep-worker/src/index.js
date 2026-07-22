@@ -125,15 +125,17 @@ async function handleFetch(request, env) {
     }
 
     try {
-      await handleSweepCron(tf, env);
+      const debugLog = [];
+      await handleSweepCron(tf, env, debugLog);
       return json({
         ok: true,
         tf,
         fired_at: new Date().toISOString(),
+        debug: debugLog,
       }, 200, origin);
     } catch (err) {
       console.error(`Cron trigger error TF=${tf}:`, err.message);
-      return json({ error: err.message }, 500, origin);
+      return json({ error: err.message, stack: err.stack }, 500, origin);
     }
   }
 

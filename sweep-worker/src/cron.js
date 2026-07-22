@@ -71,7 +71,6 @@ function toYahooSymbol(symbol) {
   if (overrides[symbol]) return overrides[symbol];
   if (symbol.includes('/')) {
     const [base, quote] = symbol.split('/');
-    if (base.length <= 5 && quote === 'USD') return `${base}-USD`;
     return `${base}${quote}=X`;
   }
   return symbol;
@@ -134,19 +133,23 @@ async function fetchYahooFinance(symbol, tf, outputSize = 3) {
   return candles;
 }
 
-async function fetchCandles(symbol, tf, apiKey) {
+async function fetchCandles(symbol, tf, apiKey, _log) {
   try {
     const c = await fetchTwelveData(symbol, tf, apiKey, 3);
     if (c.length >= 2) return c;
     throw new Error('Insufficient candles');
   } catch (e) {
-    console.warn(`Twelve Data failed ${symbol} ${tf}: ${e.message}`);
+    const msg = `Twelve Data failed ${symbol} ${tf}: ${e.message}`;
+    console.warn(msg);
+    if (_log) _log.push(`[WARN] ${msg}`);
     try {
       const c = await fetchYahooFinance(symbol, tf, 3);
       if (c.length >= 2) return c;
       throw new Error('Insufficient candles from Yahoo');
     } catch (e2) {
-      console.error(`Both sources failed ${symbol} ${tf}: ${e2.message}`);
+      const msg2 = `Both sources failed ${symbol} ${tf}: ${e2.message}`;
+      console.error(msg2);
+      if (_log) _log.push(`[ERROR] ${msg2}`);
       return null;
     }
   }
@@ -321,6 +324,8 @@ function getCandleDirection(candle, priorDirection) {
 }
 
 async function updateSwingState(db, symbol, timeframe, candles) {
+  try {
+  console.log(`[SWING] Processing ${symbol} ${timeframe}`);
   const currentCandle = candles[2];
   const now = Date.now();
 
@@ -394,6 +399,10 @@ async function updateSwingState(db, symbol, timeframe, candles) {
   ).run();
 
   return detectMSS(newState, currentCandle);
+  } catch (e) {
+    console.error(`[SWING] ERROR ${symbol} ${timeframe}: ${e.message}\n${e.stack}`);
+    return null;
+  }
 }
 
 function detectMSS(swingState, currentCandle) {
@@ -460,6 +469,8 @@ function isPriceInFVG(fvg, candle) {
 }
 
 async function processFVGs(db, symbol, timeframe, candles, latestCandle) {
+  try {
+  console.log(`[FVG] Processing ${symbol} ${timeframe}`);
   const now    = Date.now();
   const TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -495,6 +506,9 @@ async function processFVGs(db, symbol, timeframe, candles, latestCandle) {
         .bind(now, activeFVG.id).run();
     }
   }
+  } catch (e) {
+    console.error(`[FVG] ERROR ${symbol} ${timeframe}: ${e.message}\n${e.stack}`);
+  }
 }
 
 async function cleanupExpiredFVGs(db) {
@@ -505,13 +519,14 @@ async function cleanupExpiredFVGs(db) {
 
 // ── Main cron handler ─────────────────────────────────────────
 
-export async function handleSweepCron(tf, env) {
-  console.log(`Sweep trigger → TF: ${tf}`);
+export async function handleSweepCron(tf, env, debugLog = null) {
+  const log = (msg) => { console.log(msg); if (debugLog) debugLog.push(msg); };
+  log(`Sweep trigger → TF: ${tf}`);
 
   if (tf === 'M5') {
     await cleanupExpiredSignals(env.DB);
     await cleanupExpiredFVGs(env.DB);
-    console.log('Cleaned up expired pending signals and FVGs');
+    log('Cleaned up expired pending signals and FVGs');
   }
 
   const rows = await env.DB.prepare(`
@@ -529,11 +544,11 @@ export async function handleSweepCron(tf, env) {
   );
 
   if (!filtered.length) {
-    console.log(`No sweep assets configured for ${tf}`);
+    log(`No sweep assets configured for ${tf}`);
     return;
   }
 
-  console.log(`Processing ${filtered.length} asset-user pairs on ${tf}`);
+  log(`Processing ${filtered.length} asset-user pairs on ${tf}`);
 
   const symbolMap = new Map();
   for (const row of filtered) {
@@ -545,15 +560,17 @@ export async function handleSweepCron(tf, env) {
 
   for (const [symbol, userRows] of symbolMap) {
     try {
-      const candles = await fetchCandles(symbol, tf, env.TWELVE_DATA_API_KEY);
+      const candles = await fetchCandles(symbol, tf, env.TWELVE_DATA_API_KEY, debugLog);
+      log(`[${symbol}] candles fetched: ${candles?.length ?? 'null'}`);
       if (!candles || candles.length < 2) {
-        console.warn(`Insufficient candles for ${symbol} ${tf}`);
+        log(`[${symbol}] SKIP: insufficient candles`);
         continue;
       }
 
       let htfBias = 'neutral';
       if (htfTF) {
-        const htfCandles = await fetchCandles(symbol, htfTF, env.TWELVE_DATA_API_KEY);
+        const htfCandles = await fetchCandles(symbol, htfTF, env.TWELVE_DATA_API_KEY, debugLog);
+        log(`[${symbol}] htf candles fetched: ${htfCandles?.length ?? 'null'}`);
         if (htfCandles?.length >= 3) {
           const result = calcTTradesBias({ bar1: htfCandles[1], bar2: htfCandles[2] });
           htfBias = result.bias;
@@ -564,10 +581,12 @@ export async function handleSweepCron(tf, env) {
 
       // FVG Phase 1 + Swing/MSS Phase 1.5+2 — candles are newest-first; need oldest-first
       if (candles.length >= 3) {
+        log(`[${symbol}] running FVG + swing (3 candles available)`);
         const oldestFirst = [candles[2], candles[1], candles[0]];
         await processFVGs(env.DB, symbol, tf, oldestFirst, candles[0]);
 
         const mssResult = await updateSwingState(env.DB, symbol, tf, oldestFirst);
+        log(`[${symbol}] MSS result: ${mssResult ? mssResult.direction : 'none'}`);
         if (mssResult) {
           const htfLabelStr = getHTFLabel(tf);
           for (const row of userRows) {
@@ -598,11 +617,11 @@ export async function handleSweepCron(tf, env) {
 
       const sweep = detectSweep(candles);
       if (!sweep) {
-        console.log(`No sweep on ${symbol} ${tf}`);
+        log(`[${symbol}] no sweep detected`);
         continue;
       }
 
-      console.log(`Sweep detected: ${symbol} ${tf} ${sweep.direction} (HTF bias: ${htfBias})`);
+      log(`[${symbol}] sweep detected: ${sweep.direction} (HTF bias: ${htfBias})`);
 
       for (const row of userRows) {
         const alertMode    = row.sweep_alert_mode ?? 'aligned';
@@ -614,7 +633,7 @@ export async function handleSweepCron(tf, env) {
           (alertMode === 'aligned' && trendAligned);
 
         if (!shouldAlert) {
-          console.log(`Skipping ${symbol} — trend not aligned`);
+          log(`[${symbol}] skipping — trend not aligned`);
           continue;
         }
 

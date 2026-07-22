@@ -147,7 +147,6 @@ function toYahooSymbol(symbol) {
   if (overrides[symbol]) return overrides[symbol];
   if (symbol.includes('/')) {
     const [base, quote] = symbol.split('/');
-    if (base.length <= 5 && quote === 'USD') return `${base}-USD`;
     return `${base}${quote}=X`;
   }
   return symbol;
