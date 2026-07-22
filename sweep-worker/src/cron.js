@@ -312,6 +312,80 @@ async function cleanupExpiredSignals(db) {
   await db.prepare('DELETE FROM pending_signals WHERE expires_at < ?').bind(Date.now()).run();
 }
 
+// ── FVG Engine (Phase 1, inlined) ────────────────────────────
+
+function detectFVG(candles) {
+  const [c0, c1, c2] = candles; // [oldest, middle, newest]
+  if (c2.low > c0.high) {
+    return { direction: 'bull', zone_low: c0.high, zone_high: c2.low, midpoint: (c0.high + c2.low) / 2, formed_at: c2.time, candle_time: c1.time };
+  }
+  if (c2.high < c0.low) {
+    return { direction: 'bear', zone_low: c2.high, zone_high: c0.low, midpoint: (c2.high + c0.low) / 2, formed_at: c2.time, candle_time: c1.time };
+  }
+  return null;
+}
+
+function checkFVGMitigation(fvg, candle, rule) {
+  if (rule === '50_percent') {
+    if (fvg.direction === 'bull' && candle.low <= fvg.midpoint)  return true;
+    if (fvg.direction === 'bear' && candle.high >= fvg.midpoint) return true;
+  }
+  if (rule === 'body_close') {
+    const bodyLow  = Math.min(candle.open, candle.close);
+    const bodyHigh = Math.max(candle.open, candle.close);
+    if (bodyLow >= fvg.zone_low && bodyHigh <= fvg.zone_high) return true;
+  }
+  return false;
+}
+
+function isPriceInFVG(fvg, candle) {
+  return candle.low <= fvg.zone_high && candle.high >= fvg.zone_low;
+}
+
+async function processFVGs(db, symbol, timeframe, candles, latestCandle) {
+  const now    = Date.now();
+  const TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+  const fvg = detectFVG(candles);
+  if (fvg) {
+    const tol      = fvg.zone_low * 0.001;
+    const existing = await db.prepare(
+      `SELECT id FROM detected_fvgs WHERE symbol=? AND timeframe=? AND mitigated=0
+       AND ABS(zone_low-?)<?  AND ABS(zone_high-?)<? LIMIT 1`
+    ).bind(symbol, timeframe, fvg.zone_low, tol, fvg.zone_high, tol).first();
+
+    if (!existing) {
+      await db.prepare(
+        `INSERT INTO detected_fvgs
+         (id,symbol,timeframe,direction,zone_low,zone_high,midpoint,formed_at,candle_time,expires_at,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        crypto.randomUUID(), symbol, timeframe, fvg.direction,
+        fvg.zone_low, fvg.zone_high, fvg.midpoint,
+        fvg.formed_at, fvg.candle_time, fvg.formed_at + TTL_MS, now
+      ).run();
+    }
+  }
+
+  const { results: activeFVGs } = await db.prepare(
+    `SELECT * FROM detected_fvgs WHERE symbol=? AND timeframe=? AND mitigated=0 AND expires_at>?`
+  ).bind(symbol, timeframe, now).all();
+
+  for (const activeFVG of activeFVGs) {
+    const rule = activeFVG.mitigation_rule || '50_percent';
+    if (checkFVGMitigation(activeFVG, latestCandle, rule)) {
+      await db.prepare(`UPDATE detected_fvgs SET mitigated=1, mitigated_at=? WHERE id=?`)
+        .bind(now, activeFVG.id).run();
+    }
+  }
+}
+
+async function cleanupExpiredFVGs(db) {
+  const now = Date.now();
+  await db.prepare(`UPDATE detected_fvgs SET mitigated=1, mitigated_at=? WHERE mitigated=0 AND expires_at<?`)
+    .bind(now, now).run();
+}
+
 // ── Main cron handler ─────────────────────────────────────────
 
 export async function handleSweepCron(tf, env) {
@@ -319,7 +393,8 @@ export async function handleSweepCron(tf, env) {
 
   if (tf === 'M5') {
     await cleanupExpiredSignals(env.DB);
-    console.log('Cleaned up expired pending signals');
+    await cleanupExpiredFVGs(env.DB);
+    console.log('Cleaned up expired pending signals and FVGs');
   }
 
   const rows = await env.DB.prepare(`
@@ -369,6 +444,11 @@ export async function handleSweepCron(tf, env) {
       }
 
       await updateSweepCandleCache(env.DB, symbol, tf, candles);
+
+      // FVG Phase 1 — candles are newest-first; processFVGs needs oldest-first
+      if (candles.length >= 3) {
+        await processFVGs(env.DB, symbol, tf, [candles[2], candles[1], candles[0]], candles[0]);
+      }
 
       const sweep = detectSweep(candles);
       if (!sweep) {

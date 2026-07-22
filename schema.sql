@@ -120,3 +120,23 @@ CREATE INDEX IF NOT EXISTS idx_ah_user_id      ON alert_history(user_id);
 CREATE INDEX IF NOT EXISTS idx_ah_fired_at     ON alert_history(fired_at);
 CREATE INDEX IF NOT EXISTS idx_ps_user_symbol  ON pending_signals(user_id, symbol);
 CREATE INDEX IF NOT EXISTS idx_pl_status       ON payment_log(status);
+
+-- FVG Detection Table (Phase 1)
+CREATE TABLE IF NOT EXISTS detected_fvgs (
+  id              TEXT PRIMARY KEY,
+  symbol          TEXT NOT NULL,
+  timeframe       TEXT NOT NULL,
+  direction       TEXT NOT NULL,
+  zone_low        REAL NOT NULL,
+  zone_high       REAL NOT NULL,
+  midpoint        REAL NOT NULL,
+  formed_at       INTEGER NOT NULL,
+  candle_time     INTEGER NOT NULL,
+  mitigated       INTEGER DEFAULT 0,
+  mitigated_at    INTEGER,
+  mitigation_rule TEXT,
+  expires_at      INTEGER NOT NULL,
+  created_at      INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_fvg_lookup ON detected_fvgs(symbol, timeframe, mitigated, expires_at);
