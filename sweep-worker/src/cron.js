@@ -185,10 +185,10 @@ function getHTFLabel(tf) {
 }
 
 function formatSweepAlert({ symbol, tf, direction, candleTime, trendBias, trendAligned, sweptLevel, closedInsideLevel, trendMode }) {
-  const emoji     = direction === 'bull' ? '🟢' : '🔴';
-  const label     = direction === 'bull' ? 'BULL SWEEP' : 'BEAR SWEEP';
+  const emoji     = direction === 'bullish' ? '🟢' : '🔴';
+  const label     = direction === 'bullish' ? 'BULLISH SWEEP' : 'BEARISH SWEEP';
   const alignMark = trendAligned ? '✅' : trendMode === 'price_action' ? '📊 Price Action' : '⚠️ No Trend Filter';
-  const swept     = direction === 'bull' ? 'Low swept' : 'High swept';
+  const swept     = direction === 'bullish' ? 'Low swept' : 'High swept';
   return `${emoji} <b>${label} — ${symbol}</b>
 ⏱ Timeframe: ${tf}
 🕐 Candle: ${fmtNY(candleTime)} NY
@@ -201,23 +201,23 @@ Closed inside: ${closedInsideLevel}
 }
 
 function formatCombinedAlert({ symbol, htfTF, ltfTF, direction, htfCandleTime, ltfCandleTime, trendBias, trendAligned, htfSwept, htfClosed, ltfSwept, ltfClosed }) {
-  const emoji    = direction === 'bull' ? '🟢' : '🔴';
-  const bias     = direction === 'bull' ? 'BULLISH' : 'BEARISH';
+  const emoji    = direction === 'bullish' ? '🟢' : '🔴';
+  const bias     = direction === 'bullish' ? 'BULLISH' : 'BEARISH';
   const alignMark = trendAligned ? '✅' : '⚠️ No Trend Filter';
   const elapsed  = ltfCandleTime && htfCandleTime
     ? Math.round((ltfCandleTime - htfCandleTime) / 60000) : null;
-  const htfSweptLabel = direction === 'bull' ? 'Low swept' : 'High swept';
-  const ltfSweptLabel = direction === 'bull' ? 'Low swept' : 'High swept';
+  const htfSweptLabel = direction === 'bullish' ? 'Low swept' : 'High swept';
+  const ltfSweptLabel = direction === 'bullish' ? 'Low swept' : 'High swept';
   return `⚡ <b>COMBINED SIGNAL — ${symbol}</b>
 ━━━━━━━━━━━━━━
 ${emoji} <b>${bias} CONFLUENCE</b>
 ━━━━━━━━━━━━━━
-HTF → <b>${htfTF} ${direction === 'bull' ? 'Bull' : 'Bear'} EBP</b>
+HTF → <b>${htfTF} ${direction === 'bullish' ? 'Bullish' : 'Bearish'} EBP</b>
 🕐 ${fmtNY(htfCandleTime)} NY
 📍 ${htfSweptLabel}: ${htfSwept}
-📈 Closed ${direction === 'bull' ? 'above body' : 'below body'}: ${htfClosed}
+📈 Closed ${direction === 'bullish' ? 'above body' : 'below body'}: ${htfClosed}
 
-LTF → <b>${ltfTF} ${direction === 'bull' ? 'Bull' : 'Bear'} Sweep</b>
+LTF → <b>${ltfTF} ${direction === 'bullish' ? 'Bullish' : 'Bearish'} Sweep</b>
 🕐 ${fmtNY(ltfCandleTime)} NY
 📍 ${ltfSweptLabel}: ${ltfSwept}
 📈 Closed inside: ${ltfClosed}
@@ -237,7 +237,7 @@ function detectSweep(candles) {
   const bearSweep = bar0.high > bar1.high && bar0.close < bar1.high;
   if (!bullSweep && !bearSweep) return null;
   return {
-    direction:         bullSweep ? 'bull' : 'bear',
+    direction:         bullSweep ? 'bullish' : 'bearish',
     candleTime:        bar0.time,
     sweptLevel:        bullSweep ? bar1.low   : bar1.high,
     closedInsideLevel: bar0.close,
@@ -315,8 +315,8 @@ async function cleanupExpiredSignals(db) {
 // ── Swing State + MSS Engine (Phase 1.5 + 2, inlined) ────────
 
 function getCandleDirection(candle, priorDirection) {
-  if (candle.close > candle.open) return 'bull';
-  if (candle.close < candle.open) return 'bear';
+  if (candle.close > candle.open) return 'bullish';
+  if (candle.close < candle.open) return 'bearish';
   return priorDirection;
 }
 
@@ -329,14 +329,14 @@ async function updateSwingState(db, symbol, timeframe, candles) {
   ).bind(symbol, timeframe).first();
 
   if (!state) {
-    const dir = currentCandle.close >= currentCandle.open ? 'bull' : 'bear';
+    const dir = currentCandle.close >= currentCandle.open ? 'bullish' : 'bearish';
     await db.prepare(
       `INSERT INTO swing_state
        (symbol,timeframe,run_direction,run_start,run_extreme,extreme_time,updated_at)
        VALUES (?,?,?,?,?,?,?)`
     ).bind(
       symbol, timeframe, dir, currentCandle.time,
-      dir === 'bull' ? currentCandle.high : currentCandle.low,
+      dir === 'bullish' ? currentCandle.high : currentCandle.low,
       currentCandle.time, now
     ).run();
     return null;
@@ -346,15 +346,15 @@ async function updateSwingState(db, symbol, timeframe, candles) {
   let newState = { ...state };
 
   if (currentDir === state.run_direction) {
-    if (currentDir === 'bull' && currentCandle.high > state.run_extreme) {
+    if (currentDir === 'bullish' && currentCandle.high > state.run_extreme) {
       newState.run_extreme  = currentCandle.high;
       newState.extreme_time = currentCandle.time;
-    } else if (currentDir === 'bear' && currentCandle.low < state.run_extreme) {
+    } else if (currentDir === 'bearish' && currentCandle.low < state.run_extreme) {
       newState.run_extreme  = currentCandle.low;
       newState.extreme_time = currentCandle.time;
     }
   } else {
-    if (state.run_direction === 'bull') {
+    if (state.run_direction === 'bullish') {
       newState.confirmed_swing_high      = state.run_extreme;
       newState.confirmed_swing_high_time = state.extreme_time;
     } else {
@@ -363,7 +363,7 @@ async function updateSwingState(db, symbol, timeframe, candles) {
     }
     newState.run_direction = currentDir;
     newState.run_start     = currentCandle.time;
-    newState.run_extreme   = currentDir === 'bull' ? currentCandle.high : currentCandle.low;
+    newState.run_extreme   = currentDir === 'bullish' ? currentCandle.high : currentCandle.low;
     newState.extreme_time  = currentCandle.time;
   }
 
@@ -398,29 +398,27 @@ async function updateSwingState(db, symbol, timeframe, candles) {
 
 function detectMSS(swingState, currentCandle) {
   if (
-    swingState.run_direction === 'bear' &&
+    swingState.run_direction === 'bearish' &&
     swingState.confirmed_swing_high != null &&
     currentCandle.close > swingState.confirmed_swing_high
   ) {
-    return { direction: 'bull', level: swingState.confirmed_swing_high, candle_time: currentCandle.time };
+    return { direction: 'bullish', level: swingState.confirmed_swing_high, candle_time: currentCandle.time };
   }
   if (
-    swingState.run_direction === 'bull' &&
+    swingState.run_direction === 'bullish' &&
     swingState.confirmed_swing_low != null &&
     currentCandle.close < swingState.confirmed_swing_low
   ) {
-    return { direction: 'bear', level: swingState.confirmed_swing_low, candle_time: currentCandle.time };
+    return { direction: 'bearish', level: swingState.confirmed_swing_low, candle_time: currentCandle.time };
   }
   return null;
 }
 
 function formatMSSAlert(symbol, tf, mss, htfBias, htfLabelStr) {
-  const emoji      = mss.direction === 'bull' ? '🟢' : '🔴';
-  const label      = mss.direction === 'bull' ? 'BULL MSS' : 'BEAR MSS';
-  const swingLabel = mss.direction === 'bull' ? 'Swing high reclaimed' : 'Swing low reclaimed';
-  const aligned    = (mss.direction === 'bull' && htfBias === 'bullish') ||
-                     (mss.direction === 'bear' && htfBias === 'bearish') ||
-                     htfBias === 'neutral';
+  const emoji      = mss.direction === 'bullish' ? '🟢' : '🔴';
+  const label      = mss.direction === 'bullish' ? 'BULLISH MSS' : 'BEARISH MSS';
+  const swingLabel = mss.direction === 'bullish' ? 'Swing high reclaimed' : 'Swing low reclaimed';
+  const aligned    = mss.direction === htfBias || htfBias === 'neutral';
   return `${emoji} <b>${label} — ${symbol}</b>
 ⏱ Timeframe: ${tf}
 🕐 Candle: ${fmtNY(mss.candle_time)} NY
@@ -436,18 +434,18 @@ ${swingLabel}: ${mss.level?.toFixed(5)}
 function detectFVG(candles) {
   const [c0, c1, c2] = candles; // [oldest, middle, newest]
   if (c2.low > c0.high) {
-    return { direction: 'bull', zone_low: c0.high, zone_high: c2.low, midpoint: (c0.high + c2.low) / 2, formed_at: c2.time, candle_time: c1.time };
+    return { direction: 'bullish', zone_low: c0.high, zone_high: c2.low, midpoint: (c0.high + c2.low) / 2, formed_at: c2.time, candle_time: c1.time };
   }
   if (c2.high < c0.low) {
-    return { direction: 'bear', zone_low: c2.high, zone_high: c0.low, midpoint: (c2.high + c0.low) / 2, formed_at: c2.time, candle_time: c1.time };
+    return { direction: 'bearish', zone_low: c2.high, zone_high: c0.low, midpoint: (c2.high + c0.low) / 2, formed_at: c2.time, candle_time: c1.time };
   }
   return null;
 }
 
 function checkFVGMitigation(fvg, candle, rule) {
   if (rule === '50_percent') {
-    if (fvg.direction === 'bull' && candle.low <= fvg.midpoint)  return true;
-    if (fvg.direction === 'bear' && candle.high >= fvg.midpoint) return true;
+    if (fvg.direction === 'bullish' && candle.low <= fvg.midpoint)  return true;
+    if (fvg.direction === 'bearish' && candle.high >= fvg.midpoint) return true;
   }
   if (rule === 'body_close') {
     const bodyLow  = Math.min(candle.open, candle.close);
@@ -574,10 +572,8 @@ export async function handleSweepCron(tf, env) {
           const htfLabelStr = getHTFLabel(tf);
           for (const row of userRows) {
             const alertMode  = row.sweep_alert_mode ?? 'aligned';
-            const biasMatch  = (mssResult.direction === 'bull' && htfBias === 'bullish') ||
-                               (mssResult.direction === 'bear' && htfBias === 'bearish');
             const shouldAlert = alertMode === 'all' || alertMode === 'price_action' ||
-                                biasMatch || htfBias === 'neutral';
+                                mssResult.direction === htfBias || htfBias === 'neutral';
             if (!shouldAlert) continue;
 
             const tg = await env.DB.prepare(
@@ -610,9 +606,7 @@ export async function handleSweepCron(tf, env) {
 
       for (const row of userRows) {
         const alertMode    = row.sweep_alert_mode ?? 'aligned';
-        const trendAligned = sweep.direction === 'bull'
-          ? htfBias === 'bullish'
-          : htfBias === 'bearish';
+        const trendAligned = sweep.direction === htfBias;
 
         const shouldAlert =
           alertMode === 'all' ||
@@ -678,10 +672,10 @@ export async function handleSweepCron(tf, env) {
               htfCandleTime: signal.fired_at,
               ltfCandleTime: sweep.candleTime,
               trendBias: htfBias, trendAligned,
-              htfSwept: sweep.direction === 'bull'
+              htfSwept: sweep.direction === 'bullish'
                 ? htfCache?.bar_1_low?.toFixed(5)  ?? '—'
                 : htfCache?.bar_1_high?.toFixed(5) ?? '—',
-              htfClosed: sweep.direction === 'bull'
+              htfClosed: sweep.direction === 'bullish'
                 ? htfBodyHigh?.toFixed(5) ?? '—'
                 : htfBodyLow?.toFixed(5)  ?? '—',
               ltfSwept:  sweep.sweptLevel?.toFixed(5),
