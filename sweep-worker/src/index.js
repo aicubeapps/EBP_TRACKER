@@ -11,7 +11,7 @@
 //   GET  /sweep/history   — authenticated, recent sweep/combined alerts
 // ============================================================
 
-import { handleSweepCron } from './cron.js';
+import { handleSweepCron } from './sweep-cron.js';
 
 // ── CORS ─────────────────────────────────────────────────────
 
