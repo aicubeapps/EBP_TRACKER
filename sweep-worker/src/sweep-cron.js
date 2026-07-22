@@ -51,6 +51,88 @@ function getHTFForSweepTF(tf) {
   return map[tf] ?? null;
 }
 
+// ── Phase 3 — Bias Source Map ─────────────────────────────────
+const BIAS_SOURCE = {
+  ebp:      { 'M15': '4H', '1H': 'D', '4H': 'W', 'D': 'W', 'W': null },
+  sweep:    { 'M5': '1H', 'M15': '1H', 'M30': '4H', '1H': 'D', '4H': 'W' },
+  template: { 'W': null, 'D': 'W', '4H': 'D', '1H': '4H' },
+};
+
+function getEffectiveBias(biasTF, biasCache, biasOverrides) {
+  if (!biasTF) return 'neutral';
+  const override = biasOverrides?.[biasTF];
+  if (override && override !== 'auto') return override;
+  return biasCache?.[biasTF]?.bias ?? 'neutral';
+}
+
+async function writeBiasCache(db, symbol, biasTF, biasResult) {
+  await db.prepare(`
+    INSERT OR REPLACE INTO bias_cache
+    (symbol, timeframe, bias, closure_type, close_pos, bar1_time, updated_at)
+    VALUES (?,?,?,?,?,?,?)
+  `).bind(
+    symbol, biasTF, biasResult.bias, biasResult.closure,
+    biasResult.closePos ?? null, biasResult.bar1Time, Date.now()
+  ).run();
+}
+
+async function loadBiasCache(db, symbol, biasTF) {
+  return db.prepare(
+    'SELECT * FROM bias_cache WHERE symbol=? AND timeframe=?'
+  ).bind(symbol, biasTF).first();
+}
+
+// ── Phase 3 — T3 Chain State Machine ─────────────────────────
+
+async function initiateT3Chain(db, userId, assetId, symbol, direction, htfTf, ltf, windowMins) {
+  const now = Date.now();
+  await db.prepare(`
+    INSERT INTO chain_state
+    (id,user_id,asset_id,symbol,template,direction,current_step,htf_tf,ltf,htf_signal_time,expires_at,created_at)
+    VALUES (?,?,?,?,?,?,2,?,?,?,?,?)
+  `).bind(
+    crypto.randomUUID(), userId, assetId, symbol,
+    't3', direction, htfTf, ltf, now,
+    now + (windowMins * 60 * 1000), now
+  ).run();
+}
+
+async function advanceT3Chain(db, chainId, ltfSweepTime) {
+  await db.prepare(
+    'UPDATE chain_state SET current_step=3, ltf_sweep_time=? WHERE id=?'
+  ).bind(ltfSweepTime, chainId).run();
+}
+
+async function completeT3Chain(db, chainId) {
+  await db.prepare('DELETE FROM chain_state WHERE id=?').bind(chainId).run();
+}
+
+async function getActiveChains(db, userId, symbol, template, direction, step) {
+  const res = await db.prepare(`
+    SELECT * FROM chain_state
+    WHERE user_id=? AND symbol=? AND template=? AND direction=? AND current_step=? AND expires_at > ?
+  `).bind(userId, symbol, template, direction, step, Date.now()).all();
+  return res.results ?? [];
+}
+
+async function cleanupExpiredChains(db) {
+  await db.prepare('DELETE FROM chain_state WHERE expires_at < ?').bind(Date.now()).run();
+}
+
+function formatT3Alert(symbol, direction, htfTf, ltfTf, htfBar, ltfBar, mssBar) {
+  const dir     = direction === 'bullish' ? '🟢 Bullish' : '🔴 Bearish';
+  const htfTime = new Date(htfBar.time).toUTCString().slice(5, 22);
+  const ltfTime = new Date(ltfBar.time).toUTCString().slice(5, 22);
+  const mssTime = new Date(mssBar.time).toUTCString().slice(5, 22);
+  return [
+    `⛓ T3 Chain Complete — ${symbol}`,
+    `Direction: ${dir}`,
+    `Step 1 — ${htfTf} EBP: ${htfTime}`,
+    `Step 2 — ${ltfTf} Sweep: ${ltfTime}`,
+    `Step 3 — ${ltfTf} MSS: ${mssTime}`,
+  ].join('\n');
+}
+
 function tfToTwelveInterval(tf) {
   const map = {
     'M5': '5min', 'M15': '15min', 'M30': '30min',
@@ -604,14 +686,14 @@ export async function handleSweepCron(tf, env, debugLog = null) {
   if (tf === 'M5') {
     await cleanupExpiredSignals(env.DB);
     await cleanupExpiredFVGs(env.DB);
-    await env.DB.prepare('DELETE FROM api_call_log WHERE called_at < ?').bind(Date.now() - 2 * 24 * 60 * 60 * 1000).run();
-    log('Cleaned up expired pending signals, FVGs, and api_call_log');
+    await cleanupExpiredChains(env.DB);
+    log('Cleaned up expired pending signals, FVGs, and chains');
   }
 
   const rows = await env.DB.prepare(`
     SELECT ua.id as asset_id, ua.symbol,
            ua.sweep_alert_mode, ua.sweep_timeframes,
-           ua.combined_enabled, ua.combined_pairs, ua.combined_window_mins,
+           ua.bias_overrides,
            u.id as user_id, u.active as user_active
     FROM user_assets ua
     JOIN users u ON u.id = ua.user_id
@@ -635,7 +717,7 @@ export async function handleSweepCron(tf, env, debugLog = null) {
     symbolMap.get(row.symbol).push(row);
   }
 
-  const htfTF = getHTFForSweepTF(tf);
+  const biasTF = BIAS_SOURCE.sweep[tf] ?? null;
 
   for (const [symbol, userRows] of symbolMap) {
     try {
@@ -647,12 +729,14 @@ export async function handleSweepCron(tf, env, debugLog = null) {
       }
 
       let htfBias = 'neutral';
-      if (htfTF) {
-        const htfCandles = await fetchCandles(symbol, htfTF, env.TWELVE_DATA_API_KEY, env.FINNHUB_API_KEY, debugLog, 10, env.DB);
+      if (biasTF) {
+        const htfCandles = await fetchCandles(symbol, biasTF, env.TWELVE_DATA_API_KEY, env.FINNHUB_API_KEY, debugLog, 10, env.DB);
         log(`[${symbol}] htf candles fetched: ${htfCandles?.length ?? 'null'}`);
-        if (htfCandles?.length >= 3) {
-          const result = calcTTradesBias({ bar1: htfCandles[1], bar2: htfCandles[2] });
-          htfBias = result.bias;
+        if (htfCandles?.length >= 2) {
+          const biasResult = calcTTradesBias({ bar1: htfCandles[0], bar2: htfCandles[1] });
+          biasResult.bar1Time = htfCandles[0].time;
+          htfBias = biasResult.bias;
+          await writeBiasCache(env.DB, symbol, biasTF, biasResult);
         }
       }
 
@@ -669,9 +753,11 @@ export async function handleSweepCron(tf, env, debugLog = null) {
         if (mssResult) {
           const htfLabelStr = getHTFLabel(tf);
           for (const row of userRows) {
-            const alertMode  = row.sweep_alert_mode ?? 'aligned';
-            const shouldAlert = alertMode === 'all' || alertMode === 'price_action' ||
-                                mssResult.direction === htfBias || htfBias === 'neutral';
+            const alertMode     = row.sweep_alert_mode ?? 'aligned';
+            const biasOverrides = JSON.parse(row.bias_overrides || '{}');
+            const effectiveBias = getEffectiveBias(biasTF, { [biasTF]: { bias: htfBias } }, biasOverrides);
+            const shouldAlert   = alertMode === 'all' || alertMode === 'price_action' ||
+                                  mssResult.direction === effectiveBias || effectiveBias === 'neutral';
             if (!shouldAlert) continue;
 
             const tg = await env.DB.prepare(
@@ -679,7 +765,7 @@ export async function handleSweepCron(tf, env, debugLog = null) {
             ).bind(row.user_id).first();
             if (!tg?.chat_id) continue;
 
-            const msg = formatMSSAlert(symbol, tf, mssResult, htfBias, htfLabelStr);
+            const msg = formatMSSAlert(symbol, tf, mssResult, effectiveBias, htfLabelStr);
             await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, msg);
 
             await env.DB.prepare(
@@ -688,8 +774,32 @@ export async function handleSweepCron(tf, env, debugLog = null) {
                VALUES (?,?,?,?,?,?,?,?,'mss')`
             ).bind(
               crypto.randomUUID(), row.user_id, symbol, tf,
-              mssResult.direction, htfBias, mssResult.candle_time, Date.now()
+              mssResult.direction, effectiveBias, mssResult.candle_time, Date.now()
             ).run();
+
+            // T3 step 3 — MSS completes the chain
+            const mssChains = await getActiveChains(env.DB, row.user_id, symbol, 't3', mssResult.direction, 3);
+            for (const chain of mssChains) {
+              if (chain.ltf !== tf) continue;
+              const t3Msg = formatT3Alert(
+                symbol, mssResult.direction,
+                chain.htf_tf, tf,
+                { time: chain.htf_signal_time },
+                { time: chain.ltf_sweep_time },
+                { time: mssResult.candle_time }
+              );
+              await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, t3Msg);
+              await env.DB.prepare(`
+                INSERT INTO alert_history
+                (id,user_id,symbol,timeframe,direction,trend_bias,candle_time,fired_at,alert_type)
+                VALUES (?,?,?,?,?,?,?,?,'t3')
+              `).bind(
+                crypto.randomUUID(), row.user_id, symbol,
+                `${chain.htf_tf}+${tf}`,
+                mssResult.direction, effectiveBias, mssResult.candle_time, Date.now()
+              ).run();
+              await completeT3Chain(env.DB, chain.id);
+            }
           }
         }
       }
@@ -703,8 +813,10 @@ export async function handleSweepCron(tf, env, debugLog = null) {
       log(`[${symbol}] sweep detected: ${sweep.direction} (HTF bias: ${htfBias})`);
 
       for (const row of userRows) {
-        const alertMode    = row.sweep_alert_mode ?? 'aligned';
-        const trendAligned = sweep.direction === htfBias;
+        const alertMode     = row.sweep_alert_mode ?? 'aligned';
+        const biasOverrides = JSON.parse(row.bias_overrides || '{}');
+        const effectiveBias = getEffectiveBias(biasTF, { [biasTF]: { bias: htfBias } }, biasOverrides);
+        const trendAligned  = sweep.direction === effectiveBias;
 
         const shouldAlert =
           alertMode === 'all' ||
@@ -729,7 +841,7 @@ export async function handleSweepCron(tf, env, debugLog = null) {
           symbol, tf,
           direction:         sweep.direction,
           candleTime:        sweep.candleTime,
-          trendBias:         htfBias,
+          trendBias:         effectiveBias,
           trendAligned,
           sweptLevel:        sweep.sweptLevel?.toFixed(5),
           closedInsideLevel: sweep.closedInsideLevel?.toFixed(5),
@@ -745,56 +857,14 @@ export async function handleSweepCron(tf, env, debugLog = null) {
           VALUES (?,?,?,?,?,?,?,?,'sweep')
         `).bind(
           crypto.randomUUID(), row.user_id, symbol, tf,
-          sweep.direction, htfBias, sweep.candleTime, Date.now()
+          sweep.direction, effectiveBias, sweep.candleTime, Date.now()
         ).run();
 
-        if (row.combined_enabled) {
-          const pendingMatches = await checkPendingSignals(
-            env.DB, row.user_id, symbol, sweep.direction, tf
-          );
-          for (const { signal, pairKey } of pendingMatches) {
-            const htfCache = await env.DB.prepare(`
-              SELECT bar_0_high, bar_0_low, bar_0_close,
-                     bar_1_high, bar_1_low, bar_1_open, bar_1_close, bar_0_time
-              FROM candle_cache WHERE symbol = ? AND timeframe = ?
-            `).bind(symbol, signal.timeframe).first();
-
-            const htfBodyHigh = htfCache
-              ? Math.max(htfCache.bar_1_open ?? 0, htfCache.bar_1_close ?? 0) : null;
-            const htfBodyLow  = htfCache
-              ? Math.min(htfCache.bar_1_open ?? 0, htfCache.bar_1_close ?? 0) : null;
-
-            const combinedMsg = formatCombinedAlert({
-              symbol, htfTF: signal.timeframe, ltfTF: tf,
-              direction: sweep.direction,
-              htfCandleTime: signal.fired_at,
-              ltfCandleTime: sweep.candleTime,
-              trendBias: htfBias, trendAligned,
-              htfSwept: sweep.direction === 'bullish'
-                ? htfCache?.bar_1_low?.toFixed(5)  ?? '—'
-                : htfCache?.bar_1_high?.toFixed(5) ?? '—',
-              htfClosed: sweep.direction === 'bullish'
-                ? htfBodyHigh?.toFixed(5) ?? '—'
-                : htfBodyLow?.toFixed(5)  ?? '—',
-              ltfSwept:  sweep.sweptLevel?.toFixed(5),
-              ltfClosed: sweep.closedInsideLevel?.toFixed(5),
-            });
-
-            await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, combinedMsg);
-
-            await env.DB.prepare(`
-              INSERT INTO alert_history
-              (id, user_id, symbol, timeframe, direction, trend_bias, candle_time, fired_at, alert_type)
-              VALUES (?,?,?,?,?,?,?,?,'combined')
-            `).bind(
-              crypto.randomUUID(), row.user_id, symbol,
-              `${signal.timeframe}+${tf}`,
-              sweep.direction, htfBias, sweep.candleTime, Date.now()
-            ).run();
-
-            await consumePendingSignal(env.DB, signal.id, pairKey);
-            console.log(`Combined alert sent: ${symbol} ${signal.timeframe}+${tf}`);
-          }
+        // T3 step 2 — sweep advances an active chain
+        const sweepChains = await getActiveChains(env.DB, row.user_id, symbol, 't3', sweep.direction, 2);
+        for (const chain of sweepChains) {
+          if (chain.ltf !== tf) continue;
+          await advanceT3Chain(env.DB, chain.id, sweep.candleTime);
         }
       }
 

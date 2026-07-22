@@ -126,6 +126,88 @@ function getHTFForTF(tf) {
   return map[tf] ?? null;
 }
 
+// ── Phase 3 — Bias Source Map ─────────────────────────────────
+const BIAS_SOURCE = {
+  ebp:      { 'M15': '4H', '1H': 'D', '4H': 'W', 'D': 'W', 'W': null },
+  sweep:    { 'M5': '1H', 'M15': '1H', 'M30': '4H', '1H': 'D', '4H': 'W' },
+  template: { 'W': null, 'D': 'W', '4H': 'D', '1H': '4H' },
+};
+
+function getEffectiveBias(biasTF, biasCache, biasOverrides) {
+  if (!biasTF) return 'neutral';
+  const override = biasOverrides?.[biasTF];
+  if (override && override !== 'auto') return override;
+  return biasCache?.[biasTF]?.bias ?? 'neutral';
+}
+
+async function writeBiasCache(db, symbol, biasTF, biasResult) {
+  await db.prepare(`
+    INSERT OR REPLACE INTO bias_cache
+    (symbol, timeframe, bias, closure_type, close_pos, bar1_time, updated_at)
+    VALUES (?,?,?,?,?,?,?)
+  `).bind(
+    symbol, biasTF, biasResult.bias, biasResult.closure,
+    biasResult.closePos ?? null, biasResult.bar1Time, Date.now()
+  ).run();
+}
+
+async function loadBiasCache(db, symbol, biasTF) {
+  return db.prepare(
+    'SELECT * FROM bias_cache WHERE symbol=? AND timeframe=?'
+  ).bind(symbol, biasTF).first();
+}
+
+// ── Phase 3 — T3 Chain State Machine ─────────────────────────
+
+async function initiateT3Chain(db, userId, assetId, symbol, direction, htfTf, ltf, windowMins) {
+  const now = Date.now();
+  await db.prepare(`
+    INSERT INTO chain_state
+    (id,user_id,asset_id,symbol,template,direction,current_step,htf_tf,ltf,htf_signal_time,expires_at,created_at)
+    VALUES (?,?,?,?,?,?,2,?,?,?,?,?)
+  `).bind(
+    crypto.randomUUID(), userId, assetId, symbol,
+    't3', direction, htfTf, ltf, now,
+    now + (windowMins * 60 * 1000), now
+  ).run();
+}
+
+async function advanceT3Chain(db, chainId, ltfSweepTime) {
+  await db.prepare(
+    'UPDATE chain_state SET current_step=3, ltf_sweep_time=? WHERE id=?'
+  ).bind(ltfSweepTime, chainId).run();
+}
+
+async function completeT3Chain(db, chainId) {
+  await db.prepare('DELETE FROM chain_state WHERE id=?').bind(chainId).run();
+}
+
+async function getActiveChains(db, userId, symbol, template, direction, step) {
+  const res = await db.prepare(`
+    SELECT * FROM chain_state
+    WHERE user_id=? AND symbol=? AND template=? AND direction=? AND current_step=? AND expires_at > ?
+  `).bind(userId, symbol, template, direction, step, Date.now()).all();
+  return res.results ?? [];
+}
+
+async function cleanupExpiredChains(db) {
+  await db.prepare('DELETE FROM chain_state WHERE expires_at < ?').bind(Date.now()).run();
+}
+
+function formatT3Alert(symbol, direction, htfTf, ltfTf, htfBar, ltfBar, mssBar) {
+  const dir     = direction === 'bullish' ? '🟢 Bullish' : '🔴 Bearish';
+  const htfTime = new Date(htfBar.time).toUTCString().slice(5, 22);
+  const ltfTime = new Date(ltfBar.time).toUTCString().slice(5, 22);
+  const mssTime = new Date(mssBar.time).toUTCString().slice(5, 22);
+  return [
+    `⛓ T3 Chain Complete — ${symbol}`,
+    `Direction: ${dir}`,
+    `Step 1 — ${htfTf} EBP: ${htfTime}`,
+    `Step 2 — ${ltfTf} Sweep: ${ltfTime}`,
+    `Step 3 — ${ltfTf} MSS: ${mssTime}`,
+  ].join('\n');
+}
+
 function tfToTwelveInterval(tf) {
   const map = {
     'M5': '5min', 'M15': '15min', 'M30': '30min',
@@ -648,8 +730,8 @@ async function handleCron(cronExpr, env) {
   console.log(`Cron ${cronExpr} → TF: ${tf}`);
 
   const rows = await env.DB.prepare(`
-    SELECT ua.id, ua.symbol, ua.timeframes, ua.ebp_alert_mode,
-           ua.combined_enabled, ua.combined_pairs, ua.combined_window_mins,
+    SELECT ua.id as asset_id, ua.symbol, ua.timeframes, ua.ebp_alert_mode,
+           ua.bias_overrides,
            u.id as user_id
     FROM user_assets ua
     JOIN users u ON u.id = ua.user_id
@@ -667,7 +749,7 @@ async function handleCron(cronExpr, env) {
     symbolMap.get(row.symbol).push(row);
   }
 
-  const htfTF = getHTFForTF(tf);
+  const biasTF = BIAS_SOURCE.ebp[tf] ?? null;
 
   for (const [symbol, userRows] of symbolMap) {
     try {
@@ -675,11 +757,13 @@ async function handleCron(cronExpr, env) {
       if (!candles || candles.length < 2) continue;
 
       let htfBias = 'neutral';
-      if (htfTF) {
-        const htfCandles = await fetchCandles(symbol, htfTF, env.TWELVE_DATA_API_KEY, env.FINNHUB_API_KEY, 10, env.DB);
-        if (htfCandles?.length >= 3) {
-          const r = calcTTradesBias({ bar1: htfCandles[1], bar2: htfCandles[2] });
-          htfBias = r.bias;
+      if (biasTF) {
+        const htfCandles = await fetchCandles(symbol, biasTF, env.TWELVE_DATA_API_KEY, env.FINNHUB_API_KEY, 10, env.DB);
+        if (htfCandles?.length >= 2) {
+          const biasResult = calcTTradesBias({ bar1: htfCandles[0], bar2: htfCandles[1] });
+          biasResult.bar1Time = htfCandles[0].time;
+          htfBias = biasResult.bias;
+          await writeBiasCache(env.DB, symbol, biasTF, biasResult);
         }
       }
 
@@ -695,8 +779,10 @@ async function handleCron(cronExpr, env) {
         if (mssResult) {
           const htfLabelStr = getHTFLabel(tf);
           for (const row of userRows) {
-            const alertMode  = row.ebp_alert_mode ?? 'aligned';
-            const shouldAlert = alertMode === 'all' || mssResult.direction === htfBias || htfBias === 'neutral';
+            const alertMode     = row.ebp_alert_mode ?? 'aligned';
+            const biasOverrides = JSON.parse(row.bias_overrides || '{}');
+            const effectiveBias = getEffectiveBias(biasTF, { [biasTF]: { bias: htfBias } }, biasOverrides);
+            const shouldAlert   = alertMode === 'all' || mssResult.direction === effectiveBias || effectiveBias === 'neutral';
             if (!shouldAlert) continue;
 
             const tg = await env.DB.prepare(
@@ -723,8 +809,10 @@ async function handleCron(cronExpr, env) {
       if (!ebp) continue;
 
       for (const row of userRows) {
-        const alertMode    = row.ebp_alert_mode ?? 'aligned';
-        const trendAligned = ebp.direction === htfBias;
+        const alertMode     = row.ebp_alert_mode ?? 'aligned';
+        const biasOverrides = JSON.parse(row.bias_overrides || '{}');
+        const effectiveBias = getEffectiveBias(biasTF, { [biasTF]: { bias: htfBias } }, biasOverrides);
+        const trendAligned  = ebp.direction === effectiveBias;
         if (alertMode === 'aligned' && !trendAligned) continue;
 
         const tg = await env.DB.prepare(
@@ -736,7 +824,7 @@ async function handleCron(cronExpr, env) {
           symbol, tf,
           direction:   ebp.direction,
           candleTime:  ebp.candleTime,
-          trendBias:   htfBias,
+          trendBias:   effectiveBias,
           trendAligned,
           sweptLevel:  ebp.sweptLevel?.toFixed(5),
           closedLevel: ebp.closedLevel?.toFixed(5),
@@ -750,19 +838,18 @@ async function handleCron(cronExpr, env) {
           VALUES (?,?,?,?,?,?,?,?,'ebp')
         `).bind(
           crypto.randomUUID(), row.user_id, symbol, tf,
-          ebp.direction, htfBias, ebp.candleTime, Date.now()
+          ebp.direction, effectiveBias, ebp.candleTime, Date.now()
         ).run();
 
-        if (row.combined_enabled) {
-          const windowMs  = (row.combined_window_mins ?? 60) * 60 * 1000;
-          await env.DB.prepare(`
-            INSERT OR REPLACE INTO pending_signals
-            (id, user_id, symbol, direction, signal_type, timeframe, fired_at, expires_at, consumed_pairs)
-            VALUES (?,?,?,?,'ebp',?,?,?,'[]')
-          `).bind(
-            crypto.randomUUID(), row.user_id, symbol,
-            ebp.direction, tf, Date.now(), Date.now() + windowMs
-          ).run();
+        // T3 chain initiation
+        const tmpl = await env.DB.prepare(
+          `SELECT * FROM user_templates WHERE user_id=? AND asset_id=? AND template='t3' AND enabled=1 AND htf=?`
+        ).bind(row.user_id, row.asset_id, tf).first();
+        if (tmpl) {
+          await initiateT3Chain(
+            env.DB, row.user_id, row.asset_id, symbol,
+            ebp.direction, tf, tmpl.ltf, tmpl.window_mins
+          );
         }
       }
 

@@ -159,9 +159,67 @@ CREATE TABLE IF NOT EXISTS swing_state (
 
 CREATE INDEX IF NOT EXISTS idx_swing_state_lookup ON swing_state(symbol, timeframe);
 
--- Phase 4 additions
-ALTER TABLE alert_history ADD COLUMN details TEXT DEFAULT '{}';
+-- ── Phase 3 ──────────────────────────────────────────────────
 
+-- Bias Cache — HTF TTradesBias result per symbol/TF
+CREATE TABLE IF NOT EXISTS bias_cache (
+  symbol       TEXT NOT NULL,
+  timeframe    TEXT NOT NULL,
+  bias         TEXT NOT NULL,
+  closure_type TEXT NOT NULL,
+  close_pos    REAL,
+  bar1_time    INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL,
+  PRIMARY KEY (symbol, timeframe)
+);
+CREATE INDEX IF NOT EXISTS idx_bias_cache_lookup ON bias_cache(symbol, timeframe);
+
+-- User Templates — T3/T1/T4/T2 named template config per asset
+CREATE TABLE IF NOT EXISTS user_templates (
+  id             TEXT PRIMARY KEY,
+  user_id        TEXT NOT NULL,
+  asset_id       TEXT NOT NULL,
+  template       TEXT NOT NULL,
+  enabled        INTEGER DEFAULT 0,
+  htf            TEXT NOT NULL,
+  ltf            TEXT NOT NULL,
+  window_mins    INTEGER DEFAULT 60,
+  step3_enabled  INTEGER DEFAULT 1,
+  bias_gate      INTEGER DEFAULT 1,
+  fvg_rule       TEXT DEFAULT '50_percent',
+  created_at     INTEGER NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  FOREIGN KEY (asset_id) REFERENCES user_assets(id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_templates_lookup ON user_templates(user_id, asset_id, template, enabled);
+
+-- Chain State — in-progress multi-step template chains
+CREATE TABLE IF NOT EXISTS chain_state (
+  id              TEXT PRIMARY KEY,
+  user_id         TEXT NOT NULL,
+  asset_id        TEXT NOT NULL,
+  symbol          TEXT NOT NULL,
+  template        TEXT NOT NULL,
+  direction       TEXT NOT NULL,
+  current_step    INTEGER NOT NULL,
+  htf_tf          TEXT,
+  ltf             TEXT,
+  htf_signal_time INTEGER,
+  ltf_sweep_time  INTEGER,
+  expires_at      INTEGER NOT NULL,
+  created_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chain_state_lookup ON chain_state(user_id, symbol, template, current_step, expires_at);
+
+-- D1 Console commands (run once on live DB):
+-- ALTER TABLE user_assets ADD COLUMN bias_overrides TEXT DEFAULT '{}';
+-- UPDATE user_assets SET combined_enabled=0;
+
+-- ── Phase 4 ──────────────────────────────────────────────────
+
+-- ALTER TABLE alert_history ADD COLUMN details TEXT DEFAULT '{}';
+
+-- Per-asset EBP alert configs (replaces user_assets.timeframes)
 CREATE TABLE IF NOT EXISTS user_ebp_configs (
   id          TEXT PRIMARY KEY,
   user_id     TEXT NOT NULL,
@@ -175,6 +233,7 @@ CREATE TABLE IF NOT EXISTS user_ebp_configs (
 );
 CREATE INDEX IF NOT EXISTS idx_ebp_configs_lookup ON user_ebp_configs(user_id, asset_id, enabled);
 
+-- Per-asset Sweep alert configs (replaces user_assets.sweep_timeframes)
 CREATE TABLE IF NOT EXISTS user_sweep_configs (
   id          TEXT PRIMARY KEY,
   user_id     TEXT NOT NULL,
@@ -187,13 +246,3 @@ CREATE TABLE IF NOT EXISTS user_sweep_configs (
   FOREIGN KEY (asset_id) REFERENCES user_assets(id)
 );
 CREATE INDEX IF NOT EXISTS idx_sweep_configs_lookup ON user_sweep_configs(user_id, asset_id, enabled);
-
-CREATE TABLE IF NOT EXISTS api_call_log (
-  id          TEXT PRIMARY KEY,
-  source      TEXT NOT NULL,
-  symbol      TEXT NOT NULL,
-  timeframe   TEXT NOT NULL,
-  called_at   INTEGER NOT NULL,
-  success     INTEGER DEFAULT 1
-);
-CREATE INDEX IF NOT EXISTS idx_api_call_log_time ON api_call_log(source, called_at DESC);
