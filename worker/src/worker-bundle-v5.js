@@ -211,22 +211,84 @@ async function fetchYahooFinance(symbol, tf, outputSize = 3) {
   return candles;
 }
 
-async function fetchCandles(symbol, tf, apiKey) {
-  try {
-    const c = await fetchTwelveData(symbol, tf, apiKey, 3);
-    if (c.length >= 2) return c;
-    throw new Error('Insufficient candles');
-  } catch (e) {
-    console.warn(`Twelve Data failed ${symbol} ${tf}: ${e.message}`);
-    try {
-      const c = await fetchYahooFinance(symbol, tf, 3);
-      if (c.length >= 2) return c;
-      throw new Error('Insufficient candles');
-    } catch (e2) {
-      console.error(`Both sources failed ${symbol} ${tf}: ${e2.message}`);
-      return null;
-    }
+function toFinnhubSymbol(symbol) {
+  const map = {
+    'EUR/USD': { symbol: 'OANDA:EUR_USD', endpoint: 'forex' },
+    'GBP/USD': { symbol: 'OANDA:GBP_USD', endpoint: 'forex' },
+    'GBP/JPY': { symbol: 'OANDA:GBP_JPY', endpoint: 'forex' },
+    'USD/JPY': { symbol: 'OANDA:USD_JPY', endpoint: 'forex' },
+    'XAU/USD': { symbol: 'OANDA:XAU_USD', endpoint: 'forex' },
+    'BTC/USD': { symbol: 'BINANCE:BTCUSDT', endpoint: 'crypto' },
+    'ETH/USD': { symbol: 'BINANCE:ETHUSDT', endpoint: 'crypto' },
+    'NIFTY':   { symbol: 'NSE:NIFTY',       endpoint: 'stock' },
+  };
+  if (map[symbol]) return map[symbol];
+  if (symbol.endsWith('.NS')) {
+    return { symbol: `NSE:${symbol.replace('.NS', '')}`, endpoint: 'stock' };
   }
+  return null;
+}
+
+function toFinnhubResolution(tf) {
+  const map = {
+    'M5': '5', 'M15': '15', 'M30': '30',
+    '1H': '60', '4H': '240', 'D': 'D', 'W': 'W',
+  };
+  return map[tf] ?? null;
+}
+
+async function fetchFinnhub(symbol, tf, apiKey, count = 10) {
+  const mapped     = toFinnhubSymbol(symbol);
+  const resolution = toFinnhubResolution(tf);
+  if (!mapped || !resolution) return null;
+
+  const now = Math.floor(Date.now() / 1000);
+  const tfSeconds = {
+    'M5': 300, 'M15': 900, 'M30': 1800,
+    '1H': 3600, '4H': 14400, 'D': 86400, 'W': 604800,
+  };
+  const from = now - (tfSeconds[tf] * count * 2);
+
+  const url = `https://finnhub.io/api/v1/${mapped.endpoint}/candle?symbol=${encodeURIComponent(mapped.symbol)}&resolution=${resolution}&from=${from}&to=${now}&token=${apiKey}`;
+  try {
+    const res  = await fetch(url);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.s !== 'ok' || !data.c || data.c.length < 3) return null;
+    return data.c.map((_, i) => ({
+      open:  data.o[i],
+      high:  data.h[i],
+      low:   data.l[i],
+      close: data.c[i],
+      time:  data.t[i] * 1000,
+    })).reverse();
+  } catch {
+    return null;
+  }
+}
+
+async function fetchCandles(symbol, tf, twelveApiKey, finnhubApiKey, count = 10) {
+  // 1. Finnhub — primary (60 calls/min, no daily cap)
+  const finnhubCandles = await fetchFinnhub(symbol, tf, finnhubApiKey, count);
+  if (finnhubCandles && finnhubCandles.length >= 3) return finnhubCandles;
+
+  // 2. Yahoo Finance — fallback (unlimited, no key)
+  try {
+    const c = await fetchYahooFinance(symbol, tf, count);
+    if (c && c.length >= 3) return c;
+  } catch (e) {
+    console.warn(`Yahoo failed ${symbol} ${tf}: ${e.message}`);
+  }
+
+  // 3. Twelve Data — emergency only (800 calls/day)
+  try {
+    const c = await fetchTwelveData(symbol, tf, twelveApiKey, count);
+    if (c && c.length >= 3) return c;
+  } catch (e) {
+    console.error(`All sources failed ${symbol} ${tf}: ${e.message}`);
+  }
+
+  return null;
 }
 
 async function validateSymbol(symbol, apiKey) {
@@ -592,12 +654,12 @@ async function handleCron(cronExpr, env) {
 
   for (const [symbol, userRows] of symbolMap) {
     try {
-      const candles = await fetchCandles(symbol, tf, env.TWELVE_DATA_API_KEY);
+      const candles = await fetchCandles(symbol, tf, env.TWELVE_DATA_API_KEY, env.FINNHUB_API_KEY);
       if (!candles || candles.length < 2) continue;
 
       let htfBias = 'neutral';
       if (htfTF) {
-        const htfCandles = await fetchCandles(symbol, htfTF, env.TWELVE_DATA_API_KEY);
+        const htfCandles = await fetchCandles(symbol, htfTF, env.TWELVE_DATA_API_KEY, env.FINNHUB_API_KEY);
         if (htfCandles?.length >= 3) {
           const r = calcTTradesBias({ bar1: htfCandles[1], bar2: htfCandles[2] });
           htfBias = r.bias;
