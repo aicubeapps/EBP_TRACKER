@@ -1052,8 +1052,8 @@ router.patch('/user/assets/:id/bias-overrides', async (req, env) => {
 });
 
 router.get('/user/assets/validate', async (req, env) => {
-  const { origin, error } = req._ctx;
-  if (error) return json({ error }, 401, origin);
+  const { user: clerkUser, origin, error } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
   const url    = new URL(req.url);
   const symbol = (url.searchParams.get('symbol') ?? '').toUpperCase().trim();
   if (!symbol) return json({ valid: false, error: 'Symbol is required' }, 400, origin);
