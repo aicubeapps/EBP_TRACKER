@@ -358,6 +358,8 @@ async function logApiCall(db, source, symbol, timeframe, success = 1) {
 }
 
 async function fetchCandles(symbol, tf, twelveApiKey, finnhubApiKey, count = 10, db = null) {
+  symbol = normaliseSymbol(symbol);
+
   // 1. Finnhub — primary (60 calls/min, no daily cap)
   const finnhubCandles = await fetchFinnhub(symbol, tf, finnhubApiKey, count);
   if (finnhubCandles && finnhubCandles.length >= 3) {
@@ -388,6 +390,29 @@ async function fetchCandles(symbol, tf, twelveApiKey, finnhubApiKey, count = 10,
   }
 
   return null;
+}
+
+// Bare 6-char pairs (GBPUSD, XAUUSD, ...) fall through every data source
+// unchanged — toYahooSymbol()/toFinnhubSymbol() only translate slash-delimited
+// symbols. Normalise to BASE/QUOTE so those lookups actually resolve.
+function normaliseSymbol(symbol) {
+  if (!symbol) return symbol;
+  if (symbol.includes('/')) return symbol; // already slash format
+
+  const FOREX_BASES  = ['EUR', 'GBP', 'USD', 'AUD', 'NZD', 'CAD', 'CHF', 'JPY', 'XAU', 'XAG', 'BTC', 'ETH', 'SOL'];
+  const FOREX_QUOTES = ['USD', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD'];
+
+  const upper = symbol.toUpperCase();
+
+  for (const base of FOREX_BASES) {
+    for (const quote of FOREX_QUOTES) {
+      if (upper === base + quote && base !== quote) {
+        return `${base}/${quote}`;
+      }
+    }
+  }
+
+  return symbol; // NSE stocks / indices etc. — passthrough
 }
 
 function getAssetType(instrumentType, symbol) {
@@ -1024,7 +1049,7 @@ router.post('/user/assets', async (req, env) => {
     return json({ error: 'Asset slot limit reached. Upgrade to add more.' }, 403, origin);
   }
 
-  const symbolStr = String(body.symbol ?? '').toUpperCase().trim();
+  const symbolStr = normaliseSymbol(String(body.symbol ?? '').toUpperCase().trim());
   if (!symbolStr) {
     return json({ error: 'Symbol is required.' }, 400, origin);
   }
@@ -1035,7 +1060,7 @@ router.post('/user/assets', async (req, env) => {
     return json({ error: 'Asset already in your list.' }, 400, origin);
   }
 
-  const validation = await validateSymbol(body.symbol, env.TWELVE_DATA_API_KEY);
+  const validation = await validateSymbol(symbolStr, env.TWELVE_DATA_API_KEY);
   if (!validation.valid) {
     return json({ error: 'Symbol not found on any data source.' }, 400, origin);
   }
@@ -1048,7 +1073,7 @@ router.post('/user/assets', async (req, env) => {
     body.displayName ?? symbolStr,
     body.assetType ?? 'forex', Date.now()).run();
 
-  return json({ id, symbol: body.symbol }, 201, origin);
+  return json({ id, symbol: symbolStr }, 201, origin);
 });
 
 router.delete('/user/assets/:id', async (req, env) => {
@@ -1074,7 +1099,7 @@ router.get('/user/assets/validate', async (req, env) => {
   const { user: clerkUser, origin, error } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
   const url    = new URL(req.url);
-  const symbol = (url.searchParams.get('symbol') ?? '').toUpperCase().trim();
+  const symbol = normaliseSymbol((url.searchParams.get('symbol') ?? '').toUpperCase().trim());
   if (!symbol) return json({ valid: false, error: 'Symbol is required' }, 400, origin);
 
   const validation = await validateSymbol(symbol, env.TWELVE_DATA_API_KEY);

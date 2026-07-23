@@ -279,7 +279,32 @@ async function logApiCall(db, source, symbol, timeframe, success = 1) {
   } catch {}
 }
 
+// Bare 6-char pairs (GBPUSD, XAUUSD, ...) fall through every data source
+// unchanged — toYahooSymbol()/toFinnhubSymbol() only translate slash-delimited
+// symbols. Normalise to BASE/QUOTE so those lookups actually resolve.
+function normaliseSymbol(symbol) {
+  if (!symbol) return symbol;
+  if (symbol.includes('/')) return symbol; // already slash format
+
+  const FOREX_BASES  = ['EUR', 'GBP', 'USD', 'AUD', 'NZD', 'CAD', 'CHF', 'JPY', 'XAU', 'XAG', 'BTC', 'ETH', 'SOL'];
+  const FOREX_QUOTES = ['USD', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD'];
+
+  const upper = symbol.toUpperCase();
+
+  for (const base of FOREX_BASES) {
+    for (const quote of FOREX_QUOTES) {
+      if (upper === base + quote && base !== quote) {
+        return `${base}/${quote}`;
+      }
+    }
+  }
+
+  return symbol; // NSE stocks / indices etc. — passthrough
+}
+
 async function fetchCandles(symbol, tf, twelveApiKey, finnhubApiKey, _log, count = 10, db = null) {
+  symbol = normaliseSymbol(symbol);
+
   // 1. Finnhub — primary (60 calls/min, no daily cap)
   const finnhubCandles = await fetchFinnhub(symbol, tf, finnhubApiKey, count);
   if (finnhubCandles && finnhubCandles.length >= 3) {
