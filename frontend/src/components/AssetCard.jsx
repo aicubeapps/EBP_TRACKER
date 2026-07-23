@@ -1,30 +1,16 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import { useNavigate } from 'react-router-dom';
-import {
-  Card, CardContent, Stack, Typography, Chip, Box,
-  Button, FormControlLabel, Checkbox, Divider, Tooltip,
-} from '@mui/material';
-import { useTheme } from '@mui/material/styles';
 import api from '../lib/api';
+import { fmtNY } from '../lib/utils';
 import EBPConfigPanel from './EBPConfigPanel';
 import SweepConfigPanel from './SweepConfigPanel';
 import AIAlertsPanel from './AIAlertsPanel';
 import BiasOverridePanel from './BiasOverridePanel';
 
-function fmtNY(ts) {
-  if (!ts) return '—';
-  return new Date(ts).toLocaleString('en-US', {
-    timeZone: 'America/New_York',
-    month: 'short', day: 'numeric',
-    hour: '2-digit', minute: '2-digit',
-  }) + ' NY';
-}
-
 export default function AssetCard({ asset, tier, onRemove }) {
   const { getToken } = useAuth();
   const navigate     = useNavigate();
-  const theme        = useTheme();
 
   const [ebpEnabled,   setEbpEnabled]   = useState(false);
   const [sweepEnabled, setSweepEnabled] = useState(false);
@@ -66,89 +52,53 @@ export default function AssetCard({ asset, tier, onRemove }) {
     await api.patch(`/user/assets/${asset.id}/bias-overrides`, { bias_overrides: updated }, token);
   };
 
-  const typeColor = {
-    forex:     theme.palette.primary.main,
-    commodity: theme.palette.warning.main,
-    index:     theme.palette.secondary.main,
-    nse_asset: theme.palette.success.main,
-    crypto:    theme.palette.warning.main,
-  }[asset.asset_type] ?? theme.palette.primary.main;
+  const assetTypeBadge = (asset.asset_type ?? 'forex').toLowerCase().replace(/\s/g, '_');
 
   return (
-    <Card sx={{ mb: 2, border: `1px solid ${theme.palette.divider}` }}>
-      <CardContent sx={{ p: 2, '&:last-child': { pb: 2 } }}>
+    <div className="card">
+      <div className="card-header">
+        <span className="card-title">{asset.symbol}</span>
+        <span className={`badge badge-${assetTypeBadge}`}>{asset.asset_type?.replace('_', ' ')}</span>
+        <button className="card-remove-btn" onClick={() => onRemove(asset.id)} title="Remove">✕</button>
+      </div>
 
-        {/* Header row */}
-        <Stack direction="row" alignItems="flex-start" justifyContent="space-between">
-          <Box>
-            <Stack direction="row" alignItems="center" spacing={1}>
-              <Typography variant="h6" fontWeight={700} sx={{ fontFamily: 'monospace', fontSize: '1rem' }}>
-                {asset.symbol}
-              </Typography>
-              <Chip
-                label={asset.asset_type?.toUpperCase().replace('_', ' ')}
-                size="small"
-                sx={{
-                  borderRadius: '3px', fontSize: '0.6rem', fontWeight: 600, height: 16,
-                  bgcolor: `${typeColor}18`, color: typeColor,
-                  border: `1px solid ${typeColor}33`,
-                  '& .MuiChip-label': { px: 0.75 },
-                }}
-              />
-            </Stack>
-            {lastAlert && (
-              <Tooltip title="View all alerts">
-                <Typography
-                  variant="caption"
-                  sx={{ color: 'text.disabled', cursor: 'pointer', mt: 0.25, display: 'block' }}
-                  onClick={() => navigate('/alerts')}
-                >
-                  Last: {lastAlert.direction.toUpperCase()} {lastAlert.alert_type.toUpperCase()} {lastAlert.timeframe} — {fmtNY(lastAlert.fired_at)}
-                </Typography>
-              </Tooltip>
-            )}
-          </Box>
-          <Button
-            size="small" color="error" variant="text"
-            onClick={() => onRemove(asset.id)}
-            sx={{ minWidth: 0, px: 0.5, fontSize: '0.7rem', opacity: 0.6, flexShrink: 0 }}
-          >
-            Remove
-          </Button>
-        </Stack>
+      {lastAlert && (
+        <p className="text-muted mb-md" style={{ cursor: 'pointer', marginTop: -8 }} onClick={() => navigate('/alerts')}>
+          Last: {lastAlert.direction.toUpperCase()} {lastAlert.alert_type.toUpperCase()} {lastAlert.timeframe} — {fmtNY(lastAlert.fired_at)}
+        </p>
+      )}
 
-        <Divider sx={{ my: 1 }} />
-
-        {/* EBP Alerts */}
-        <Stack direction="row" alignItems="center" justifyContent="space-between">
-          <FormControlLabel
-            control={<Checkbox checked={ebpEnabled} onChange={e => setEbpEnabled(e.target.checked)} />}
-            label={<Typography variant="body2" fontWeight={600}>EBP Alerts</Typography>}
-          />
-          <Button size="small" onClick={() => setShowBiasOverride(o => !o)} sx={{ fontSize: '0.7rem' }}>
+      {/* EBP Alerts */}
+      <div className="check-row">
+        <input type="checkbox" id={`ebp-${asset.id}`}
+          checked={ebpEnabled} onChange={e => setEbpEnabled(e.target.checked)} />
+        <label htmlFor={`ebp-${asset.id}`}>EBP Alerts</label>
+        {ebpEnabled && (
+          <button className="override-btn" onClick={() => setShowBiasOverride(o => !o)}>
             {showBiasOverride ? 'Hide' : 'Override'} Bias
-          </Button>
-        </Stack>
-        {showBiasOverride && (
-          <BiasOverridePanel overrides={biasOverrides} onChange={handleOverrideChange} />
+          </button>
         )}
-        {ebpEnabled && <EBPConfigPanel assetId={asset.id} biasCache={biasCache} />}
+      </div>
+      {ebpEnabled && showBiasOverride && (
+        <BiasOverridePanel overrides={biasOverrides} onChange={handleOverrideChange} />
+      )}
+      {ebpEnabled && <EBPConfigPanel assetId={asset.id} biasCache={biasCache} />}
 
-        {/* Sweep Alerts */}
-        <FormControlLabel
-          control={<Checkbox checked={sweepEnabled} onChange={e => setSweepEnabled(e.target.checked)} />}
-          label={<Typography variant="body2" fontWeight={600}>Sweep Alerts</Typography>}
-        />
-        {sweepEnabled && <SweepConfigPanel assetId={asset.id} biasCache={biasCache} />}
+      {/* Sweep Alerts */}
+      <div className="check-row">
+        <input type="checkbox" id={`sweep-${asset.id}`}
+          checked={sweepEnabled} onChange={e => setSweepEnabled(e.target.checked)} />
+        <label htmlFor={`sweep-${asset.id}`}>Sweep Alerts</label>
+      </div>
+      {sweepEnabled && <SweepConfigPanel assetId={asset.id} biasCache={biasCache} />}
 
-        {/* AI Alerts */}
-        <FormControlLabel
-          control={<Checkbox checked={aiEnabled} onChange={e => setAiEnabled(e.target.checked)} />}
-          label={<Typography variant="body2" fontWeight={600}>AI Alerts</Typography>}
-        />
-        {aiEnabled && <AIAlertsPanel assetId={asset.id} tier={tier} />}
-
-      </CardContent>
-    </Card>
+      {/* AI Alerts */}
+      <div className="check-row">
+        <input type="checkbox" id={`ai-${asset.id}`}
+          checked={aiEnabled} onChange={e => setAiEnabled(e.target.checked)} />
+        <label htmlFor={`ai-${asset.id}`}>AI Alerts</label>
+      </div>
+      {aiEnabled && <AIAlertsPanel assetId={asset.id} tier={tier} />}
+    </div>
   );
 }

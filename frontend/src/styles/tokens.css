@@ -1,0 +1,56 @@
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&family=Outfit:wght@400;500;600;700&display=swap');
+
+:root {
+  /* ── Typography ── */
+  --font-sans: 'Manrope', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'Outfit', 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+
+  /* ── Core palette ── */
+  --ink:     #0e0c0a;
+  --paper:   #f3ede3;
+  --cream:   #eae2d4;
+  --warm:    #d6c9b4;
+  --surface: #faf6ee;
+  --border:  #c4b9a4;
+  --muted:   #6b6050;
+  --text-secondary: #5e5648;
+  --text-tertiary:  #8a7e6e;
+
+  /* ── Semantic ── */
+  --bull:    #0f3d1e;
+  --bull-lt: #cce8d6;
+  --bear:    #3d0f0f;
+  --bear-lt: #ead0d0;
+  --gold:    #7a5c00;
+  --gold-lt: #f7e8c0;
+
+  /* ── Nav ── */
+  --nav-w:            244px;
+  --nav-bg:           #0f172a;
+  --nav-hover:        #1e2d47;
+  --nav-active-bg:    #1e2d47;
+  --nav-active-accent:#38bdf8;
+  --nav-text:         #94a3b8;
+  --nav-text-active:  #f1f5f9;
+  --nav-section-text: #475569;
+  --nav-border:       #1e293b;
+  --nav-badge-bg:     #f59e0b;
+  --nav-badge-text:   #0f172a;
+
+  /* ── Spacing ── */
+  --sp-xs:  4px;
+  --sp-sm:  8px;
+  --sp-md:  16px;
+  --sp-lg:  24px;
+  --sp-xl:  32px;
+
+  /* ── Radius ── */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  /* ── Topbar ── */
+  --topbar-bg:     #0f172a;
+  --topbar-accent: #38bdf8;
+  --topbar-h:      52px;
+}

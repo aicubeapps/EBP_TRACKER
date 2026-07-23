@@ -8,7 +8,7 @@ import Settings from './pages/Settings.jsx'
 import Upgrade from './pages/Upgrade.jsx'
 import Admin from './pages/Admin.jsx'
 import NotFound from './pages/NotFound.jsx'
-import AppShell from './components/layout/AppShell.jsx'
+import Layout from './components/Layout.jsx'
 
 function ProtectedRoute({ children }) {
   return (
@@ -34,11 +34,11 @@ export default function App() {
       <Routes>
         <Route path="/" element={<LandingRoute />} />
         <Route path="/invite/:token" element={<LandingRoute />} />
-        <Route path="/dashboard" element={<ProtectedRoute><AppShell><Dashboard /></AppShell></ProtectedRoute>} />
-        <Route path="/alerts" element={<ProtectedRoute><AppShell><Alerts /></AppShell></ProtectedRoute>} />
-        <Route path="/settings" element={<ProtectedRoute><AppShell><Settings /></AppShell></ProtectedRoute>} />
-        <Route path="/upgrade" element={<ProtectedRoute><AppShell><Upgrade /></AppShell></ProtectedRoute>} />
-        <Route path="/admin" element={<ProtectedRoute><AppShell><Admin /></AppShell></ProtectedRoute>} />
+        <Route path="/dashboard" element={<ProtectedRoute><Layout><Dashboard /></Layout></ProtectedRoute>} />
+        <Route path="/alerts" element={<ProtectedRoute><Layout><Alerts /></Layout></ProtectedRoute>} />
+        <Route path="/settings" element={<ProtectedRoute><Layout><Settings /></Layout></ProtectedRoute>} />
+        <Route path="/upgrade" element={<ProtectedRoute><Layout><Upgrade /></Layout></ProtectedRoute>} />
+        <Route path="/admin" element={<ProtectedRoute><Layout><Admin /></Layout></ProtectedRoute>} />
         <Route path="*" element={<NotFound />} />
       </Routes>
     </BrowserRouter>

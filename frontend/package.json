@@ -10,12 +10,6 @@
   },
   "dependencies": {
     "@clerk/clerk-react": "latest",
-    "@emotion/react": "^11.14.0",
-    "@emotion/styled": "^11.14.1",
-    "@mui/icons-material": "^9.2.0",
-    "@mui/material": "^9.2.0",
-    "@mui/x-data-grid": "^9.10.0",
-    "lucide-react": "latest",
     "react": "^18",
     "react-dom": "^18",
     "react-router-dom": "^6",
@@ -23,9 +17,6 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "latest",
-    "autoprefixer": "latest",
-    "postcss": "latest",
-    "tailwindcss": "^3",
     "vite": "latest"
   }
 }

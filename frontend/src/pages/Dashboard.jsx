@@ -1,12 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@clerk/clerk-react';
-import {
-  Box, Container, Typography, Card, CardContent,
-  Stack, Skeleton, Button, Divider, TextField,
-  CircularProgress, InputAdornment,
-} from '@mui/material';
-import BoltOutlinedIcon from '@mui/icons-material/BoltOutlined';
 import { useAssets } from '../hooks/useAssets';
 import { useUser } from '../hooks/useUser';
 import ApiErrorAlert from '../components/ApiErrorAlert';
@@ -16,12 +10,12 @@ import api from '../lib/api';
 export default function Dashboard() {
   const navigate = useNavigate();
   const { getToken } = useAuth();
-  const { user }                                             = useUser();
-  const { assets, loading, error, addAsset, removeAsset }    = useAssets();
+  const { user }                                          = useUser();
+  const { assets, loading, error, addAsset, removeAsset } = useAssets();
 
-  const [query, setQuery]                 = useState('');
+  const [query, setQuery]                     = useState('');
   const [validationState, setValidationState] = useState(null); // null | 'validating' | 'invalid' | 'duplicate'
-  const [addError, setAddError]           = useState(null);
+  const [addError, setAddError]               = useState(null);
 
   async function handleAddAsset() {
     const symbol = query.trim().toUpperCase();
@@ -51,116 +45,80 @@ export default function Dashboard() {
   }
 
   return (
-    <Container maxWidth="xl" sx={{ py: 3 }}>
-      <Box sx={{ maxWidth: 680, mx: 'auto', mb: 3 }}>
-        <TextField
-          placeholder="Search and add asset (e.g. EUR/USD, NIFTY, BTC/USD)"
-          fullWidth
-          value={query}
-          onChange={e => { setQuery(e.target.value); setValidationState(null); }}
-          onKeyDown={e => e.key === 'Enter' && handleAddAsset()}
-          disabled={validationState === 'validating'}
-          InputProps={{
-            endAdornment: (
-              <InputAdornment position="end">
-                {validationState === 'validating' ? (
-                  <CircularProgress size={18} />
-                ) : (
-                  <Button size="small" onClick={handleAddAsset} disabled={!query.trim()}>
-                    Add
-                  </Button>
-                )}
-              </InputAdornment>
-            ),
-          }}
-        />
+    <div className="shell">
+      <div className="search-bar">
+        <div className="search-input-wrap">
+          <input
+            className="search-input"
+            placeholder="Search and add asset — EUR/USD, NIFTY, BTC/USD…"
+            value={query}
+            onChange={e => { setQuery(e.target.value); setValidationState(null); setAddError(null); }}
+            onKeyDown={e => e.key === 'Enter' && handleAddAsset()}
+            disabled={validationState === 'validating'}
+          />
+          <button
+            className="search-btn"
+            onClick={handleAddAsset}
+            disabled={validationState === 'validating' || !query.trim()}
+          >
+            {validationState === 'validating' ? '…' : 'Add'}
+          </button>
+        </div>
         {validationState === 'invalid' && (
-          <Typography variant="caption" color="error" sx={{ mt: 0.5, display: 'block' }}>
-            Symbol not found — please check and try again
-          </Typography>
+          <span className="search-msg error">Symbol not found — please check and try again</span>
         )}
         {validationState === 'duplicate' && (
-          <Typography variant="caption" color="warning.main" sx={{ mt: 0.5, display: 'block' }}>
-            Already in your watchlist
-          </Typography>
+          <span className="search-msg warning">Already in your watchlist</span>
         )}
         {addError && (
-          <Typography variant="caption" color="error" sx={{ mt: 0.5, display: 'block' }}>
-            {addError}
-          </Typography>
+          <span className="search-msg error">{addError}</span>
         )}
-      </Box>
+      </div>
 
       {user?.active === 0 && (
-        <Box sx={{
-          position: 'fixed', inset: 0, zIndex: 1300,
-          bgcolor: 'rgba(0,0,0,0.75)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          backdropFilter: 'blur(4px)',
-        }}>
-          <Card sx={{ maxWidth: 400, width: '90%', textAlign: 'center', p: 1 }}>
-            <CardContent>
-              <BoltOutlinedIcon sx={{ fontSize: 48, color: 'warning.main', mb: 1 }} />
-              <Typography variant="h5" fontWeight={700} sx={{ mb: 1 }}>
-                Plan Expired
-              </Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                Your EBP Tracker subscription has expired. Renew to continue
-                receiving alerts and monitoring your assets.
-              </Typography>
-              <Divider sx={{ mb: 2 }} />
-              <Button variant="contained" size="large" fullWidth
-                startIcon={<BoltOutlinedIcon />}
-                onClick={() => navigate('/upgrade')}
-                sx={{ bgcolor: 'warning.main', '&:hover': { bgcolor: 'warning.dark' } }}>
-                Renew Plan
-              </Button>
-            </CardContent>
-          </Card>
-        </Box>
+        <div className="overlay">
+          <div className="card overlay-card">
+            <div className="overlay-icon">⚡</div>
+            <div className="card-title mb-sm">Plan Expired</div>
+            <p className="text-muted mb-md" style={{ fontSize: 12 }}>
+              Your EBP Tracker subscription has expired. Renew to continue receiving alerts and monitoring your assets.
+            </p>
+            <div className="divider" />
+            <button className="btn btn-primary btn-lg btn-block" onClick={() => navigate('/upgrade')}>
+              Renew Plan
+            </button>
+          </div>
+        </div>
       )}
 
       <ApiErrorAlert error={error} />
 
       {loading ? (
-        <Box sx={{ maxWidth: 680, mx: 'auto' }}>
-          <Stack spacing={2}>
-            {[1, 2, 3].map(i => (
-              <Card key={i} sx={{ border: '1px solid', borderColor: 'divider' }}>
-                <CardContent sx={{ py: 2 }}>
-                  <Skeleton variant="text" width={120} height={28} />
-                  <Skeleton variant="text" width={60} height={16} />
-                  <Skeleton variant="text" width={200} height={16} sx={{ mt: 1 }} />
-                </CardContent>
-              </Card>
-            ))}
-          </Stack>
-        </Box>
-      ) : assets.length === 0 ? (
-        <Box sx={{ maxWidth: 680, mx: 'auto' }}>
-        <Card sx={{ border: '1px solid', borderColor: 'divider' }}>
-          <CardContent sx={{ textAlign: 'center', py: 6 }}>
-            <Typography variant="h6" color="text.secondary" gutterBottom>
-              No assets tracked yet
-            </Typography>
-            <Typography variant="body2" color="text.disabled">
-              Search for a symbol above to start receiving alerts
-            </Typography>
-          </CardContent>
-        </Card>
-        </Box>
-      ) : (
-        <Box sx={{ maxWidth: 680, mx: 'auto' }}>
-          {assets.map(asset => (
-            <AssetCard
-              key={asset.id}
-              asset={asset}
-              tier={user?.plan ?? 'free'}
-              onRemove={removeAsset}
-            />
+        <>
+          {[1, 2, 3].map(i => (
+            <div key={i} className="card">
+              <div className="skeleton" style={{ width: 120, height: 20, marginBottom: 8 }} />
+              <div className="skeleton" style={{ width: 60, height: 12, marginBottom: 8 }} />
+              <div className="skeleton" style={{ width: 200, height: 12 }} />
+            </div>
           ))}
-        </Box>
+        </>
+      ) : assets.length === 0 ? (
+        <div className="card" style={{ textAlign: 'center', padding: 40 }}>
+          <p className="text-muted" style={{ fontSize: 13 }}>
+            No assets yet — search above to add your first asset
+          </p>
+        </div>
+      ) : (
+        assets.map(asset => (
+          <AssetCard
+            key={asset.id}
+            asset={asset}
+            tier={user?.plan ?? 'free'}
+            onRemove={removeAsset}
+          />
+        ))
       )}
-    </Container>
+    </div>
   );
 }

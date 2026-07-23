@@ -1,424 +1,275 @@
-import { useState, useEffect } from 'react'
-import { useAuth } from '@clerk/clerk-react'
-import Box from '@mui/material/Box'
-import Stack from '@mui/material/Stack'
-import Typography from '@mui/material/Typography'
-import Tabs from '@mui/material/Tabs'
-import Tab from '@mui/material/Tab'
-import Button from '@mui/material/Button'
-import Chip from '@mui/material/Chip'
-import Paper from '@mui/material/Paper'
-import TextField from '@mui/material/TextField'
-import IconButton from '@mui/material/IconButton'
-import Alert from '@mui/material/Alert'
-import CircularProgress from '@mui/material/CircularProgress'
-import { Table, THead, TBody, TR, TH, TD } from '../components/ui/Table.jsx'
-import CheckOutlinedIcon from '@mui/icons-material/CheckOutlined'
-import CloseOutlinedIcon from '@mui/icons-material/CloseOutlined'
-import AddOutlinedIcon from '@mui/icons-material/AddOutlined'
-import BlockOutlinedIcon from '@mui/icons-material/BlockOutlined'
-import CheckCircleOutlinedIcon from '@mui/icons-material/CheckCircleOutlined'
-import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
-import SaveOutlinedIcon from '@mui/icons-material/SaveOutlined'
-import CancelOutlinedIcon from '@mui/icons-material/CancelOutlined'
-import api from '../lib/api'
+import { useState, useEffect } from 'react';
+import { useAuth } from '@clerk/clerk-react';
+import api from '../lib/api';
 
-const PLAN_SX = {
-  FREE:   { bgcolor: '#0d0d0d', color: '#8888a8', border: '1px solid #2a2a2a' },
-  COFFEE: { bgcolor: '#1a1100', color: '#f5a623', border: '1px solid #f5a623' },
-  BEER:   { bgcolor: '#001033', color: '#4488ff', border: '1px solid #4488ff' },
-  WINE:   { bgcolor: '#110022', color: '#8855ff', border: '1px solid #8855ff' },
-}
+const TABS = ['Users', 'Payments', 'Invite Tokens', 'Tier Config'];
 
 export default function Admin() {
-  const { getToken }              = useAuth()
-  const [tab, setTab]             = useState(0)
-  const [isAdmin, setIsAdmin]     = useState(null)
-  const [users, setUsers]         = useState([])
-  const [payments, setPayments]   = useState([])
-  const [tokens, setTokens]       = useState([])
-  const [tiers, setTiers]         = useState([])
-  const [loading, setLoading]     = useState(true)
-  const [editingTier, setEditingTier] = useState(null)
-  const [tierForm, setTierForm]   = useState({})
-  const [savingTier, setSavingTier] = useState(false)
+  const { getToken }                  = useAuth();
+  const [tab, setTab]                 = useState(0);
+  const [isAdmin, setIsAdmin]         = useState(null);
+  const [users, setUsers]             = useState([]);
+  const [payments, setPayments]       = useState([]);
+  const [tokens, setTokens]           = useState([]);
+  const [tiers, setTiers]             = useState([]);
+  const [loading, setLoading]         = useState(true);
+  const [editingTier, setEditingTier] = useState(null);
+  const [tierForm, setTierForm]       = useState({});
+  const [savingTier, setSavingTier]   = useState(false);
 
   useEffect(() => {
     (async () => {
       try {
-        const token = await getToken()
-        const me    = await api.get('/user/me', token)
-        const admin = me.is_admin === 1
-        setIsAdmin(admin)
+        const token = await getToken();
+        const me    = await api.get('/user/me', token);
+        const admin = me.is_admin === 1;
+        setIsAdmin(admin);
         if (admin) {
           const [u, p, t, tc] = await Promise.all([
             api.get('/admin/users',    token),
             api.get('/admin/payments', token),
             api.get('/admin/tokens',   token),
             api.get('/admin/tiers',    token),
-          ])
-          setUsers(Array.isArray(u) ? u : [])
-          setPayments(Array.isArray(p) ? p : [])
-          setTokens(Array.isArray(t) ? t : [])
-          setTiers(Array.isArray(tc) ? tc : [])
+          ]);
+          setUsers(Array.isArray(u) ? u : []);
+          setPayments(Array.isArray(p) ? p : []);
+          setTokens(Array.isArray(t) ? t : []);
+          setTiers(Array.isArray(tc) ? tc : []);
         }
       } catch (e) {
-        console.error('Admin load error:', e)
-        setIsAdmin(false)
+        console.error('Admin load error:', e);
+        setIsAdmin(false);
       } finally {
-        setLoading(false)
+        setLoading(false);
       }
-    })()
-  }, [])
+    })();
+  }, []);
 
   const handleApprove = async (paymentId) => {
-    const token = await getToken()
-    await api.post(`/admin/approve/${paymentId}`, {}, token)
-    const p = await api.get('/admin/payments', token)
-    setPayments(Array.isArray(p) ? p : [])
-  }
+    const token = await getToken();
+    await api.post(`/admin/approve/${paymentId}`, {}, token);
+    const p = await api.get('/admin/payments', token);
+    setPayments(Array.isArray(p) ? p : []);
+  };
 
   const handleReject = async (paymentId) => {
-    const token = await getToken()
-    await api.post(`/admin/reject/${paymentId}`, {}, token)
-    const p = await api.get('/admin/payments', token)
-    setPayments(Array.isArray(p) ? p : [])
-  }
+    const token = await getToken();
+    await api.post(`/admin/reject/${paymentId}`, {}, token);
+    const p = await api.get('/admin/payments', token);
+    setPayments(Array.isArray(p) ? p : []);
+  };
 
   const handleGenerateToken = async () => {
-    const token = await getToken()
-    const data  = await api.post('/admin/invite', {}, token)
-    alert(`New invite URL:\n${data.url}`)
-    const t = await api.get('/admin/tokens', token)
-    setTokens(Array.isArray(t) ? t : [])
-  }
+    const token = await getToken();
+    const data  = await api.post('/admin/invite', {}, token);
+    alert(`New invite URL:\n${data.url}`);
+    const t = await api.get('/admin/tokens', token);
+    setTokens(Array.isArray(t) ? t : []);
+  };
 
   const handleExpire = async (userId) => {
-    if (!window.confirm('Expire this user account?')) return
-    const token = await getToken()
-    await api.post(`/admin/expire/${userId}`, {}, token)
-    const u = await api.get('/admin/users', token)
-    setUsers(Array.isArray(u) ? u : [])
-  }
+    if (!window.confirm('Expire this user account?')) return;
+    const token = await getToken();
+    await api.post(`/admin/expire/${userId}`, {}, token);
+    const u = await api.get('/admin/users', token);
+    setUsers(Array.isArray(u) ? u : []);
+  };
 
   if (loading) {
-    return (
-      <Box sx={{ display: 'flex', alignItems: 'center',
-        justifyContent: 'center', py: 10 }}>
-        <Typography variant="body2" color="text.secondary">
-          Loading...
-        </Typography>
-      </Box>
-    )
+    return <div className="shell" style={{ textAlign: 'center', paddingTop: 60 }}><span className="spinner" /></div>;
   }
 
   if (!isAdmin) {
     return (
-      <Box sx={{ display: 'flex', flexDirection: 'column',
-        alignItems: 'center', justifyContent: 'center', py: 10 }}>
-        <BlockOutlinedIcon sx={{ fontSize: 48, color: '#ff4466', mb: 2 }} />
-        <Typography variant="h4" sx={{ mb: 0.5 }}>Access Denied</Typography>
-        <Typography variant="body2">
-          This panel is restricted to administrators.
-        </Typography>
-      </Box>
-    )
+      <div className="shell" style={{ textAlign: 'center', paddingTop: 60 }}>
+        <div style={{ fontSize: 40, marginBottom: 8 }}>🚫</div>
+        <div className="page-title" style={{ marginBottom: 4 }}>Access Denied</div>
+        <p className="text-muted">This panel is restricted to administrators.</p>
+      </div>
+    );
   }
 
   return (
-    <Box>
-      <Box sx={{ borderBottom: '1px solid #1a1a1a', mb: 3 }}>
-        <Tabs value={tab} onChange={(_, v) => setTab(v)}>
-          <Tab label="Users" />
-          <Tab label="Payments" />
-          <Tab label="Invite Tokens" />
-          <Tab label="Tier Config" />
-        </Tabs>
-      </Box>
+    <div className="shell-wide">
+      <div className="page-title">Admin Panel</div>
 
-      {/* Users Tab */}
+      <div className="tabs">
+        {TABS.map((t, i) => (
+          <button key={t} className={`tab ${tab === i ? 'active' : ''}`} onClick={() => setTab(i)}>
+            {t}
+          </button>
+        ))}
+      </div>
+
       {tab === 0 && (
-        <Table>
-          <THead>
-            <TR>
-              <TH>Email</TH><TH>Plan</TH><TH>Expiry</TH>
-              <TH>Assets</TH><TH>Alerts</TH><TH>Telegram</TH><TH>Actions</TH>
-            </TR>
-          </THead>
-          <TBody>
-            {users.length === 0 ? (
-              <TR>
-                <TD colSpan={7} sx={{ textAlign: 'center', color: '#55556a' }}>
-                  No users yet
-                </TD>
-              </TR>
-            ) : users.map(u => (
-              <TR key={u.id}>
-                <TD sx={{ color: '#8888a8' }}>
-                  {u.email || u.id.slice(0, 16) + '...'}
-                </TD>
-                <TD>
-                  <Chip
-                    label={u.plan?.toUpperCase() ?? 'FREE'}
-                    size="small"
-                    sx={{
-                      borderRadius: '4px', fontWeight: 700,
-                      fontSize: '0.7rem', height: 20,
-                      ...(PLAN_SX[u.plan?.toUpperCase()] ?? PLAN_SX.FREE),
-                    }}
-                  />
-                </TD>
-                <TD sx={{ color: '#55556a' }} className="tabular-nums">
-                  {new Date(u.expires_at).toLocaleDateString()}
-                </TD>
-                <TD className="tabular-nums">{u.asset_count}</TD>
-                <TD className="tabular-nums">{u.alert_count}</TD>
-                <TD>
-                  {u.telegram_verified
-                    ? <CheckCircleOutlinedIcon sx={{ color: '#00c896', fontSize: 16 }} />
-                    : <CloseOutlinedIcon sx={{ color: '#55556a', fontSize: 16 }} />
-                  }
-                </TD>
-                <TD>
-                  <Button variant="outlined" color="error" size="small"
-                    startIcon={<BlockOutlinedIcon />}
-                    onClick={() => handleExpire(u.id)}>
-                    Expire
-                  </Button>
-                </TD>
-              </TR>
-            ))}
-          </TBody>
-        </Table>
+        <div className="card" style={{ padding: 0 }}>
+          <div className="table-wrap">
+            <table className="alert-table">
+              <thead>
+                <tr>
+                  <th>Email</th><th>Plan</th><th>Expiry</th>
+                  <th>Assets</th><th>Alerts</th><th>Telegram</th><th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {users.length === 0 ? (
+                  <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--muted)', padding: 24 }}>No users yet</td></tr>
+                ) : users.map(u => (
+                  <tr key={u.id}>
+                    <td>{u.email || u.id.slice(0, 16) + '...'}</td>
+                    <td><span className="badge">{u.plan?.toUpperCase() ?? 'FREE'}</span></td>
+                    <td className="ts-cell tabular-nums">{new Date(u.expires_at).toLocaleDateString()}</td>
+                    <td className="tabular-nums">{u.asset_count}</td>
+                    <td className="tabular-nums">{u.alert_count}</td>
+                    <td>{u.telegram_verified ? '✅' : '—'}</td>
+                    <td>
+                      <button className="btn btn-danger btn-sm" onClick={() => handleExpire(u.id)}>Expire</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
 
-      {/* Payments Tab */}
       {tab === 1 && (
-        <Table>
-          <THead>
-            <TR>
-              <TH>Email</TH><TH>Tier</TH><TH>Amount</TH>
-              <TH>UTR Ref</TH><TH>Submitted</TH><TH>Actions</TH>
-            </TR>
-          </THead>
-          <TBody>
-            {payments.length === 0 ? (
-              <TR>
-                <TD colSpan={6} sx={{ textAlign: 'center', color: '#55556a' }}>
-                  No payments yet
-                </TD>
-              </TR>
-            ) : payments.map(p => (
-              <TR key={p.id}>
-                <TD sx={{ color: '#8888a8' }}>{p.email}</TD>
-                <TD>{p.tier}</TD>
-                <TD className="tabular-nums">₹{p.amount_inr}</TD>
-                <TD sx={{ fontFamily: 'monospace', color: '#55556a' }}>
-                  {p.upi_ref || '—'}
-                </TD>
-                <TD sx={{ color: '#55556a' }}>
-                  {new Date(p.submitted_at).toLocaleDateString()}
-                </TD>
-                <TD>
-                  {p.status === 'pending' ? (
-                    <Stack direction="row" spacing={0.75}>
-                      <Button variant="contained" color="success" size="small"
-                        startIcon={<CheckOutlinedIcon />}
-                        onClick={() => handleApprove(p.id)}>
-                        Approve
-                      </Button>
-                      <Button variant="outlined" color="error" size="small"
-                        startIcon={<CloseOutlinedIcon />}
-                        onClick={() => handleReject(p.id)}>
-                        Reject
-                      </Button>
-                    </Stack>
-                  ) : (
-                    <Chip
-                      label={p.status.toUpperCase()} size="small"
-                      sx={{
-                        borderRadius: '4px', fontWeight: 600,
-                        fontSize: '0.7rem', height: 20,
-                        bgcolor: p.status === 'approved' ? '#001a12' : '#1a0008',
-                        color:   p.status === 'approved' ? '#00c896' : '#ff4466',
-                        border:  `1px solid ${p.status === 'approved' ? '#00c896' : '#ff4466'}`,
-                      }}
-                    />
-                  )}
-                </TD>
-              </TR>
-            ))}
-          </TBody>
-        </Table>
+        <div className="card" style={{ padding: 0 }}>
+          <div className="table-wrap">
+            <table className="alert-table">
+              <thead>
+                <tr>
+                  <th>Email</th><th>Tier</th><th>Amount</th>
+                  <th>UTR Ref</th><th>Submitted</th><th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {payments.length === 0 ? (
+                  <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--muted)', padding: 24 }}>No payments yet</td></tr>
+                ) : payments.map(p => (
+                  <tr key={p.id}>
+                    <td>{p.email}</td>
+                    <td>{p.tier}</td>
+                    <td className="tabular-nums">₹{p.amount_inr}</td>
+                    <td className="text-mono">{p.upi_ref || '—'}</td>
+                    <td className="ts-cell">{new Date(p.submitted_at).toLocaleDateString()}</td>
+                    <td>
+                      {p.status === 'pending' ? (
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          <button className="btn btn-success btn-sm" onClick={() => handleApprove(p.id)}>Approve</button>
+                          <button className="btn btn-danger btn-sm" onClick={() => handleReject(p.id)}>Reject</button>
+                        </div>
+                      ) : (
+                        <span className={`badge badge-${p.status === 'approved' ? 't3' : 'sweep'}`}>{p.status.toUpperCase()}</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
 
-      {/* Invite Tokens Tab */}
       {tab === 2 && (
-        <Box>
-          <Stack direction="row" justifyContent="flex-end" sx={{ mb: 2 }}>
-            <Button variant="contained" startIcon={<AddOutlinedIcon />}
-              onClick={handleGenerateToken}>
-              Generate Token
-            </Button>
-          </Stack>
-          <Table>
-            <THead>
-              <TR>
-                <TH>Token</TH><TH>Status</TH><TH>Used By</TH><TH>Created</TH>
-              </TR>
-            </THead>
-            <TBody>
-              {tokens.length === 0 ? (
-                <TR>
-                  <TD colSpan={4} sx={{ textAlign: 'center', color: '#55556a' }}>
-                    No tokens yet
-                  </TD>
-                </TR>
-              ) : tokens.map(t => (
-                <TR key={t.token}>
-                  <TD sx={{ fontFamily: 'monospace', color: '#4488ff' }}>
-                    {t.token}
-                  </TD>
-                  <TD>
-                    <Chip
-                      label={t.used_by ? 'Used' : 'Unused'} size="small"
-                      sx={{
-                        borderRadius: '4px', fontWeight: 600,
-                        fontSize: '0.7rem', height: 20,
-                        ...(t.used_by
-                          ? { bgcolor: '#0d0d0d', color: '#55556a', border: '1px solid #2a2a2a' }
-                          : { bgcolor: '#001a12', color: '#00c896', border: '1px solid #00c896' }
-                        ),
-                      }}
-                    />
-                  </TD>
-                  <TD sx={{ color: '#55556a' }}>{t.used_by || '—'}</TD>
-                  <TD sx={{ color: '#55556a' }}>
-                    {new Date(t.created_at).toLocaleDateString()}
-                  </TD>
-                </TR>
-              ))}
-            </TBody>
-          </Table>
-        </Box>
+        <div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+            <button className="btn btn-primary" onClick={handleGenerateToken}>+ Generate Token</button>
+          </div>
+          <div className="card" style={{ padding: 0 }}>
+            <div className="table-wrap">
+              <table className="alert-table">
+                <thead>
+                  <tr><th>Token</th><th>Status</th><th>Used By</th><th>Created</th></tr>
+                </thead>
+                <tbody>
+                  {tokens.length === 0 ? (
+                    <tr><td colSpan={4} style={{ textAlign: 'center', color: 'var(--muted)', padding: 24 }}>No tokens yet</td></tr>
+                  ) : tokens.map(t => (
+                    <tr key={t.token}>
+                      <td className="text-mono">{t.token}</td>
+                      <td><span className="badge">{t.used_by ? 'USED' : 'UNUSED'}</span></td>
+                      <td>{t.used_by || '—'}</td>
+                      <td className="ts-cell">{new Date(t.created_at).toLocaleDateString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       )}
 
-      {/* Tier Config Tab */}
       {tab === 3 && (
-        <Box>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            Modify tier pricing and asset slot limits.
-            Changes take effect immediately for new payments.
+        <div>
+          <p className="text-muted mb-md" style={{ fontSize: 12 }}>
+            Modify tier pricing and asset slot limits. Changes take effect immediately for new payments.
             Existing approved users are not affected.
-          </Typography>
+          </p>
 
-          <Stack spacing={2}>
-            {tiers.map(tier => (
-              <Paper key={tier.tier} sx={{ p: 2.5, border: '1px solid', borderColor: 'divider' }}>
-                {editingTier === tier.tier ? (
-                  <Stack spacing={2}>
-                    <Stack direction="row" alignItems="center" spacing={1}>
-                      <Typography variant="h6">{tier.emoji}</Typography>
-                      <Typography variant="subtitle1" fontWeight={600}>
-                        {tier.label}
-                      </Typography>
-                    </Stack>
-
-                    <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
-                      <TextField
-                        label="Price (₹)"
-                        type="number"
-                        size="small"
+          {tiers.map(tier => (
+            <div key={tier.tier} className="card">
+              {editingTier === tier.tier ? (
+                <>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                    <span style={{ fontSize: 20 }}>{tier.emoji}</span>
+                    <span className="card-title">{tier.label}</span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 16, marginBottom: 12, flexWrap: 'wrap' }}>
+                    <div style={{ width: 140 }}>
+                      <label className="input-label">Price (₹)</label>
+                      <input className="input" type="number" min={1}
                         value={tierForm.price_inr}
-                        onChange={e => setTierForm(f => ({ ...f, price_inr: parseInt(e.target.value) }))}
-                        inputProps={{ min: 1 }}
-                        sx={{ width: 140 }}
-                      />
-                      <TextField
-                        label="Asset Slots"
-                        type="number"
-                        size="small"
+                        onChange={e => setTierForm(f => ({ ...f, price_inr: parseInt(e.target.value) }))} />
+                    </div>
+                    <div style={{ width: 140 }}>
+                      <label className="input-label">Asset Slots</label>
+                      <input className="input" type="number" min={1} max={100}
                         value={tierForm.asset_limit}
-                        onChange={e => setTierForm(f => ({ ...f, asset_limit: parseInt(e.target.value) }))}
-                        inputProps={{ min: 1, max: 100 }}
-                        sx={{ width: 140 }}
-                      />
-                    </Stack>
+                        onChange={e => setTierForm(f => ({ ...f, asset_limit: parseInt(e.target.value) }))} />
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button className="btn btn-success btn-sm" disabled={savingTier} onClick={async () => {
+                      setSavingTier(true);
+                      try {
+                        const token = await getToken();
+                        await api.patch(`/admin/tiers/${tier.tier}`, { ...tier, ...tierForm }, token);
+                        const tc = await api.get('/admin/tiers', token);
+                        setTiers(Array.isArray(tc) ? tc : []);
+                        setEditingTier(null);
+                      } finally {
+                        setSavingTier(false);
+                      }
+                    }}>
+                      {savingTier ? <span className="spinner" /> : null} Save
+                    </button>
+                    <button className="btn btn-outline btn-sm" onClick={() => setEditingTier(null)}>Cancel</button>
+                  </div>
+                </>
+              ) : (
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <span style={{ fontSize: 24 }}>{tier.emoji}</span>
+                    <div>
+                      <div className="card-title" style={{ borderBottom: 'none', paddingBottom: 0 }}>{tier.label}</div>
+                      <div className="text-muted">₹{tier.price_inr} / 30 days · {tier.asset_limit} asset slots</div>
+                    </div>
+                  </div>
+                  <button className="icon-btn" style={{ fontSize: 16 }} onClick={() => {
+                    setEditingTier(tier.tier);
+                    setTierForm({ price_inr: tier.price_inr, asset_limit: tier.asset_limit });
+                  }}>✎</button>
+                </div>
+              )}
+            </div>
+          ))}
 
-                    <Stack direction="row" spacing={1}>
-                      <Button
-                        variant="contained" size="small"
-                        startIcon={savingTier ? <CircularProgress size={12} /> : <SaveOutlinedIcon />}
-                        disabled={savingTier}
-                        onClick={async () => {
-                          setSavingTier(true)
-                          try {
-                            const token = await getToken()
-                            await api.patch(`/admin/tiers/${tier.tier}`, {
-                              ...tier,
-                              ...tierForm,
-                            }, token)
-                            const tc = await api.get('/admin/tiers', token)
-                            setTiers(Array.isArray(tc) ? tc : [])
-                            setEditingTier(null)
-                          } catch (e) {
-                            console.error(e)
-                          } finally {
-                            setSavingTier(false)
-                          }
-                        }}
-                      >
-                        Save
-                      </Button>
-                      <Button
-                        variant="outlined" size="small"
-                        startIcon={<CancelOutlinedIcon />}
-                        onClick={() => setEditingTier(null)}
-                      >
-                        Cancel
-                      </Button>
-                    </Stack>
-                  </Stack>
-                ) : (
-                  <Stack direction="row" justifyContent="space-between" alignItems="center">
-                    <Stack direction="row" alignItems="center" spacing={2}>
-                      <Typography variant="h5">{tier.emoji}</Typography>
-                      <Box>
-                        <Typography variant="subtitle1" fontWeight={600}>
-                          {tier.label}
-                        </Typography>
-                        <Stack direction="row" spacing={2}>
-                          <Typography variant="body2" color="text.secondary">
-                            ₹{tier.price_inr} / 30 days
-                          </Typography>
-                          <Typography variant="body2" color="text.secondary">
-                            {tier.asset_limit} asset slots
-                          </Typography>
-                        </Stack>
-                      </Box>
-                    </Stack>
-                    <IconButton
-                      size="small"
-                      onClick={() => {
-                        setEditingTier(tier.tier)
-                        setTierForm({ price_inr: tier.price_inr, asset_limit: tier.asset_limit })
-                      }}
-                    >
-                      <EditOutlinedIcon fontSize="small" />
-                    </IconButton>
-                  </Stack>
-                )}
-              </Paper>
-            ))}
-
-            {tiers.length === 0 && (
-              <Alert severity="info">
-                No tier config found. Run the SQL migration in D1 Console first.
-              </Alert>
-            )}
-          </Stack>
-        </Box>
+          {tiers.length === 0 && (
+            <div className="banner banner-info">No tier config found. Run the SQL migration in D1 Console first.</div>
+          )}
+        </div>
       )}
-    </Box>
-  )
+    </div>
+  );
 }

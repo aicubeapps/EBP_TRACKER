@@ -1,10 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@clerk/clerk-react';
-import { Box, Stack, Select, MenuItem, IconButton, Button, Typography, CircularProgress } from '@mui/material';
-import { CloseOutlined, AddOutlined } from '@mui/icons-material';
-import { useTheme } from '@mui/material/styles';
 import api from '../lib/api';
 import { EBP_TFS, BIAS_SOURCE_FRONTEND } from '../lib/constants';
+import { capitalise } from '../lib/utils';
 
 const ALERT_MODES = [
   { value: 'aligned',      label: 'Aligned' },
@@ -12,14 +10,8 @@ const ALERT_MODES = [
   { value: 'all',          label: 'All' },
 ];
 
-function capitalise(str) {
-  if (!str) return '—';
-  return str.charAt(0).toUpperCase() + str.slice(1);
-}
-
 export default function EBPConfigPanel({ assetId, biasCache }) {
   const { getToken } = useAuth();
-  const theme = useTheme();
   const [configs, setConfigs] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -51,50 +43,36 @@ export default function EBPConfigPanel({ assetId, biasCache }) {
     setConfigs(prev => prev.filter(c => c.id !== id));
   }
 
-  if (loading) return <CircularProgress size={16} sx={{ ml: 3, mt: 1 }} />;
+  if (loading) return <div className="config-panel"><span className="spinner" /></div>;
 
   return (
-    <Box sx={{ ml: 3, mt: 1 }}>
+    <div className="config-panel">
       {configs.length === 0 && (
-        <Typography variant="caption" color="text.disabled" sx={{ display: 'block', mb: 0.5 }}>
-          No EBP alert timeframes configured.
-        </Typography>
+        <p className="text-muted mb-sm">No EBP alert timeframes configured.</p>
       )}
       {configs.map(cfg => {
         const biasTF   = BIAS_SOURCE_FRONTEND.ebp[cfg.timeframe] ?? null;
         const biasData = biasTF ? biasCache?.[biasTF] : null;
         const bias     = biasData?.bias ?? 'neutral';
-        const biasColor = bias === 'bullish' ? theme.palette.success.main
-          : bias === 'bearish' ? theme.palette.error.main
-          : theme.palette.text.disabled;
 
         return (
-          <Stack key={cfg.id} direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
-            <Select size="small" value={cfg.timeframe}
-              onChange={e => updateConfig(cfg.id, 'timeframe', e.target.value)}
-              sx={{ minWidth: 72, fontSize: '0.8rem' }}>
-              {EBP_TFS.map(tf => <MenuItem key={tf} value={tf}>{tf}</MenuItem>)}
-            </Select>
-            <Select size="small" value={cfg.alert_mode}
-              onChange={e => updateConfig(cfg.id, 'alert_mode', e.target.value)}
-              sx={{ minWidth: 100, fontSize: '0.8rem' }}>
-              {ALERT_MODES.map(m => <MenuItem key={m.value} value={m.value}>{m.label}</MenuItem>)}
-            </Select>
+          <div key={cfg.id} className="config-row">
+            <select className="select-sm" value={cfg.timeframe}
+              onChange={e => updateConfig(cfg.id, 'timeframe', e.target.value)}>
+              {EBP_TFS.map(tf => <option key={tf} value={tf}>{tf}</option>)}
+            </select>
+            <select className="select-sm" value={cfg.alert_mode}
+              onChange={e => updateConfig(cfg.id, 'alert_mode', e.target.value)}>
+              {ALERT_MODES.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+            </select>
             {biasTF && (
-              <Typography variant="caption" sx={{ color: biasColor, minWidth: 90, flexShrink: 0 }}>
-                Bias: {capitalise(bias)} ({biasTF})
-              </Typography>
+              <span className="bias-label">Bias: {capitalise(bias)} ({biasTF})</span>
             )}
-            <Box sx={{ flexGrow: 1 }} />
-            <IconButton size="small" onClick={() => deleteConfig(cfg.id)}>
-              <CloseOutlined sx={{ fontSize: 14, color: 'text.disabled' }} />
-            </IconButton>
-          </Stack>
+            <button className="icon-btn" onClick={() => deleteConfig(cfg.id)}>✕</button>
+          </div>
         );
       })}
-      <Button size="small" startIcon={<AddOutlined sx={{ fontSize: 14 }} />} onClick={addConfig}>
-        Add EBP Alert
-      </Button>
-    </Box>
+      <button className="add-link" onClick={addConfig}>+ Add EBP Alert</button>
+    </div>
   );
 }

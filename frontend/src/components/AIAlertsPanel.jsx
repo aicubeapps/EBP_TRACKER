@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@clerk/clerk-react';
-import { Box, Stack, Checkbox, Typography, Chip, CircularProgress } from '@mui/material';
 import api from '../lib/api';
 
 const TEMPLATES = [
@@ -48,41 +47,30 @@ export default function AIAlertsPanel({ assetId, tier }) {
     }
   }
 
-  if (loading) return <CircularProgress size={16} sx={{ ml: 3, mt: 1 }} />;
+  if (loading) return <div className="config-panel"><span className="spinner" /></div>;
 
   return (
-    <Box sx={{ ml: 3, mt: 1 }}>
+    <div className="config-panel">
       {TEMPLATES.map(tmpl => {
         const unlocked = canUseTier(tier, tmpl.minTier);
         const active   = templates.find(t => t.template === tmpl.id);
 
         return (
-          <Stack
-            key={tmpl.id}
-            direction="row"
-            alignItems="center"
-            gap={1}
-            sx={{ mb: 1, opacity: unlocked ? 1 : 0.4 }}
-          >
-            <Checkbox
-              size="small"
+          <div key={tmpl.id} className={`ai-template-row ${!unlocked ? 'locked-visible' : ''}`}>
+            <input
+              type="checkbox"
               checked={!!active?.enabled}
               disabled={!unlocked}
               onChange={e => unlocked && toggleTemplate(tmpl.id, e.target.checked)}
             />
-            <Typography variant="body2" fontWeight={700}>{tmpl.label}</Typography>
-            <Typography variant="body2" color="text.secondary">→ {tmpl.description}</Typography>
+            <span className="ai-template-label">{tmpl.label}</span>
+            <span className="ai-template-desc">→ {tmpl.description}</span>
             {!unlocked && (
-              <Chip
-                label={`${tmpl.minTier} required`}
-                size="small"
-                color="warning"
-                variant="outlined"
-              />
+              <span className="ai-template-lock">{tmpl.minTier} required</span>
             )}
-          </Stack>
+          </div>
         );
       })}
-    </Box>
+    </div>
   );
 }
