@@ -3,8 +3,8 @@ import {
   Paper, BottomNavigation, BottomNavigationAction
 } from '@mui/material';
 import {
-  DashboardOutlined, ShowChartOutlined,
-  NotificationsOutlined, SettingsOutlined, BoltOutlined,
+  DashboardOutlined,
+  NotificationsOutlined, SettingsOutlined,
   AdminPanelSettingsOutlined
 } from '@mui/icons-material';
 import { useUser } from '../../hooks/useUser';
@@ -16,10 +16,8 @@ export default function BottomNav() {
 
   const NAV_ITEMS = [
     { label: 'Dashboard', icon: <DashboardOutlined />,    path: '/dashboard' },
-    { label: 'Assets',    icon: <ShowChartOutlined />,    path: '/assets' },
     { label: 'Alerts',   icon: <NotificationsOutlined />, path: '/alerts' },
     { label: 'Settings', icon: <SettingsOutlined />,      path: '/settings' },
-    { label: 'Upgrade',  icon: <BoltOutlined />,          path: '/upgrade' },
     ...(user?.is_admin === 1 ? [{ label: 'Admin', icon: <AdminPanelSettingsOutlined />, path: '/admin' }] : []),
   ];
 

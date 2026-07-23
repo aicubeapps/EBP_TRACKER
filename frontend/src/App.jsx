@@ -3,7 +3,6 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 
 import Landing from './pages/Landing.jsx'
 import Dashboard from './pages/Dashboard.jsx'
-import Assets from './pages/Assets.jsx'
 import Alerts from './pages/Alerts.jsx'
 import Settings from './pages/Settings.jsx'
 import Upgrade from './pages/Upgrade.jsx'
@@ -36,7 +35,6 @@ export default function App() {
         <Route path="/" element={<LandingRoute />} />
         <Route path="/invite/:token" element={<LandingRoute />} />
         <Route path="/dashboard" element={<ProtectedRoute><AppShell><Dashboard /></AppShell></ProtectedRoute>} />
-        <Route path="/assets" element={<ProtectedRoute><AppShell><Assets /></AppShell></ProtectedRoute>} />
         <Route path="/alerts" element={<ProtectedRoute><AppShell><Alerts /></AppShell></ProtectedRoute>} />
         <Route path="/settings" element={<ProtectedRoute><AppShell><Settings /></AppShell></ProtectedRoute>} />
         <Route path="/upgrade" element={<ProtectedRoute><AppShell><Upgrade /></AppShell></ProtectedRoute>} />

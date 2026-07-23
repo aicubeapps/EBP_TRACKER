@@ -390,6 +390,19 @@ async function fetchCandles(symbol, tf, twelveApiKey, finnhubApiKey, count = 10,
   return null;
 }
 
+function guessAssetType(symbol) {
+  if (symbol.includes('/')) {
+    const base = symbol.split('/')[0];
+    if (['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'ADA', 'BNB'].includes(base)) return 'crypto';
+    if (['XAU', 'XAG', 'WTI', 'BRENT'].includes(base)) return 'commodity';
+    return 'forex';
+  }
+  if (symbol.endsWith('.NS') || symbol.endsWith('.BSE')) return 'nse_asset';
+  if (symbol.endsWith('USDT') || symbol.endsWith('USD')) return 'crypto';
+  if (['NIFTY', 'SENSEX', 'SPX', 'DJI', 'NDX'].includes(symbol)) return 'index';
+  return 'forex';
+}
+
 async function validateSymbol(symbol, apiKey) {
   // Yahoo Finance only — preserves Twelve Data quota for candle fetching
   try {
@@ -941,7 +954,10 @@ router.get('/health', async (req, env) => {
 router.get('/user/me', async (req, env) => {
   const { user: clerkUser, origin, error } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const user = await getOrCreateUser(env.DB, clerkUser);
+  await getOrCreateUser(env.DB, clerkUser);
+  const user = await env.DB.prepare(
+    'SELECT id, email, name, plan, asset_limit, created_at, expires_at, active, is_admin FROM users WHERE id=?'
+  ).bind(clerkUser.id).first();
   return json(user, 200, origin);
 });
 
@@ -1025,46 +1041,26 @@ router.delete('/user/assets/:id', async (req, env) => {
   return json({ success: true }, 200, origin);
 });
 
-router.patch('/user/assets/:id/ebp', async (req, env) => {
+router.patch('/user/assets/:id/bias-overrides', async (req, env) => {
   const { user: clerkUser, origin, error, params } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const body = await req.json();
+  const { bias_overrides } = await req.json();
   await env.DB.prepare(
-    'UPDATE user_assets SET timeframes = ?, ebp_alert_mode = ? WHERE id = ? AND user_id = ?'
-  ).bind(body.timeframes, body.alertMode, params.id, clerkUser.id).run();
-  return json({ success: true }, 200, origin);
+    'UPDATE user_assets SET bias_overrides = ? WHERE id = ? AND user_id = ?'
+  ).bind(JSON.stringify(bias_overrides ?? {}), params.id, clerkUser.id).run();
+  return json({ ok: true }, 200, origin);
 });
 
-router.patch('/user/assets/:id/sweep', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const body = await req.json();
-  await env.DB.prepare(
-    'UPDATE user_assets SET sweep_enabled = ?, sweep_timeframes = ?, sweep_alert_mode = ? WHERE id = ? AND user_id = ?'
-  ).bind(
-    body.enabled ? 1 : 0,
-    body.timeframes ?? '4H,1H,M15',
-    body.alertMode ?? 'aligned',
-    params.id, clerkUser.id
-  ).run();
-  return json({ success: true }, 200, origin);
-});
+router.get('/user/assets/validate', async (req, env) => {
+  const { origin, error } = req._ctx;
+  if (error) return json({ error }, 401, origin);
+  const url    = new URL(req.url);
+  const symbol = (url.searchParams.get('symbol') ?? '').toUpperCase().trim();
+  if (!symbol) return json({ valid: false, error: 'Symbol is required' }, 400, origin);
 
-router.patch('/user/assets/:id/combined', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const body = await req.json();
-  await env.DB.prepare(`
-    UPDATE user_assets
-    SET combined_enabled = ?, combined_pairs = ?, combined_window_mins = ?
-    WHERE id = ? AND user_id = ?
-  `).bind(
-    body.enabled ? 1 : 0,
-    JSON.stringify(body.pairs ?? []),
-    body.windowMins ?? 60,
-    params.id, clerkUser.id
-  ).run();
-  return json({ success: true }, 200, origin);
+  const validation = await validateSymbol(symbol, env.TWELVE_DATA_API_KEY);
+  const asset_type = guessAssetType(symbol);
+  return json({ valid: validation.valid, asset_type }, 200, origin);
 });
 
 // ── EBP Configs ───────────────────────────────────────────────
@@ -1090,25 +1086,6 @@ router.post('/user/ebp-configs/:assetId', async (req, env) => {
   return json({ id, timeframe, alert_mode: alert_mode ?? 'aligned', enabled: 1 }, 201, origin);
 });
 
-router.patch('/user/ebp-config/:id', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const { timeframe, alert_mode, enabled } = await req.json();
-  await env.DB.prepare(
-    'UPDATE user_ebp_configs SET timeframe=COALESCE(?,timeframe), alert_mode=COALESCE(?,alert_mode), enabled=COALESCE(?,enabled) WHERE id=? AND user_id=?'
-  ).bind(timeframe ?? null, alert_mode ?? null, enabled ?? null, params.id, clerkUser.id).run();
-  return json({ ok: true }, 200, origin);
-});
-
-router.delete('/user/ebp-config/:id', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  await env.DB.prepare(
-    'DELETE FROM user_ebp_configs WHERE id=? AND user_id=?'
-  ).bind(params.id, clerkUser.id).run();
-  return json({ ok: true }, 200, origin);
-});
-
 // ── Sweep Configs ─────────────────────────────────────────────
 
 router.get('/user/sweep-configs/:assetId', async (req, env) => {
@@ -1130,25 +1107,6 @@ router.post('/user/sweep-configs/:assetId', async (req, env) => {
     'INSERT INTO user_sweep_configs (id,user_id,asset_id,timeframe,alert_mode,enabled,created_at) VALUES (?,?,?,?,?,1,?)'
   ).bind(id, clerkUser.id, params.assetId, timeframe, alert_mode ?? 'aligned', Date.now()).run();
   return json({ id, timeframe, alert_mode: alert_mode ?? 'aligned', enabled: 1 }, 201, origin);
-});
-
-router.patch('/user/sweep-config/:id', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const { timeframe, alert_mode, enabled } = await req.json();
-  await env.DB.prepare(
-    'UPDATE user_sweep_configs SET timeframe=COALESCE(?,timeframe), alert_mode=COALESCE(?,alert_mode), enabled=COALESCE(?,enabled) WHERE id=? AND user_id=?'
-  ).bind(timeframe ?? null, alert_mode ?? null, enabled ?? null, params.id, clerkUser.id).run();
-  return json({ ok: true }, 200, origin);
-});
-
-router.delete('/user/sweep-config/:id', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  await env.DB.prepare(
-    'DELETE FROM user_sweep_configs WHERE id=? AND user_id=?'
-  ).bind(params.id, clerkUser.id).run();
-  return json({ ok: true }, 200, origin);
 });
 
 // ── Templates (CRUD) ──────────────────────────────────────────
@@ -1193,23 +1151,6 @@ router.delete('/user/template/:id', async (req, env) => {
   return json({ ok: true }, 200, origin);
 });
 
-// ── Health / Data Sources ─────────────────────────────────────
-
-router.get('/health/datasources', async (req, env) => {
-  const { origin } = req._ctx;
-  const [candleRow, biasRow] = await Promise.all([
-    env.DB.prepare('SELECT MAX(updated_at) as t FROM candle_cache').first(),
-    env.DB.prepare('SELECT MAX(updated_at) as t FROM bias_cache').first(),
-  ]);
-  const lastFetch = Math.max(candleRow?.t ?? 0, biasRow?.t ?? 0) || null;
-  const sources = {
-    finnhub:    { lastCall: lastFetch, callsToday: 0, lastSuccess: !!lastFetch },
-    yahoo:      { lastCall: null,      callsToday: 0, lastSuccess: false },
-    twelvedata: { lastCall: null,      callsToday: 0, lastSuccess: false },
-  };
-  return json({ sources, twelvedataToday: 0, twelvedataLimit: 800 }, 200, origin);
-});
-
 // ── Dashboard ─────────────────────────────────────────────────
 
 router.get('/dashboard', async (req, env) => {
@@ -1227,89 +1168,45 @@ router.get('/dashboard', async (req, env) => {
   return json(assets.results ?? [], 200, origin);
 });
 
-// ── EBP Configs ───────────────────────────────────────────────
-
-router.get('/user/ebp-configs/:assetId', async (req, env) => {
-  const { user: clerkUser, origin, error } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const { results } = await env.DB.prepare(
-    'SELECT * FROM user_ebp_configs WHERE user_id = ? AND asset_id = ? ORDER BY created_at ASC'
-  ).bind(clerkUser.id, req._params.assetId).all();
-  return json(results ?? [], 200, origin);
-});
-
-router.post('/user/ebp-configs/:assetId', async (req, env) => {
-  const { user: clerkUser, origin, error } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const { timeframe, alert_mode = 'aligned' } = await req.json();
-  if (!timeframe) return json({ error: 'timeframe required' }, 400, origin);
-  const id = crypto.randomUUID();
-  await env.DB.prepare(
-    'INSERT INTO user_ebp_configs (id, user_id, asset_id, timeframe, alert_mode, enabled, created_at) VALUES (?,?,?,?,?,1,?)'
-  ).bind(id, clerkUser.id, req._params.assetId, timeframe, alert_mode, Date.now()).run();
-  return json({ id }, 201, origin);
-});
-
 router.patch('/user/ebp-configs/:id', async (req, env) => {
-  const { user: clerkUser, origin, error } = req._ctx;
+  const { user: clerkUser, origin, error, params } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
   const body = await req.json();
   const sets = []; const vals = [];
+  if (body.timeframe !== undefined)  { sets.push('timeframe = ?');  vals.push(body.timeframe); }
   if (body.alert_mode !== undefined) { sets.push('alert_mode = ?'); vals.push(body.alert_mode); }
   if (body.enabled !== undefined)    { sets.push('enabled = ?');    vals.push(body.enabled ? 1 : 0); }
   if (!sets.length) return json({ ok: true }, 200, origin);
-  vals.push(clerkUser.id, req._params.id);
+  vals.push(clerkUser.id, params.id);
   await env.DB.prepare(`UPDATE user_ebp_configs SET ${sets.join(', ')} WHERE user_id = ? AND id = ?`).bind(...vals).run();
   return json({ ok: true }, 200, origin);
 });
 
 router.delete('/user/ebp-configs/:id', async (req, env) => {
-  const { user: clerkUser, origin, error } = req._ctx;
+  const { user: clerkUser, origin, error, params } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  await env.DB.prepare('DELETE FROM user_ebp_configs WHERE user_id = ? AND id = ?').bind(clerkUser.id, req._params.id).run();
+  await env.DB.prepare('DELETE FROM user_ebp_configs WHERE user_id = ? AND id = ?').bind(clerkUser.id, params.id).run();
   return json({ ok: true }, 200, origin);
 });
 
-// ── Sweep Configs ─────────────────────────────────────────────
-
-router.get('/user/sweep-configs/:assetId', async (req, env) => {
-  const { user: clerkUser, origin, error } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const { results } = await env.DB.prepare(
-    'SELECT * FROM user_sweep_configs WHERE user_id = ? AND asset_id = ? ORDER BY created_at ASC'
-  ).bind(clerkUser.id, req._params.assetId).all();
-  return json(results ?? [], 200, origin);
-});
-
-router.post('/user/sweep-configs/:assetId', async (req, env) => {
-  const { user: clerkUser, origin, error } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const { timeframe, alert_mode = 'aligned' } = await req.json();
-  if (!timeframe) return json({ error: 'timeframe required' }, 400, origin);
-  const id = crypto.randomUUID();
-  await env.DB.prepare(
-    'INSERT INTO user_sweep_configs (id, user_id, asset_id, timeframe, alert_mode, enabled, created_at) VALUES (?,?,?,?,?,1,?)'
-  ).bind(id, clerkUser.id, req._params.assetId, timeframe, alert_mode, Date.now()).run();
-  return json({ id }, 201, origin);
-});
-
 router.patch('/user/sweep-configs/:id', async (req, env) => {
-  const { user: clerkUser, origin, error } = req._ctx;
+  const { user: clerkUser, origin, error, params } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
   const body = await req.json();
   const sets = []; const vals = [];
+  if (body.timeframe !== undefined)  { sets.push('timeframe = ?');  vals.push(body.timeframe); }
   if (body.alert_mode !== undefined) { sets.push('alert_mode = ?'); vals.push(body.alert_mode); }
   if (body.enabled !== undefined)    { sets.push('enabled = ?');    vals.push(body.enabled ? 1 : 0); }
   if (!sets.length) return json({ ok: true }, 200, origin);
-  vals.push(clerkUser.id, req._params.id);
+  vals.push(clerkUser.id, params.id);
   await env.DB.prepare(`UPDATE user_sweep_configs SET ${sets.join(', ')} WHERE user_id = ? AND id = ?`).bind(...vals).run();
   return json({ ok: true }, 200, origin);
 });
 
 router.delete('/user/sweep-configs/:id', async (req, env) => {
-  const { user: clerkUser, origin, error } = req._ctx;
+  const { user: clerkUser, origin, error, params } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  await env.DB.prepare('DELETE FROM user_sweep_configs WHERE user_id = ? AND id = ?').bind(clerkUser.id, req._params.id).run();
+  await env.DB.prepare('DELETE FROM user_sweep_configs WHERE user_id = ? AND id = ?').bind(clerkUser.id, params.id).run();
   return json({ ok: true }, 200, origin);
 });
 
@@ -1338,7 +1235,11 @@ router.get('/health/datasources', async (req, env) => {
      MAX(CASE WHEN called_at > ? THEN success ELSE 0 END) as lastSuccess
      FROM api_call_log GROUP BY source`
   ).bind(dayStart, dayStart).all();
-  const sources = {};
+  const sources = {
+    finnhub:    { lastCall: null, callsToday: 0, lastSuccess: false },
+    yahoo:      { lastCall: null, callsToday: 0, lastSuccess: false },
+    twelvedata: { lastCall: null, callsToday: 0, lastSuccess: false },
+  };
   for (const r of (results ?? [])) {
     sources[r.source] = { lastCall: r.lastCall, callsToday: r.callsToday, lastSuccess: r.lastSuccess === 1 };
   }
@@ -1374,7 +1275,8 @@ router.get('/alerts/export', async (req, env) => {
   const { user: clerkUser, origin, error } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
   const url    = new URL(req.url);
-  const from   = parseInt(url.searchParams.get('from') ?? '0');
+  const days   = url.searchParams.get('days');
+  const from   = days ? Date.now() - parseInt(days) * 24 * 60 * 60 * 1000 : parseInt(url.searchParams.get('from') ?? '0');
   const to     = parseInt(url.searchParams.get('to') ?? String(Date.now()));
   const assetId = url.searchParams.get('assetId');
   let query    = 'SELECT * FROM alert_history WHERE user_id = ? AND fired_at >= ? AND fired_at <= ?';

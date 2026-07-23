@@ -1,50 +1,95 @@
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useAuth } from '@clerk/clerk-react';
 import {
   Box, Container, Typography, Card, CardContent,
-  Stack, Chip, Skeleton, Button, Divider
+  Stack, Skeleton, Button, Divider, TextField,
+  CircularProgress, InputAdornment,
 } from '@mui/material';
-import { AddOutlined } from '@mui/icons-material';
 import BoltOutlinedIcon from '@mui/icons-material/BoltOutlined';
 import { useAssets } from '../hooks/useAssets';
 import { useUser } from '../hooks/useUser';
 import ApiErrorAlert from '../components/ApiErrorAlert';
 import AssetCard from '../components/AssetCard';
+import api from '../lib/api';
 
 export default function Dashboard() {
   const navigate = useNavigate();
+  const { getToken } = useAuth();
   const { user }                                             = useUser();
-  const { assets, loading, error, removeAsset, lastUpdated } = useAssets();
+  const { assets, loading, error, addAsset, removeAsset }    = useAssets();
 
-  const daysLeft = user
-    ? Math.max(0, Math.ceil((user.expires_at - Date.now()) / 86400000))
-    : null;
+  const [query, setQuery]                 = useState('');
+  const [validationState, setValidationState] = useState(null); // null | 'validating' | 'invalid' | 'duplicate'
+  const [addError, setAddError]           = useState(null);
+
+  async function handleAddAsset() {
+    const symbol = query.trim().toUpperCase();
+    if (!symbol) return;
+    setAddError(null);
+
+    if (assets.some(a => a.symbol === symbol)) {
+      setValidationState('duplicate');
+      return;
+    }
+
+    setValidationState('validating');
+    try {
+      const token = await getToken();
+      const data  = await api.get(`/user/assets/validate?symbol=${encodeURIComponent(symbol)}`, token);
+      if (!data.valid) {
+        setValidationState('invalid');
+        return;
+      }
+      await addAsset(symbol, symbol, data.asset_type ?? 'forex');
+      setValidationState(null);
+      setQuery('');
+    } catch (e) {
+      setValidationState(null);
+      setAddError(e.message);
+    }
+  }
 
   return (
     <Container maxWidth="xl" sx={{ py: 3 }}>
-      <Stack direction="row" justifyContent="space-between"
-        alignItems="center" sx={{ mb: 2 }}>
-        <Typography variant="h5" fontWeight={700}>Dashboard</Typography>
-        {user && (
-          <Stack direction="row" spacing={1} alignItems="center">
-            <Chip
-              label={user.plan?.toUpperCase() ?? 'FREE'}
-              size="small"
-              sx={{
-                fontWeight: 700, borderRadius: '4px',
-                bgcolor: 'background.default',
-                color: { free:'text.secondary', coffee:'warning.main',
-                  beer:'warning.main', wine:'secondary.main' }[user.plan] ?? 'text.secondary',
-              }}
-            />
-            {daysLeft !== null && (
-              <Typography variant="caption"
-                color={daysLeft <= 7 ? 'error' : 'text.secondary'}>
-                {daysLeft}d left
-              </Typography>
-            )}
-          </Stack>
+      <Box sx={{ maxWidth: 680, mx: 'auto', mb: 3 }}>
+        <TextField
+          placeholder="Search and add asset (e.g. EUR/USD, NIFTY, BTC/USD)"
+          fullWidth
+          value={query}
+          onChange={e => { setQuery(e.target.value); setValidationState(null); }}
+          onKeyDown={e => e.key === 'Enter' && handleAddAsset()}
+          disabled={validationState === 'validating'}
+          InputProps={{
+            endAdornment: (
+              <InputAdornment position="end">
+                {validationState === 'validating' ? (
+                  <CircularProgress size={18} />
+                ) : (
+                  <Button size="small" onClick={handleAddAsset} disabled={!query.trim()}>
+                    Add
+                  </Button>
+                )}
+              </InputAdornment>
+            ),
+          }}
+        />
+        {validationState === 'invalid' && (
+          <Typography variant="caption" color="error" sx={{ mt: 0.5, display: 'block' }}>
+            Symbol not found — please check and try again
+          </Typography>
         )}
-      </Stack>
+        {validationState === 'duplicate' && (
+          <Typography variant="caption" color="warning.main" sx={{ mt: 0.5, display: 'block' }}>
+            Already in your watchlist
+          </Typography>
+        )}
+        {addError && (
+          <Typography variant="caption" color="error" sx={{ mt: 0.5, display: 'block' }}>
+            {addError}
+          </Typography>
+        )}
+      </Box>
 
       {user?.active === 0 && (
         <Box sx={{
@@ -98,13 +143,9 @@ export default function Dashboard() {
             <Typography variant="h6" color="text.secondary" gutterBottom>
               No assets tracked yet
             </Typography>
-            <Typography variant="body2" color="text.disabled" sx={{ mb: 3 }}>
-              Add your first asset to start receiving EBP alerts
+            <Typography variant="body2" color="text.disabled">
+              Search for a symbol above to start receiving alerts
             </Typography>
-            <Button variant="contained" startIcon={<AddOutlined />}
-              onClick={() => navigate('/assets')}>
-              Add Asset
-            </Button>
           </CardContent>
         </Card>
         </Box>
@@ -114,6 +155,7 @@ export default function Dashboard() {
             <AssetCard
               key={asset.id}
               asset={asset}
+              tier={user?.plan ?? 'free'}
               onRemove={removeAsset}
             />
           ))}

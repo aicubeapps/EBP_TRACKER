@@ -12,10 +12,8 @@ import Divider from '@mui/material/Divider'
 import Typography from '@mui/material/Typography'
 import Tooltip from '@mui/material/Tooltip'
 import DashboardOutlinedIcon from '@mui/icons-material/DashboardOutlined'
-import ShowChartOutlinedIcon from '@mui/icons-material/ShowChartOutlined'
 import NotificationsOutlinedIcon from '@mui/icons-material/NotificationsOutlined'
 import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined'
-import BoltOutlinedIcon from '@mui/icons-material/BoltOutlined'
 import AdminPanelSettingsOutlinedIcon from '@mui/icons-material/AdminPanelSettingsOutlined'
 import ChevronLeftOutlinedIcon from '@mui/icons-material/ChevronLeftOutlined'
 import ChevronRightOutlinedIcon from '@mui/icons-material/ChevronRightOutlined'
@@ -32,10 +30,8 @@ export default function SidebarContent({ mobile = false, onClose }) {
 
   const NAV_ITEMS = [
     { to: '/dashboard', label: 'Dashboard', Icon: DashboardOutlinedIcon },
-    { to: '/assets',    label: 'Assets',    Icon: ShowChartOutlinedIcon },
     { to: '/alerts',    label: 'Alerts',    Icon: NotificationsOutlinedIcon },
     { to: '/settings',  label: 'Settings',  Icon: SettingsOutlinedIcon },
-    { to: '/upgrade',   label: 'Upgrade',   Icon: BoltOutlinedIcon, highlight: true },
     ...(user?.is_admin === 1 ? [{ to: '/admin', label: 'Admin', Icon: AdminPanelSettingsOutlinedIcon }] : []),
   ]
 

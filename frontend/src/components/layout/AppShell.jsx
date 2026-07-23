@@ -11,7 +11,6 @@ import ExpiryBanner from '../ExpiryBanner.jsx'
 
 const PAGE_TITLES = {
   '/dashboard': 'Dashboard',
-  '/assets':    'Assets',
   '/alerts':    'Alert History',
   '/settings':  'Settings',
   '/upgrade':   'Upgrade Plan',

@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '@clerk/clerk-react';
+import { useNavigate } from 'react-router-dom';
 import {
   Container, Typography, Stack, Paper, Button, Alert,
-  Divider, CircularProgress, Box, Chip, Switch, LinearProgress
+  Divider, CircularProgress, Box, Chip, Switch, LinearProgress,
+  RadioGroup, FormControlLabel, Radio,
 } from '@mui/material';
 import { useUser } from '../hooks/useUser';
 import { useThemeMode } from '../context/ThemeContext';
@@ -16,82 +18,48 @@ import {
 import api from '../lib/api';
 import { useTheme } from '@mui/material/styles';
 
-function fmtNY(ts) {
+const TIER_EMOJI = { free: '', chai: '🍵', coffee: '☕', beer: '🍺', wine: '🍷', whiskey: '🥃' };
+const TIERS = ['coffee', 'beer', 'wine'];
+
+function daysRemaining(expiresAt) {
+  if (!expiresAt) return 0;
+  return Math.max(0, Math.ceil((expiresAt - Date.now()) / (24 * 60 * 60 * 1000)));
+}
+
+function fmtDate(ts) {
   if (!ts) return '—';
+  return new Date(ts).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+function fmtTime(ts) {
+  if (!ts) return 'Never';
   return new Date(ts).toLocaleString('en-US', {
-    timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit',
+    timeZone: 'America/New_York',
+    month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: true,
   }) + ' NY';
 }
 
-function SourceRow({ name, data, intervalMins }) {
-  const theme = useTheme();
-  const now = Date.now();
-  const age = data?.lastCall ? now - data.lastCall : Infinity;
-  const intervalMs = intervalMins * 60 * 1000;
-  const statusColor = age < intervalMs * 2  ? theme.palette.success.main
-    : age < intervalMs * 4 ? theme.palette.warning.main
-    : theme.palette.error.main;
-  const statusLabel = age < intervalMs * 2 ? 'Live' : age < intervalMs * 4 ? 'Slow' : 'Stale';
-
-  return (
-    <Stack direction="row" alignItems="center" spacing={1.5} sx={{ py: 0.75 }}>
-      <Box sx={{
-        width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-        bgcolor: data ? statusColor : theme.palette.text.disabled,
-      }} />
-      <Typography variant="body2" sx={{ minWidth: 100, fontWeight: 500 }}>{name}</Typography>
-      <Typography variant="caption" sx={{ color: statusColor, minWidth: 40 }}>
-        {data ? statusLabel : 'No data'}
-      </Typography>
-      <Typography variant="caption" color="text.disabled">
-        Last: {fmtNY(data?.lastCall)}
-      </Typography>
-      <Box sx={{ flexGrow: 1 }} />
-      <Typography variant="caption" color="text.disabled">
-        {data?.callsToday ?? 0} calls today
-      </Typography>
-    </Stack>
-  );
+function statusDot(lastCall) {
+  if (!lastCall) return '🔴';
+  const age = Date.now() - lastCall;
+  if (age < 30 * 60 * 1000) return '🟢';
+  if (age < 60 * 60 * 1000) return '🟡';
+  return '🔴';
 }
 
 export default function Settings() {
   const { getToken }          = useAuth();
   const { user }              = useUser();
+  const navigate               = useNavigate();
   const { mode, toggleTheme } = useThemeMode();
   const theme                 = useTheme();
 
+  const [selectedTier, setSelectedTier] = useState('');
+
   // Data sources state
-  const [dsData,       setDsData]       = useState(null);
-  const [dsLoading,    setDsLoading]    = useState(true);
-  const dsIntervalRef = useRef(null);
-
-  const fetchDatasources = async () => {
-    try {
-      const token = await getToken();
-      const data  = await api.get('/health/datasources', token);
-      setDsData(data);
-    } catch {} finally {
-      setDsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchDatasources();
-    dsIntervalRef.current = setInterval(fetchDatasources, 5 * 60 * 1000);
-    return () => clearInterval(dsIntervalRef.current);
-  }, []);
-
-  // Telegram state
-  const [tgStatus, setTgStatus]     = useState(null);
-  const [linkCode, setLinkCode]     = useState('');
-  const [polling, setPolling]       = useState(false);
-  const [testing, setTesting]       = useState(false);
-  const [generating, setGenerating] = useState(false);
-  const [msg, setMsg]               = useState({ text: '', severity: 'info' });
-
-  // Data sources health state
-  const [dsHealth, setDsHealth]       = useState(null);
-  const [dsLoading, setDsLoading]     = useState(true);
+  const [dsHealth,  setDsHealth]  = useState(null);
+  const [dsLoading, setDsLoading] = useState(true);
 
   const fetchDsHealth = async () => {
     try {
@@ -108,27 +76,18 @@ export default function Settings() {
     return () => clearInterval(iv);
   }, []);
 
-  function statusDot(lastCall) {
-    if (!lastCall) return '🔴';
-    const age = Date.now() - lastCall;
-    if (age < 30 * 60 * 1000) return '🟢';
-    if (age < 60 * 60 * 1000) return '🟡';
-    return '🔴';
-  }
-
-  function fmtTime(ts) {
-    if (!ts) return 'Never';
-    return new Date(ts).toLocaleString('en-US', {
-      timeZone: 'America/New_York',
-      month: 'short', day: 'numeric',
-      hour: '2-digit', minute: '2-digit', hour12: true,
-    }) + ' NY';
-  }
+  // Telegram state
+  const [tgStatus, setTgStatus]     = useState(null);
+  const [linkCode, setLinkCode]     = useState('');
+  const [polling, setPolling]       = useState(false);
+  const [testing, setTesting]       = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [msg, setMsg]               = useState({ text: '', severity: 'info' });
 
   const fetchTgStatus = async () => {
     try {
       const token = await getToken();
-      const data  = await api.get('/telegram/', token);
+      const data  = await api.get('/user/telegram', token);
       setTgStatus(data);
       return data;
     } catch {}
@@ -175,7 +134,7 @@ export default function Settings() {
     setMsg({ text: '', severity: 'info' });
     try {
       const token = await getToken();
-      await api.post('/telegram/test', {}, token);
+      await api.post('/user/telegram/test', {}, token);
       setMsg({ text: 'Test message sent! Check your Telegram.', severity: 'success' });
     } catch (e) {
       setMsg({ text: e.message, severity: 'error' });
@@ -188,7 +147,7 @@ export default function Settings() {
     if (!window.confirm('Disconnect Telegram? You will stop receiving alerts.')) return;
     try {
       const token = await getToken();
-      await api.delete('/telegram/', token);
+      await api.delete('/user/telegram', token);
       setTgStatus({ connected: false });
       setMsg({ text: 'Telegram disconnected.', severity: 'info' });
     } catch (e) {
@@ -199,6 +158,52 @@ export default function Settings() {
   return (
     <Container maxWidth="md" sx={{ py: 3 }}>
       <Typography variant="h5" fontWeight={700} sx={{ mb: 3 }}>Settings</Typography>
+
+      {/* Account */}
+      <Paper sx={{ p: 3, mb: 3 }}>
+        <Typography variant="subtitle1" fontWeight={600} gutterBottom>Account</Typography>
+        <Divider sx={{ mb: 2 }} />
+        <Stack spacing={1} sx={{ mb: 2 }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center">
+            <Typography variant="body2" color="text.secondary">Joined On</Typography>
+            <Typography variant="body2">{fmtDate(user?.created_at)}</Typography>
+          </Stack>
+          <Stack direction="row" justifyContent="space-between" alignItems="center">
+            <Typography variant="body2" color="text.secondary">Current Plan</Typography>
+            <Chip
+              label={`${TIER_EMOJI[user?.plan] ?? ''} ${user?.plan?.toUpperCase() ?? 'FREE'}`}
+              size="small"
+              sx={{ borderRadius: '4px', fontWeight: 700, fontSize: '0.7rem' }}
+            />
+          </Stack>
+          <Stack direction="row" justifyContent="space-between" alignItems="center">
+            <Typography variant="body2" color="text.secondary">Days Remaining</Typography>
+            <Typography variant="body2">{daysRemaining(user?.expires_at)} days</Typography>
+          </Stack>
+          <Stack direction="row" justifyContent="space-between" alignItems="center">
+            <Typography variant="body2" color="text.secondary">Asset slots</Typography>
+            <Typography variant="body2">{user?.asset_limit ?? 3}</Typography>
+          </Stack>
+        </Stack>
+
+        <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>Upgrade</Typography>
+        <RadioGroup row value={selectedTier} onChange={e => setSelectedTier(e.target.value)}>
+          {TIERS.map(t => (
+            <FormControlLabel
+              key={t}
+              value={t}
+              control={<Radio size="small" />}
+              label={`${TIER_EMOJI[t]} ${t.charAt(0).toUpperCase() + t.slice(1)}`}
+              disabled={t === user?.plan}
+            />
+          ))}
+        </RadioGroup>
+        {selectedTier && selectedTier !== user?.plan && (
+          <Button variant="contained" size="small" sx={{ mt: 1 }} onClick={() => navigate('/upgrade')}>
+            Upgrade to {selectedTier.charAt(0).toUpperCase() + selectedTier.slice(1)}
+          </Button>
+        )}
+      </Paper>
 
       {/* Data Sources */}
       <Paper sx={{ p: 3, mb: 3 }}>
@@ -228,7 +233,7 @@ export default function Settings() {
                 </Typography>
                 {name === 'twelvedata' && (
                   <Typography variant="caption" color="text.disabled">
-                    {dsHealth.twelvedataToday}/800 today
+                    {dsHealth.twelvedataToday}/{dsHealth.twelvedataLimit ?? 800} today
                   </Typography>
                 )}
               </Stack>
@@ -237,12 +242,12 @@ export default function Settings() {
               <Box sx={{ pt: 0.5 }}>
                 <LinearProgress
                   variant="determinate"
-                  value={Math.min(((dsHealth.twelvedataToday ?? 0) / 800) * 100, 100)}
+                  value={Math.min(((dsHealth.twelvedataToday ?? 0) / (dsHealth.twelvedataLimit ?? 800)) * 100, 100)}
                   color={dsHealth.twelvedataToday > 700 ? 'error' : dsHealth.twelvedataToday > 500 ? 'warning' : 'success'}
                   sx={{ height: 5, borderRadius: 3 }}
                 />
                 <Typography variant="caption" color="text.secondary">
-                  Twelve Data daily limit: {dsHealth.twelvedataToday}/800
+                  Twelve Data daily limit: {dsHealth.twelvedataToday}/{dsHealth.twelvedataLimit ?? 800}
                 </Typography>
               </Box>
             )}
@@ -275,7 +280,7 @@ export default function Settings() {
         </Stack>
       </Paper>
 
-      {/* Telegram Section */}
+      {/* Telegram */}
       <Paper sx={{ p: 3, mb: 3 }}>
         <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
           <Typography variant="subtitle1" fontWeight={600}>Telegram Alerts</Typography>
@@ -370,42 +375,6 @@ export default function Settings() {
             {msg.text}
           </Alert>
         )}
-      </Paper>
-
-      {/* Account Info */}
-      <Paper sx={{ p: 3, mb: 3 }}>
-        <Typography variant="subtitle1" fontWeight={600} gutterBottom>Account</Typography>
-        <Divider sx={{ mb: 2 }} />
-        <Stack spacing={1}>
-          <Stack direction="row" justifyContent="space-between" alignItems="center">
-            <Typography variant="body2" color="text.secondary">Plan</Typography>
-            <Chip
-              label={user?.plan?.toUpperCase() ?? 'FREE'}
-              size="small"
-              sx={{
-                borderRadius: '4px', fontWeight: 700, fontSize: '0.7rem',
-                bgcolor: { free: `${theme.palette.text.disabled}20`, coffee: `${theme.palette.warning.main}20`,
-                  beer: `${theme.palette.warning.main}20`, wine: `${theme.palette.secondary.main}20` }[user?.plan] ?? 'background.default',
-                color: { free: theme.palette.text.disabled, coffee: theme.palette.warning.main,
-                  beer: theme.palette.warning.main, wine: theme.palette.secondary.main }[user?.plan] ?? theme.palette.text.disabled,
-              }}
-            />
-          </Stack>
-          <Stack direction="row" justifyContent="space-between" alignItems="center">
-            <Typography variant="body2" color="text.secondary">Asset slots</Typography>
-            <Typography variant="body2">{user?.asset_limit ?? 3}</Typography>
-          </Stack>
-          <Stack direction="row" justifyContent="space-between" alignItems="center">
-            <Typography variant="body2" color="text.secondary">Expires</Typography>
-            <Typography variant="body2">
-              {user?.expires_at
-                ? new Date(user.expires_at).toLocaleDateString('en-IN', {
-                    day: 'numeric', month: 'short', year: 'numeric'
-                  })
-                : '—'}
-            </Typography>
-          </Stack>
-        </Stack>
       </Paper>
 
     </Container>

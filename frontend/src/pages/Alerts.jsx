@@ -5,7 +5,6 @@ import {
   Container, Typography, Stack, Chip, Alert,
   LinearProgress, Box, ToggleButtonGroup, ToggleButton,
   Select, MenuItem, FormControl, InputLabel, Button,
-  TextField,
 } from '@mui/material';
 import { DownloadOutlined } from '@mui/icons-material';
 import { DataGrid } from '@mui/x-data-grid';
@@ -22,6 +21,17 @@ function fmtNY(ts) {
   }) + ' NY';
 }
 
+function capitalise(str) {
+  if (!str) return '—';
+  return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
+function formatBiasAlignment(row) {
+  if (!row.trend_bias) return '—';
+  const aligned = row.direction === row.trend_bias;
+  return `${capitalise(row.trend_bias)}, ${aligned ? 'Aligned' : 'Not Aligned'}`;
+}
+
 function NoRows() {
   return (
     <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
@@ -36,7 +46,7 @@ function useColumns() {
   const theme = useTheme();
   return [
     {
-      field: 'fired_at', headerName: 'Time', width: 160,
+      field: 'fired_at', headerName: 'Time Stamp', width: 170,
       renderCell: p => (
         <Typography variant="caption" sx={{ fontFamily: 'monospace' }}>
           {fmtNY(p.value)}
@@ -44,7 +54,7 @@ function useColumns() {
       ),
     },
     {
-      field: 'symbol', headerName: 'Asset', width: 120,
+      field: 'symbol', headerName: 'Asset', width: 110,
       renderCell: p => (
         <Typography variant="body2" sx={{ fontWeight: 600, fontFamily: 'monospace' }}>
           {p.value}
@@ -52,13 +62,16 @@ function useColumns() {
       ),
     },
     {
-      field: 'alert_type', headerName: 'Type', width: 100,
+      field: 'alert_type', headerName: 'Alert Type', width: 110,
       renderCell: p => {
         const colors = {
           ebp:      theme.palette.primary.main,
           sweep:    theme.palette.secondary.main,
-          combined: theme.palette.warning.main,
-          mss:      theme.palette.success.main,
+          mss:      theme.palette.text.secondary,
+          t1:       theme.palette.warning.main,
+          t2:       theme.palette.warning.main,
+          t3:       theme.palette.success.main,
+          t4:       theme.palette.warning.main,
         };
         const c = colors[p.value] ?? theme.palette.text.disabled;
         return (
@@ -71,10 +84,10 @@ function useColumns() {
       },
     },
     {
-      field: 'direction', headerName: 'Direction', width: 110,
+      field: 'direction', headerName: 'Direction', width: 120,
       renderCell: p => (
         <Chip
-          label={p.value === 'bullish' ? '🟢 BULLISH' : '🔴 BEARISH'}
+          label={p.value === 'bullish' ? '🟢 Bullish' : '🔴 Bearish'}
           size="small"
           sx={{
             bgcolor: p.value === 'bullish' ? `${theme.palette.success.main}20` : `${theme.palette.error.main}20`,
@@ -87,40 +100,18 @@ function useColumns() {
     },
     { field: 'timeframe', headerName: 'TF', width: 70 },
     {
-      field: 'trend_bias', headerName: 'Bias', width: 100,
-      renderCell: p => (
-        <Typography variant="caption" sx={{
-          color: p.value === 'bullish' ? theme.palette.success.main
-            : p.value === 'bearish' ? theme.palette.error.main : theme.palette.text.disabled,
-        }}>
-          {p.value}
-        </Typography>
-      ),
-    },
-    {
-      field: 'candle_time', headerName: 'Candle', width: 150,
-      renderCell: p => (
-        <Typography variant="caption" sx={{ fontFamily: 'monospace' }}>
-          {p.value ? fmtNY(p.value) : '—'}
-        </Typography>
-      ),
-    },
-    {
-      field: 'details', headerName: 'Detail', width: 180, flex: 1,
+      field: 'bias_alignment', headerName: 'Bias & Alignment', width: 200, flex: 1,
+      valueGetter: (_, row) => formatBiasAlignment(row),
       renderCell: p => {
-        if (!p.value) return null;
-        try {
-          const d = JSON.parse(p.value);
-          const parts = [];
-          if (d.swept_level)  parts.push(`Swept: ${Number(d.swept_level).toFixed(5)}`);
-          if (d.mss_level)    parts.push(`MSS: ${Number(d.mss_level).toFixed(5)}`);
-          if (d.chain_step)   parts.push(`Step ${d.chain_step}`);
-          return (
-            <Typography variant="caption" color="text.secondary">
-              {parts.join(' · ') || ''}
-            </Typography>
-          );
-        } catch { return null; }
+        const aligned = p.row.direction === p.row.trend_bias;
+        return (
+          <Typography variant="body2" sx={{
+            color: !p.row.trend_bias ? theme.palette.text.disabled
+              : aligned ? theme.palette.success.main : theme.palette.warning.main,
+          }}>
+            {p.value}
+          </Typography>
+        );
       },
     },
   ];
@@ -142,12 +133,8 @@ export default function Alerts() {
   const [direction, setDirection] = useState('all');
   const [days,      setDays]      = useState(2);
 
-  // export date range
-  const [exportFrom, setExportFrom] = useState(() => {
-    const d = new Date(); d.setDate(d.getDate() - 30);
-    return d.toISOString().slice(0, 10);
-  });
-  const [exportTo, setExportTo] = useState(() => new Date().toISOString().slice(0, 10));
+  // download range
+  const [downloadRange, setDownloadRange] = useState('7');
 
   useEffect(() => {
     setLoading(true);
@@ -173,33 +160,20 @@ export default function Alerts() {
     setExporting(true);
     try {
       const token = await getToken();
-      const from  = new Date(exportFrom).getTime();
-      const to    = new Date(exportTo).getTime() + 86400000;
-      const params = new URLSearchParams({ from: String(from), to: String(to) });
-      if (assetId !== 'all') params.set('assetId', assetId);
-      const data = await api.get(`/alerts/export?${params}`, token);
-      const rows = (Array.isArray(data) ? data : []).map(r => ({
-        Time:      fmtNY(r.fired_at),
-        Asset:     r.symbol,
-        Type:      r.alert_type?.toUpperCase(),
-        Direction: r.direction,
-        Timeframe: r.timeframe,
-        Bias:      r.trend_bias,
-        Candle:    fmtNY(r.candle_time),
-        Detail:    r.details ? (() => {
-          try {
-            const d = JSON.parse(r.details);
-            const parts = [];
-            if (d.swept_level) parts.push(`Swept: ${d.swept_level}`);
-            if (d.mss_level)   parts.push(`MSS: ${d.mss_level}`);
-            return parts.join(', ');
-          } catch { return ''; }
-        })() : '',
+      const url   = downloadRange === 'all' ? '/alerts/export' : `/alerts/export?days=${downloadRange}`;
+      const data  = await api.get(url, token);
+      const rows  = (Array.isArray(data) ? data : []).map(r => ({
+        'Time (NY)':         fmtNY(r.fired_at),
+        'Asset':              r.symbol,
+        'Alert Type':         r.alert_type?.toUpperCase(),
+        'Direction':          capitalise(r.direction),
+        'Timeframe':          r.timeframe,
+        'Bias & Alignment':   formatBiasAlignment(r),
       }));
       const ws = XLSX.utils.json_to_sheet(rows);
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'Alerts');
-      XLSX.writeFile(wb, `ebp-alerts-${Date.now()}.xlsx`);
+      XLSX.writeFile(wb, `forex-alerts-${Date.now()}.xlsx`);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -210,30 +184,24 @@ export default function Alerts() {
   return (
     <Container maxWidth="xl" sx={{ py: 3 }}>
       {/* Header */}
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
+      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }} flexWrap="wrap" gap={1.5}>
         <Typography variant="h5" fontWeight={700}>Alert History</Typography>
         <Stack direction="row" alignItems="center" spacing={1}>
-          <TextField
-            type="date" size="small" value={exportFrom}
-            onChange={e => setExportFrom(e.target.value)}
-            sx={{ width: 140 }}
-            InputLabelProps={{ shrink: true }}
-            label="From"
-          />
-          <TextField
-            type="date" size="small" value={exportTo}
-            onChange={e => setExportTo(e.target.value)}
-            sx={{ width: 140 }}
-            InputLabelProps={{ shrink: true }}
-            label="To"
-          />
+          <FormControl size="small" sx={{ minWidth: 160 }}>
+            <InputLabel>Download range</InputLabel>
+            <Select value={downloadRange} label="Download range" onChange={e => setDownloadRange(e.target.value)}>
+              <MenuItem value="7">Last week</MenuItem>
+              <MenuItem value="30">Last month</MenuItem>
+              <MenuItem value="all">All Alert History</MenuItem>
+            </Select>
+          </FormControl>
           <Button
             variant="outlined" size="small"
             startIcon={<DownloadOutlined />}
             onClick={handleExport}
             disabled={exporting}
           >
-            {exporting ? 'Exporting...' : 'Export Excel'}
+            {exporting ? 'Exporting...' : 'Download'}
           </Button>
         </Stack>
       </Stack>
@@ -252,14 +220,14 @@ export default function Alerts() {
           <ToggleButton value="all">All</ToggleButton>
           <ToggleButton value="ebp">EBP</ToggleButton>
           <ToggleButton value="sweep">Sweep</ToggleButton>
-          <ToggleButton value="combined">Combined</ToggleButton>
           <ToggleButton value="mss">MSS</ToggleButton>
+          <ToggleButton value="t3">T3</ToggleButton>
         </ToggleButtonGroup>
 
         {/* Asset filter */}
         <FormControl size="small" sx={{ minWidth: 140 }}>
-          <InputLabel>Asset</InputLabel>
-          <Select value={assetId} label="Asset" onChange={e => setAssetId(e.target.value)}>
+          <InputLabel>Assets</InputLabel>
+          <Select value={assetId} label="Assets" onChange={e => setAssetId(e.target.value)}>
             <MenuItem value="all">All assets</MenuItem>
             {(assets ?? []).map(a => (
               <MenuItem key={a.id} value={a.id}>{a.symbol}</MenuItem>
