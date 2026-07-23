@@ -390,6 +390,26 @@ async function fetchCandles(symbol, tf, twelveApiKey, finnhubApiKey, count = 10,
   return null;
 }
 
+function getAssetType(instrumentType, symbol) {
+  if (!instrumentType) return guessAssetType(symbol); // fallback when Yahoo lookup failed
+
+  const it = instrumentType.toUpperCase();
+
+  if (it === 'CURRENCY')       return 'forex';
+  if (it === 'CRYPTOCURRENCY') return 'crypto';
+  if (it === 'INDEX')          return 'index';
+  if (it === 'EQUITY') {
+    if (symbol.endsWith('.NS') || symbol.startsWith('NSE:')) return 'nse';
+    return 'equity';
+  }
+  if (it === 'FUTURE')         return 'commodity';
+  if (it === 'ETF')            return 'etf';
+
+  return guessAssetType(symbol); // fallback for unknown types
+}
+
+// String-only heuristic — used when Yahoo doesn't return an instrumentType
+// (lookup failed / symbol not found there). Kept deliberately conservative.
 function guessAssetType(symbol) {
   if (symbol.includes('/')) {
     const base = symbol.split('/')[0];
@@ -397,8 +417,7 @@ function guessAssetType(symbol) {
     if (['XAU', 'XAG', 'WTI', 'BRENT'].includes(base)) return 'commodity';
     return 'forex';
   }
-  if (symbol.endsWith('.NS') || symbol.endsWith('.BSE')) return 'nse_asset';
-  if (symbol.endsWith('USDT') || symbol.endsWith('USD')) return 'crypto';
+  if (symbol.endsWith('.NS') || symbol.endsWith('.BSE')) return 'nse';
   if (['NIFTY', 'SENSEX', 'SPX', 'DJI', 'NDX'].includes(symbol)) return 'index';
   return 'forex';
 }
@@ -411,11 +430,11 @@ async function validateSymbol(symbol, apiKey) {
     const res  = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     const data = await res.json();
     const result = data?.chart?.result?.[0];
-    if (result?.meta?.symbol) return { valid: true, source: 'yahoo' };
+    if (result?.meta?.symbol) return { valid: true, source: 'yahoo', instrumentType: result.meta.instrumentType ?? null };
   } catch (e) {
     console.warn('Yahoo validation failed:', e.message);
   }
-  return { valid: true, source: 'fallback' };
+  return { valid: true, source: 'fallback', instrumentType: null };
 }
 
 // ============================================================
@@ -1059,7 +1078,7 @@ router.get('/user/assets/validate', async (req, env) => {
   if (!symbol) return json({ valid: false, error: 'Symbol is required' }, 400, origin);
 
   const validation = await validateSymbol(symbol, env.TWELVE_DATA_API_KEY);
-  const asset_type = guessAssetType(symbol);
+  const asset_type = getAssetType(validation.instrumentType, symbol);
   return json({ valid: validation.valid, asset_type }, 200, origin);
 });
 
