@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '@clerk/clerk-react'
 import Box from '@mui/material/Box'
@@ -27,8 +27,7 @@ import Chip from '@mui/material/Chip'
 import Skeleton from '@mui/material/Skeleton'
 import InputAdornment from '@mui/material/InputAdornment'
 import CircularProgress from '@mui/material/CircularProgress'
-import Slider from '@mui/material/Slider'
-import Switch from '@mui/material/Switch'
+import Divider from '@mui/material/Divider'
 import AddOutlined from '@mui/icons-material/AddOutlined'
 import SearchOutlinedIcon from '@mui/icons-material/SearchOutlined'
 import DeleteOutlineOutlinedIcon from '@mui/icons-material/DeleteOutlineOutlined'
@@ -37,64 +36,144 @@ import api from '../lib/api.js'
 import { useUser } from '../hooks/useUser.js'
 import { useTheme } from '@mui/material/styles'
 
-const ASSET_TYPES = ['Forex', 'Commodity', 'Index', 'NSE Asset', 'Crypto']
-
+const ASSET_TYPES   = ['Forex', 'Commodity', 'Index', 'NSE Asset', 'Crypto']
 const ASSET_LIMIT_MAP = { free: 3, coffee: 5, beer: 15, wine: 30 }
-
-const VALID_PAIRS = {
-  'W':   ['4H', '1H', 'M30'],
-  'D':   ['4H', '1H', 'M30'],
-  '4H':  ['1H', 'M30', 'M15', 'M5'],
-  '1H':  ['M30', 'M15', 'M5'],
-  'M15': ['M5'],
+const EBP_TFS       = ['M15', '1H', '4H', 'D', 'W']
+const SWEEP_TFS     = ['M5', 'M15', 'M30', '1H', '4H']
+const ALERT_MODES   = [
+  { value: 'aligned',      label: 'Aligned' },
+  { value: 'price_action', label: 'PA Only' },
+  { value: 'all',          label: 'All' },
+]
+const T3_PAIRS = {
+  '4H': ['1H', 'M30', 'M15'],
+  '1H': ['M30', 'M15', 'M5'],
+  'D':  ['4H', '1H'],
+  'W':  ['D', '4H'],
 }
 
-function CombinedPairBuilder({ asset, onSave }) {
+function ModeChip({ mode }) {
+  const label = { aligned: 'Aligned', price_action: 'PA', all: 'All' }[mode] ?? mode
+  return (
+    <Chip
+      label={label}
+      size="small"
+      sx={{ borderRadius: '3px', fontSize: '0.6rem', height: 16, '& .MuiChip-label': { px: 0.75 } }}
+    />
+  )
+}
+
+function AssetConfigPanel({ asset, userPlan }) {
+  const { getToken } = useAuth()
   const theme = useTheme()
-  const [open, setOpen]       = useState(false)
-  const [enabled, setEnabled] = useState(asset.combined_enabled === 1)
-  const [pairs, setPairs]     = useState(() => {
-    try { return JSON.parse(asset.combined_pairs ?? '[]') } catch { return [] }
-  })
-  const [window_, setWindow]  = useState(asset.combined_window_mins ?? 60)
-  const [htf, setHtf]         = useState('4H')
-  const [ltf, setLtf]         = useState('M15')
-  const [saving, setSaving]   = useState(false)
+  const [open, setOpen]         = useState(false)
+  const [loading, setLoading]   = useState(false)
+  const [ebpConfigs, setEbpConfigs]       = useState([])
+  const [sweepConfigs, setSweepConfigs]   = useState([])
+  const [templates, setTemplates]         = useState([])
+  const [addingEbp, setAddingEbp]         = useState(false)
+  const [newEbpTF, setNewEbpTF]           = useState('M15')
+  const [newEbpMode, setNewEbpMode]       = useState('aligned')
+  const [savingEbp, setSavingEbp]         = useState(false)
+  const [addingSweep, setAddingSweep]     = useState(false)
+  const [newSweepTF, setNewSweepTF]       = useState('M15')
+  const [newSweepMode, setNewSweepMode]   = useState('aligned')
+  const [savingSweep, setSavingSweep]     = useState(false)
+  const [addingT3, setAddingT3]           = useState(false)
+  const [newT3HTF, setNewT3HTF]           = useState('4H')
+  const [newT3LTF, setNewT3LTF]           = useState('M15')
+  const [newT3Win, setNewT3Win]           = useState(60)
+  const [savingT3, setSavingT3]           = useState(false)
 
-  const validLTFs = VALID_PAIRS[htf] ?? []
+  const canUseTemplates = ['beer', 'wine', 'whiskey'].includes(userPlan)
 
-  const addPair = () => {
-    if (pairs.find(p => p.htf === htf && p.ltf === ltf)) return
-    setPairs(prev => [...prev, { htf, ltf }])
-  }
-
-  const removePair = (idx) => {
-    setPairs(prev => prev.filter((_, i) => i !== idx))
-  }
-
-  const handleSave = async () => {
-    setSaving(true)
+  const load = async () => {
+    setLoading(true)
     try {
-      await onSave(asset.id, { enabled, pairs, windowMins: window_ })
-    } finally {
-      setSaving(false)
-    }
+      const token = await getToken()
+      const [ebp, sweep, tmpl] = await Promise.all([
+        api.get(`/user/ebp-configs/${asset.id}`, token),
+        api.get(`/user/sweep-configs/${asset.id}`, token),
+        api.get(`/user/templates/${asset.id}`, token),
+      ])
+      setEbpConfigs(Array.isArray(ebp) ? ebp : [])
+      setSweepConfigs(Array.isArray(sweep) ? sweep : [])
+      setTemplates(Array.isArray(tmpl) ? tmpl : [])
+    } catch {}
+    setLoading(false)
   }
+
+  useEffect(() => { if (open) load() }, [open])
+
+  const addEbpConfig = async () => {
+    setSavingEbp(true)
+    try {
+      const token   = await getToken()
+      const created = await api.post(`/user/ebp-configs/${asset.id}`, { timeframe: newEbpTF, alert_mode: newEbpMode }, token)
+      setEbpConfigs(prev => [...prev, created])
+      setAddingEbp(false)
+    } catch {} finally { setSavingEbp(false) }
+  }
+
+  const deleteEbpConfig = async (id) => {
+    const token = await getToken()
+    await api.delete(`/user/ebp-config/${id}`, token)
+    setEbpConfigs(prev => prev.filter(c => c.id !== id))
+  }
+
+  const addSweepConfig = async () => {
+    setSavingSweep(true)
+    try {
+      const token   = await getToken()
+      const created = await api.post(`/user/sweep-configs/${asset.id}`, { timeframe: newSweepTF, alert_mode: newSweepMode }, token)
+      setSweepConfigs(prev => [...prev, created])
+      setAddingSweep(false)
+    } catch {} finally { setSavingSweep(false) }
+  }
+
+  const deleteSweepConfig = async (id) => {
+    const token = await getToken()
+    await api.delete(`/user/sweep-config/${id}`, token)
+    setSweepConfigs(prev => prev.filter(c => c.id !== id))
+  }
+
+  const addT3Template = async () => {
+    setSavingT3(true)
+    try {
+      const token   = await getToken()
+      const created = await api.post(`/user/templates/${asset.id}`, {
+        template: 't3', htf: newT3HTF, ltf: newT3LTF, window_mins: newT3Win, enabled: 1,
+      }, token)
+      setTemplates(prev => [...prev, created])
+      setAddingT3(false)
+    } catch {} finally { setSavingT3(false) }
+  }
+
+  const toggleTemplate = async (tmpl) => {
+    const token = await getToken()
+    await api.patch(`/user/template/${tmpl.id}`, { enabled: tmpl.enabled === 1 ? 0 : 1 }, token)
+    setTemplates(prev => prev.map(t => t.id === tmpl.id ? { ...t, enabled: t.enabled === 1 ? 0 : 1 } : t))
+  }
+
+  const deleteTemplate = async (id) => {
+    const token = await getToken()
+    await api.delete(`/user/template/${id}`, token)
+    setTemplates(prev => prev.filter(t => t.id !== id))
+  }
+
+  const validT3LTFs = T3_PAIRS[newT3HTF] ?? ['M15']
 
   return (
-    <Box>
-      <Button
-        size="small" variant="text"
+    <Box sx={{ mt: 0.5 }}>
+      <Button size="small" variant="text"
         onClick={() => setOpen(o => !o)}
         sx={{
-          color: theme.palette.secondary.main, fontSize: '0.7rem',
-          p: 0, mt: 0.5, minWidth: 0,
-          justifyContent: 'flex-start',
+          color: theme.palette.primary.main, fontSize: '0.7rem',
+          p: 0, minWidth: 0, justifyContent: 'flex-start',
           '&:hover': { bgcolor: 'transparent', textDecoration: 'underline' },
         }}
-        startIcon={<span style={{ fontSize: '0.8rem' }}>⚡</span>}
       >
-        {open ? 'Hide' : 'Configure'} Combined Signals
+        {open ? 'Hide' : 'Configure'} Alerts
       </Button>
 
       {open && (
@@ -104,113 +183,195 @@ function CombinedPairBuilder({ asset, onSave }) {
           border: `1px solid ${theme.palette.divider}`,
           borderRadius: 1,
         }}>
-          <Stack spacing={1.5}>
-            <Stack direction="row" justifyContent="space-between" alignItems="center">
-              <Typography variant="body2">Combined Signal Alerts</Typography>
-              <Switch
-                size="small"
-                checked={enabled}
-                onChange={e => setEnabled(e.target.checked)}
-              />
-            </Stack>
+          {loading ? <CircularProgress size={16} /> : (
+            <Stack spacing={1.5}>
 
-            {enabled && (
-              <>
-                <Box>
-                  <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
-                    Add HTF EBP → LTF Sweep pair
-                  </Typography>
-                  <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-                    <Select
-                      size="small" value={htf}
-                      onChange={e => {
-                        setHtf(e.target.value)
-                        setLtf(VALID_PAIRS[e.target.value]?.[0] ?? 'M15')
-                      }}
-                      sx={{ minWidth: 80, fontSize: '0.8rem' }}
-                    >
-                      {['W', 'D', '4H', '1H', 'M15'].map(t => (
-                        <MenuItem key={t} value={t}>{t} EBP</MenuItem>
-                      ))}
+              {/* ── EBP Alerts ── */}
+              <Box>
+                <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 0.5 }}>
+                  <Typography variant="caption" fontWeight={700} color="primary">EBP Alerts</Typography>
+                  <Button size="small" onClick={() => setAddingEbp(a => !a)}
+                    sx={{ fontSize: '0.65rem', minWidth: 0, p: 0, lineHeight: 1 }}>
+                    {addingEbp ? 'Cancel' : '+ Add'}
+                  </Button>
+                </Stack>
+
+                {ebpConfigs.length === 0 && !addingEbp && (
+                  <Typography variant="caption" color="text.disabled">No EBP alerts configured.</Typography>
+                )}
+
+                <Stack spacing={0.5}>
+                  {ebpConfigs.map(c => (
+                    <Stack key={c.id} direction="row" alignItems="center" spacing={0.5}>
+                      <Chip label={c.timeframe} size="small"
+                        sx={{ borderRadius: '3px', fontSize: '0.65rem', height: 18, '& .MuiChip-label': { px: 0.75 } }} />
+                      <ModeChip mode={c.alert_mode} />
+                      <IconButton size="small" onClick={() => deleteEbpConfig(c.id)}
+                        sx={{ p: 0.25, color: 'text.disabled', '&:hover': { color: 'error.main' } }}>
+                        <DeleteOutlineOutlinedIcon sx={{ fontSize: 13 }} />
+                      </IconButton>
+                    </Stack>
+                  ))}
+                </Stack>
+
+                {addingEbp && (
+                  <Stack direction="row" spacing={0.75} alignItems="center" sx={{ mt: 0.75 }}>
+                    <Select size="small" value={newEbpTF} onChange={e => setNewEbpTF(e.target.value)}
+                      sx={{ minWidth: 68, fontSize: '0.75rem' }}>
+                      {EBP_TFS.map(tf => <MenuItem key={tf} value={tf}>{tf}</MenuItem>)}
                     </Select>
-                    <Typography variant="caption" color="text.secondary">→</Typography>
-                    <Select
-                      size="small" value={ltf}
-                      onChange={e => setLtf(e.target.value)}
-                      sx={{ minWidth: 80, fontSize: '0.8rem' }}
-                    >
-                      {validLTFs.map(t => (
-                        <MenuItem key={t} value={t}>{t} Sweep</MenuItem>
-                      ))}
+                    <Select size="small" value={newEbpMode} onChange={e => setNewEbpMode(e.target.value)}
+                      sx={{ minWidth: 86, fontSize: '0.75rem' }}>
+                      {ALERT_MODES.map(m => <MenuItem key={m.value} value={m.value}>{m.label}</MenuItem>)}
                     </Select>
-                    <Button
-                      size="small" variant="outlined"
-                      onClick={addPair}
-                      disabled={!validLTFs.length}
-                      sx={{ fontSize: '0.7rem' }}
-                    >
+                    <Button size="small" variant="contained" onClick={addEbpConfig}
+                      disabled={savingEbp}
+                      startIcon={savingEbp ? <CircularProgress size={12} color="inherit" /> : null}
+                      sx={{ fontSize: '0.7rem', py: 0.4, px: 1 }}>
                       Add
                     </Button>
                   </Stack>
-                </Box>
+                )}
+              </Box>
 
-                {pairs.length > 0 && (
-                  <Box>
-                    <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.5 }}>
-                      Active pairs
-                    </Typography>
-                    <Stack spacing={0.5}>
-                      {pairs.map((p, i) => (
-                        <Box key={i}>
-                          <Chip
-                            label={`${p.htf} EBP → ${p.ltf} Sweep`}
-                            size="small"
-                            onDelete={() => removePair(i)}
-                            sx={{
-                              borderRadius: '4px', fontSize: '0.7rem',
-                              bgcolor: `${theme.palette.secondary.main}20`,
-                              color: theme.palette.secondary.main,
-                              border: `1px solid ${theme.palette.secondary.main}44`,
-                            }}
-                          />
-                        </Box>
-                      ))}
-                    </Stack>
-                  </Box>
+              <Divider />
+
+              {/* ── Sweep Alerts ── */}
+              <Box>
+                <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 0.5 }}>
+                  <Typography variant="caption" fontWeight={700} color="secondary">Sweep Alerts</Typography>
+                  <Button size="small" onClick={() => setAddingSweep(a => !a)}
+                    sx={{ fontSize: '0.65rem', minWidth: 0, p: 0, lineHeight: 1 }}>
+                    {addingSweep ? 'Cancel' : '+ Add'}
+                  </Button>
+                </Stack>
+
+                {sweepConfigs.length === 0 && !addingSweep && (
+                  <Typography variant="caption" color="text.disabled">No sweep alerts configured.</Typography>
                 )}
 
-                <Box>
-                  <Typography variant="caption" color="text.secondary">
-                    Confluence window: {window_} minutes
-                  </Typography>
-                  <Slider
-                    value={window_}
-                    onChange={(_, v) => setWindow(v)}
-                    min={15} max={240} step={15}
-                    marks={[
-                      { value: 15, label: '15m' },
-                      { value: 60, label: '1h' },
-                      { value: 120, label: '2h' },
-                      { value: 240, label: '4h' },
-                    ]}
-                    sx={{
-                      color: theme.palette.secondary.main,
-                      '& .MuiSlider-markLabel': { fontSize: '0.6rem', color: theme.palette.text.disabled },
-                    }}
-                  />
-                </Box>
-              </>
-            )}
+                <Stack spacing={0.5}>
+                  {sweepConfigs.map(c => (
+                    <Stack key={c.id} direction="row" alignItems="center" spacing={0.5}>
+                      <Chip label={c.timeframe} size="small"
+                        sx={{ borderRadius: '3px', fontSize: '0.65rem', height: 18, '& .MuiChip-label': { px: 0.75 } }} />
+                      <ModeChip mode={c.alert_mode} />
+                      <IconButton size="small" onClick={() => deleteSweepConfig(c.id)}
+                        sx={{ p: 0.25, color: 'text.disabled', '&:hover': { color: 'error.main' } }}>
+                        <DeleteOutlineOutlinedIcon sx={{ fontSize: 13 }} />
+                      </IconButton>
+                    </Stack>
+                  ))}
+                </Stack>
 
-            <Button
-              variant="contained" size="small"
-              onClick={handleSave} disabled={saving}
-              startIcon={saving ? <CircularProgress size={12} /> : null}
-              sx={{ alignSelf: 'flex-start' }}
-            >
-              {saving ? 'Saving...' : 'Save'}
-            </Button>
-          </Stack>
+                {addingSweep && (
+                  <Stack direction="row" spacing={0.75} alignItems="center" sx={{ mt: 0.75 }}>
+                    <Select size="small" value={newSweepTF} onChange={e => setNewSweepTF(e.target.value)}
+                      sx={{ minWidth: 68, fontSize: '0.75rem' }}>
+                      {SWEEP_TFS.map(tf => <MenuItem key={tf} value={tf}>{tf}</MenuItem>)}
+                    </Select>
+                    <Select size="small" value={newSweepMode} onChange={e => setNewSweepMode(e.target.value)}
+                      sx={{ minWidth: 86, fontSize: '0.75rem' }}>
+                      {ALERT_MODES.map(m => <MenuItem key={m.value} value={m.value}>{m.label}</MenuItem>)}
+                    </Select>
+                    <Button size="small" variant="contained" onClick={addSweepConfig}
+                      disabled={savingSweep}
+                      startIcon={savingSweep ? <CircularProgress size={12} color="inherit" /> : null}
+                      sx={{ fontSize: '0.7rem', py: 0.4, px: 1 }}>
+                      Add
+                    </Button>
+                  </Stack>
+                )}
+              </Box>
+
+              <Divider />
+
+              {/* ── Templates ── */}
+              <Box>
+                <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 0.5 }}>
+                  <Typography variant="caption" fontWeight={700}
+                    sx={{ color: canUseTemplates ? 'text.primary' : 'text.disabled' }}>
+                    Templates (T3)
+                  </Typography>
+                  {canUseTemplates && (
+                    <Button size="small" onClick={() => setAddingT3(a => !a)}
+                      sx={{ fontSize: '0.65rem', minWidth: 0, p: 0, lineHeight: 1 }}>
+                      {addingT3 ? 'Cancel' : '+ Add'}
+                    </Button>
+                  )}
+                </Stack>
+
+                {!canUseTemplates ? (
+                  <Typography variant="caption" color="text.disabled">
+                    Available on Beer plan and above.
+                  </Typography>
+                ) : (
+                  <>
+                    {templates.length === 0 && !addingT3 && (
+                      <Typography variant="caption" color="text.disabled">No templates configured.</Typography>
+                    )}
+
+                    <Stack spacing={0.5}>
+                      {templates.map(t => (
+                        <Stack key={t.id} direction="row" alignItems="center" spacing={0.5}>
+                          <Chip label="T3" size="small"
+                            sx={{ borderRadius: '3px', fontSize: '0.6rem', height: 16, '& .MuiChip-label': { px: 0.75 },
+                              bgcolor: `${theme.palette.warning.main}20`, color: 'warning.main',
+                              border: `1px solid ${theme.palette.warning.main}44` }} />
+                          <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                            {t.htf} EBP → {t.ltf} Sweep/MSS
+                          </Typography>
+                          <Chip
+                            label={t.enabled ? 'ON' : 'OFF'}
+                            size="small"
+                            onClick={() => toggleTemplate(t)}
+                            sx={{
+                              cursor: 'pointer', borderRadius: '3px', fontSize: '0.6rem',
+                              height: 16, '& .MuiChip-label': { px: 0.75 },
+                              bgcolor: t.enabled ? `${theme.palette.success.main}20` : 'transparent',
+                              color: t.enabled ? 'success.main' : 'text.disabled',
+                              border: `1px solid ${t.enabled ? theme.palette.success.main : theme.palette.divider}`,
+                            }}
+                          />
+                          <IconButton size="small" onClick={() => deleteTemplate(t.id)}
+                            sx={{ p: 0.25, color: 'text.disabled', '&:hover': { color: 'error.main' } }}>
+                            <DeleteOutlineOutlinedIcon sx={{ fontSize: 13 }} />
+                          </IconButton>
+                        </Stack>
+                      ))}
+                    </Stack>
+
+                    {addingT3 && (
+                      <Box sx={{ mt: 0.75 }}>
+                        <Stack direction="row" spacing={0.75} alignItems="center" sx={{ mb: 0.5 }}>
+                          <Select size="small" value={newT3HTF}
+                            onChange={e => { setNewT3HTF(e.target.value); setNewT3LTF((T3_PAIRS[e.target.value] ?? ['M15'])[0]) }}
+                            sx={{ minWidth: 68, fontSize: '0.75rem' }}>
+                            {Object.keys(T3_PAIRS).map(tf => <MenuItem key={tf} value={tf}>{tf} HTF</MenuItem>)}
+                          </Select>
+                          <Select size="small" value={newT3LTF} onChange={e => setNewT3LTF(e.target.value)}
+                            sx={{ minWidth: 68, fontSize: '0.75rem' }}>
+                            {validT3LTFs.map(tf => <MenuItem key={tf} value={tf}>{tf} LTF</MenuItem>)}
+                          </Select>
+                          <Select size="small" value={newT3Win} onChange={e => setNewT3Win(Number(e.target.value))}
+                            sx={{ minWidth: 68, fontSize: '0.75rem' }}>
+                            {[30, 60, 120, 240].map(m => <MenuItem key={m} value={m}>{m}m</MenuItem>)}
+                          </Select>
+                        </Stack>
+                        <Button size="small" variant="contained" onClick={addT3Template}
+                          disabled={savingT3}
+                          startIcon={savingT3 ? <CircularProgress size={12} color="inherit" /> : null}
+                          sx={{ fontSize: '0.7rem', py: 0.4, px: 1 }}>
+                          Add T3
+                        </Button>
+                      </Box>
+                    )}
+                  </>
+                )}
+              </Box>
+
+            </Stack>
+          )}
         </Box>
       )}
     </Box>
@@ -221,7 +382,7 @@ export default function Assets() {
   const theme = useTheme()
   const navigate = useNavigate()
   const { getToken } = useAuth()
-  const { assets, loading, error, addAsset, removeAsset, refetch } = useAssets()
+  const { assets, loading, error, addAsset, removeAsset } = useAssets()
 
   const TYPE_SX = {
     Forex:       { bgcolor: `${theme.palette.primary.main}20`,   color: theme.palette.primary.main,   border: `1px solid ${theme.palette.primary.main}` },
@@ -230,6 +391,7 @@ export default function Assets() {
     'NSE Asset': { bgcolor: `${theme.palette.text.disabled}20`,  color: theme.palette.text.secondary, border: `1px solid ${theme.palette.divider}` },
     Crypto:      { bgcolor: `${theme.palette.warning.main}20`,   color: theme.palette.warning.main,   border: `1px solid ${theme.palette.warning.main}` },
   }
+
   const [searchQuery, setSearchQuery] = useState('')
   const [modalOpen, setModalOpen]     = useState(false)
   const [newSymbol, setNewSymbol]     = useState('')
@@ -260,12 +422,6 @@ export default function Assets() {
     } finally {
       setAdding(false)
     }
-  }
-
-  const handleSaveCombined = async (id, config) => {
-    const token = await getToken()
-    await api.patch(`/user/assets/${id}/combined`, config, token)
-    await refetch()
   }
 
   return (
@@ -359,7 +515,7 @@ export default function Assets() {
                       </Stack>
                     }
                     secondary={
-                      <CombinedPairBuilder asset={asset} onSave={handleSaveCombined} />
+                      <AssetConfigPanel asset={asset} userPlan={user?.plan ?? 'free'} />
                     }
                   />
                 </ListItem>

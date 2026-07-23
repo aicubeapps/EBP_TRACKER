@@ -1,10 +1,8 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import {
   Container, Typography, Stack, Paper, Button, Alert,
-  Divider, RadioGroup, FormControlLabel, Radio,
-  FormControl, FormLabel, CircularProgress, Box, Chip, Switch,
-  LinearProgress,
+  Divider, CircularProgress, Box, Chip, Switch, LinearProgress
 } from '@mui/material';
 import { useUser } from '../hooks/useUser';
 import { useThemeMode } from '../context/ThemeContext';
@@ -91,12 +89,41 @@ export default function Settings() {
   const [generating, setGenerating] = useState(false);
   const [msg, setMsg]               = useState({ text: '', severity: 'info' });
 
-  // Sweep state
-  const [sweepEnabled, setSweepEnabled] = useState(false);
-  const [sweepTFs, setSweepTFs]         = useState(['4H', '1H', 'M15']);
-  const [sweepMode, setSweepMode]       = useState('aligned');
-  const [savingSweep, setSavingSweep]   = useState(false);
-  const [sweepSaveMsg, setSweepSaveMsg] = useState('');
+  // Data sources health state
+  const [dsHealth, setDsHealth]       = useState(null);
+  const [dsLoading, setDsLoading]     = useState(true);
+
+  const fetchDsHealth = async () => {
+    try {
+      const token = await getToken();
+      const data  = await api.get('/health/datasources', token);
+      setDsHealth(data);
+    } catch {}
+    setDsLoading(false);
+  };
+
+  useEffect(() => {
+    fetchDsHealth();
+    const iv = setInterval(fetchDsHealth, 5 * 60 * 1000);
+    return () => clearInterval(iv);
+  }, []);
+
+  function statusDot(lastCall) {
+    if (!lastCall) return '🔴';
+    const age = Date.now() - lastCall;
+    if (age < 30 * 60 * 1000) return '🟢';
+    if (age < 60 * 60 * 1000) return '🟡';
+    return '🔴';
+  }
+
+  function fmtTime(ts) {
+    if (!ts) return 'Never';
+    return new Date(ts).toLocaleString('en-US', {
+      timeZone: 'America/New_York',
+      month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', hour12: true,
+    }) + ' NY';
+  }
 
   const fetchTgStatus = async () => {
     try {
@@ -169,34 +196,6 @@ export default function Settings() {
     }
   };
 
-  const toggleSweepTF = (tf) => {
-    setSweepTFs(prev =>
-      prev.includes(tf) ? prev.filter(t => t !== tf) : [...prev, tf]
-    );
-  };
-
-  const handleSaveSweepDefaults = async () => {
-    setSavingSweep(true);
-    setSweepSaveMsg('');
-    try {
-      const token  = await getToken();
-      const assets = await api.get('/user/assets', token);
-      await Promise.all(assets.map(asset =>
-        api.patch(`/user/assets/${asset.id}/sweep`, {
-          enabled:    sweepEnabled,
-          timeframes: sweepTFs.join(','),
-          alertMode:  sweepMode,
-        }, token)
-      ));
-      setSweepSaveMsg('Sweep defaults saved to all assets.');
-      setTimeout(() => setSweepSaveMsg(''), 3000);
-    } catch (e) {
-      setSweepSaveMsg('Error: ' + e.message);
-    } finally {
-      setSavingSweep(false);
-    }
-  };
-
   return (
     <Container maxWidth="md" sx={{ py: 3 }}>
       <Typography variant="h5" fontWeight={700} sx={{ mb: 3 }}>Settings</Typography>
@@ -205,36 +204,49 @@ export default function Settings() {
       <Paper sx={{ p: 3, mb: 3 }}>
         <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
           <Typography variant="subtitle1" fontWeight={600}>Data Sources</Typography>
-          <Button size="small" variant="text" onClick={fetchDatasources} disabled={dsLoading}>
+          <Button size="small" variant="text" onClick={fetchDsHealth} disabled={dsLoading}
+            sx={{ fontSize: '0.7rem' }}>
             Refresh
           </Button>
         </Stack>
-        <Divider sx={{ mb: 1 }} />
+        <Divider sx={{ mb: 2 }} />
+
         {dsLoading ? (
-          <LinearProgress sx={{ my: 1 }} />
+          <CircularProgress size={20} />
+        ) : !dsHealth ? (
+          <Typography variant="body2" color="text.secondary">Could not load data source status.</Typography>
         ) : (
-          <>
-            <SourceRow name="Finnhub"     data={dsData?.sources?.finnhub}     intervalMins={5} />
-            <SourceRow name="Yahoo"       data={dsData?.sources?.yahoo}       intervalMins={15} />
-            <SourceRow name="Twelve Data" data={dsData?.sources?.twelvedata}  intervalMins={60} />
-            {(dsData?.twelvedataToday ?? 0) > 0 && (
-              <Box sx={{ mt: 1.5 }}>
-                <Stack direction="row" justifyContent="space-between" sx={{ mb: 0.5 }}>
-                  <Typography variant="caption" color="text.secondary">
-                    Twelve Data usage: {dsData.twelvedataToday} / {dsData.twelvedataLimit}
+          <Stack spacing={1}>
+            {Object.entries(dsHealth.sources ?? {}).map(([name, info]) => (
+              <Stack key={name} direction="row" alignItems="center" spacing={1.5}>
+                <Typography sx={{ width: 90, textTransform: 'capitalize', fontSize: '0.875rem' }}>
+                  {name}
+                </Typography>
+                <Typography sx={{ fontSize: '1rem', lineHeight: 1 }}>{statusDot(info.lastCall)}</Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ flex: 1 }}>
+                  Last: {fmtTime(info.lastCall)}
+                </Typography>
+                {name === 'twelvedata' && (
+                  <Typography variant="caption" color="text.disabled">
+                    {dsHealth.twelvedataToday}/800 today
                   </Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    {Math.round((dsData.twelvedataToday / dsData.twelvedataLimit) * 100)}%
-                  </Typography>
-                </Stack>
+                )}
+              </Stack>
+            ))}
+            {(dsHealth.twelvedataToday ?? 0) > 0 && (
+              <Box sx={{ pt: 0.5 }}>
                 <LinearProgress
                   variant="determinate"
-                  value={Math.min(100, (dsData.twelvedataToday / dsData.twelvedataLimit) * 100)}
-                  color={dsData.twelvedataToday > 700 ? 'error' : dsData.twelvedataToday > 500 ? 'warning' : 'success'}
+                  value={Math.min(((dsHealth.twelvedataToday ?? 0) / 800) * 100, 100)}
+                  color={dsHealth.twelvedataToday > 700 ? 'error' : dsHealth.twelvedataToday > 500 ? 'warning' : 'success'}
+                  sx={{ height: 5, borderRadius: 3 }}
                 />
+                <Typography variant="caption" color="text.secondary">
+                  Twelve Data daily limit: {dsHealth.twelvedataToday}/800
+                </Typography>
               </Box>
             )}
-          </>
+          </Stack>
         )}
       </Paper>
 
@@ -360,122 +372,6 @@ export default function Settings() {
         )}
       </Paper>
 
-      {/* Sweep Alerts — Global Settings */}
-      <Paper sx={{ p: 3, mb: 3 }}>
-        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
-          <Typography variant="subtitle1" fontWeight={600}>Sweep Alerts</Typography>
-          <Chip
-            label="GLOBAL DEFAULT"
-            size="small"
-            sx={{ borderRadius: '4px', fontSize: '0.65rem', bgcolor: 'background.default', color: 'text.disabled' }}
-          />
-        </Stack>
-        <Divider sx={{ mb: 2 }} />
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          Default sweep settings applied to all assets. Wine subscribers can override per asset.
-        </Typography>
-
-        <Stack spacing={2}>
-          <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
-            <Box>
-              <Typography variant="body2">Enable Sweep Alerts</Typography>
-              <Typography variant="caption" color="text.secondary">
-                Detect liquidity sweeps — wick beyond prior high/low, close back inside
-              </Typography>
-            </Box>
-            <Switch
-              size="small"
-              checked={sweepEnabled}
-              onChange={e => setSweepEnabled(e.target.checked)}
-            />
-          </Stack>
-
-          {sweepEnabled && (
-            <>
-              <Box>
-                <Typography variant="body2" sx={{ mb: 1 }}>Active Timeframes</Typography>
-                <Stack direction="row" spacing={1} flexWrap="wrap">
-                  {['4H', '1H', 'M30', 'M15', 'M5'].map(tf => (
-                    <Chip
-                      key={tf}
-                      label={tf}
-                      size="small"
-                      onClick={() => toggleSweepTF(tf)}
-                      sx={{
-                        borderRadius: '4px',
-                        cursor: 'pointer',
-                        bgcolor: sweepTFs.includes(tf) ? `${theme.palette.primary.main}20` : 'background.default',
-                        color:   sweepTFs.includes(tf) ? theme.palette.primary.main : theme.palette.text.disabled,
-                        border:  `1px solid ${sweepTFs.includes(tf) ? theme.palette.primary.main : theme.palette.divider}`,
-                        fontWeight: sweepTFs.includes(tf) ? 700 : 400,
-                      }}
-                    />
-                  ))}
-                </Stack>
-              </Box>
-
-              <FormControl>
-                <FormLabel sx={{ color: 'text.secondary', mb: 1, fontSize: '0.875rem' }}>
-                  Sweep Alert Mode
-                </FormLabel>
-                <RadioGroup
-                  value={sweepMode}
-                  onChange={e => setSweepMode(e.target.value)}
-                >
-                  <FormControlLabel value="aligned" control={<Radio size="small" />}
-                    label={
-                      <Box sx={{ py: 0.5 }}>
-                        <Typography variant="body2">Trend Aligned Only</Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          Sweep alerts fire only when direction matches TTrades HTF bias
-                        </Typography>
-                      </Box>
-                    }
-                  />
-                  <FormControlLabel value="price_action" control={<Radio size="small" />}
-                    label={
-                      <Box sx={{ py: 0.5 }}>
-                        <Typography variant="body2">Price Action Only</Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          Alerts fire for any sweep regardless of HTF bias
-                        </Typography>
-                      </Box>
-                    }
-                  />
-                  <FormControlLabel value="all" control={<Radio size="small" />}
-                    label={
-                      <Box sx={{ py: 0.5 }}>
-                        <Typography variant="body2">All Sweeps</Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          All sweeps fire with trend label shown in message
-                        </Typography>
-                      </Box>
-                    }
-                  />
-                </RadioGroup>
-              </FormControl>
-
-              <Button
-                variant="contained"
-                size="small"
-                onClick={handleSaveSweepDefaults}
-                disabled={savingSweep}
-                startIcon={savingSweep ? <CircularProgress size={14} /> : null}
-                sx={{ alignSelf: 'flex-start' }}
-              >
-                {savingSweep ? 'Saving...' : 'Save Sweep Defaults'}
-              </Button>
-
-              {sweepSaveMsg && (
-                <Alert severity={sweepSaveMsg.startsWith('Error') ? 'error' : 'success'} sx={{ py: 0.5 }}>
-                  {sweepSaveMsg}
-                </Alert>
-              )}
-            </>
-          )}
-        </Stack>
-      </Paper>
-
       {/* Account Info */}
       <Paper sx={{ p: 3, mb: 3 }}>
         <Typography variant="subtitle1" fontWeight={600} gutterBottom>Account</Typography>
@@ -512,38 +408,6 @@ export default function Settings() {
         </Stack>
       </Paper>
 
-      {/* Alert Mode Section */}
-      <Paper sx={{ p: 3 }}>
-        <Typography variant="subtitle1" fontWeight={600} gutterBottom>Alert Mode</Typography>
-        <Divider sx={{ mb: 2 }} />
-        <FormControl>
-          <FormLabel sx={{ color: 'text.secondary', mb: 1, fontSize: '0.875rem' }}>
-            EBP Alert Direction
-          </FormLabel>
-          <RadioGroup defaultValue="aligned">
-            <FormControlLabel value="aligned" control={<Radio size="small" />}
-              label={
-                <Box sx={{ py: 0.5 }}>
-                  <Typography variant="body2">Trend Aligned Only</Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    Alerts fire only when EBP matches TTrades HTF bias
-                  </Typography>
-                </Box>
-              }
-            />
-            <FormControlLabel value="all" control={<Radio size="small" />}
-              label={
-                <Box sx={{ py: 0.5 }}>
-                  <Typography variant="body2">All Engulfing Bars</Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    Alerts fire for every EBP regardless of trend
-                  </Typography>
-                </Box>
-              }
-            />
-          </RadioGroup>
-        </FormControl>
-      </Paper>
     </Container>
   );
 }
