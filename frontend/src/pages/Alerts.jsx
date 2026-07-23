@@ -47,7 +47,7 @@ function useColumns() {
   {
     field: 'alert_type', headerName: 'Type', width: 100,
     renderCell: p => {
-      const colors = { ebp: theme.palette.primary.main, sweep: theme.palette.secondary.main, combined: theme.palette.warning.main };
+      const colors = { ebp: theme.palette.primary.main, sweep: theme.palette.secondary.main, combined: theme.palette.warning.main, mss: theme.palette.success.main };
       const c = colors[p.value] ?? theme.palette.text.disabled;
       return (
         <Chip label={p.value?.toUpperCase()} size="small" sx={{
@@ -62,12 +62,12 @@ function useColumns() {
     field: 'direction', headerName: 'Direction', width: 100,
     renderCell: p => (
       <Chip
-        label={p.value === 'bull' ? 'BULL' : 'BEAR'}
+        label={p.value === 'bullish' ? 'BULLISH' : 'BEARISH'}
         size="small"
         sx={{
-          bgcolor: p.value === 'bull' ? `${theme.palette.success.main}20` : `${theme.palette.error.main}20`,
-          color:   p.value === 'bull' ? theme.palette.success.main : theme.palette.error.main,
-          border:  `1px solid ${p.value === 'bull' ? theme.palette.success.main : theme.palette.error.main}`,
+          bgcolor: p.value === 'bullish' ? `${theme.palette.success.main}20` : `${theme.palette.error.main}20`,
+          color:   p.value === 'bullish' ? theme.palette.success.main : theme.palette.error.main,
+          border:  `1px solid ${p.value === 'bullish' ? theme.palette.success.main : theme.palette.error.main}`,
           borderRadius:'4px', fontWeight:700,
         }}
       />
@@ -143,6 +143,7 @@ export default function Alerts() {
           <ToggleButton value="ebp">EBP</ToggleButton>
           <ToggleButton value="sweep">Sweep</ToggleButton>
           <ToggleButton value="combined">⚡ Combined</ToggleButton>
+          <ToggleButton value="mss">MSS</ToggleButton>
         </ToggleButtonGroup>
       </Stack>
 
