@@ -690,21 +690,18 @@ export async function handleSweepCron(tf, env, debugLog = null) {
     log('Cleaned up expired pending signals, FVGs, and chains');
   }
 
-  const rows = await env.DB.prepare(`
-    SELECT ua.id as asset_id, ua.symbol,
-           ua.sweep_alert_mode, ua.sweep_timeframes,
-           ua.bias_overrides,
+  const { results: filtered } = await env.DB.prepare(`
+    SELECT sc.id as config_id, sc.alert_mode,
+           ua.id as asset_id, ua.symbol, ua.bias_overrides,
            u.id as user_id, u.active as user_active
-    FROM user_assets ua
-    JOIN users u ON u.id = ua.user_id
-    WHERE ua.active = 1 AND ua.sweep_enabled = 1 AND u.active = 1
-  `).all();
+    FROM user_sweep_configs sc
+    JOIN user_assets ua ON sc.asset_id = ua.id
+    JOIN users u ON sc.user_id = u.id
+    WHERE sc.timeframe=? AND sc.enabled=1
+    AND ua.active=1 AND u.active=1
+  `).bind(tf).all();
 
-  const filtered = (rows.results ?? []).filter(r =>
-    r.sweep_timeframes?.split(',').map(t => t.trim()).includes(tf)
-  );
-
-  if (!filtered.length) {
+  if (!filtered?.length) {
     log(`No sweep assets configured for ${tf}`);
     return;
   }
@@ -753,7 +750,7 @@ export async function handleSweepCron(tf, env, debugLog = null) {
         if (mssResult) {
           const htfLabelStr = getHTFLabel(tf);
           for (const row of userRows) {
-            const alertMode     = row.sweep_alert_mode ?? 'aligned';
+            const alertMode     = row.alert_mode ?? 'aligned';
             const biasOverrides = JSON.parse(row.bias_overrides || '{}');
             const effectiveBias = getEffectiveBias(biasTF, { [biasTF]: { bias: htfBias } }, biasOverrides);
             const shouldAlert   = alertMode === 'all' || alertMode === 'price_action' ||
@@ -813,7 +810,7 @@ export async function handleSweepCron(tf, env, debugLog = null) {
       log(`[${symbol}] sweep detected: ${sweep.direction} (HTF bias: ${htfBias})`);
 
       for (const row of userRows) {
-        const alertMode     = row.sweep_alert_mode ?? 'aligned';
+        const alertMode     = row.alert_mode ?? 'aligned';
         const biasOverrides = JSON.parse(row.bias_overrides || '{}');
         const effectiveBias = getEffectiveBias(biasTF, { [biasTF]: { bias: htfBias } }, biasOverrides);
         const trendAligned  = sweep.direction === effectiveBias;

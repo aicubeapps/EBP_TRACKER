@@ -729,19 +729,17 @@ async function handleCron(cronExpr, env) {
 
   console.log(`Cron ${cronExpr} → TF: ${tf}`);
 
-  const rows = await env.DB.prepare(`
-    SELECT ua.id as asset_id, ua.symbol, ua.timeframes, ua.ebp_alert_mode,
-           ua.bias_overrides,
+  const { results: filtered } = await env.DB.prepare(`
+    SELECT ec.id as config_id, ec.alert_mode,
+           ua.id as asset_id, ua.symbol, ua.bias_overrides,
            u.id as user_id
-    FROM user_assets ua
-    JOIN users u ON u.id = ua.user_id
-    WHERE ua.active = 1 AND u.active = 1
-  `).all();
-
-  const filtered = (rows.results ?? []).filter(r =>
-    r.timeframes.split(',').map(t => t.trim()).includes(tf)
-  );
-  if (!filtered.length) return;
+    FROM user_ebp_configs ec
+    JOIN user_assets ua ON ec.asset_id = ua.id
+    JOIN users u ON ec.user_id = u.id
+    WHERE ec.timeframe=? AND ec.enabled=1
+    AND ua.active=1 AND u.active=1
+  `).bind(tf).all();
+  if (!filtered?.length) return;
 
   const symbolMap = new Map();
   for (const row of filtered) {
@@ -779,7 +777,7 @@ async function handleCron(cronExpr, env) {
         if (mssResult) {
           const htfLabelStr = getHTFLabel(tf);
           for (const row of userRows) {
-            const alertMode     = row.ebp_alert_mode ?? 'aligned';
+            const alertMode     = row.alert_mode ?? 'aligned';
             const biasOverrides = JSON.parse(row.bias_overrides || '{}');
             const effectiveBias = getEffectiveBias(biasTF, { [biasTF]: { bias: htfBias } }, biasOverrides);
             const shouldAlert   = alertMode === 'all' || mssResult.direction === effectiveBias || effectiveBias === 'neutral';
@@ -809,7 +807,7 @@ async function handleCron(cronExpr, env) {
       if (!ebp) continue;
 
       for (const row of userRows) {
-        const alertMode     = row.ebp_alert_mode ?? 'aligned';
+        const alertMode     = row.alert_mode ?? 'aligned';
         const biasOverrides = JSON.parse(row.bias_overrides || '{}');
         const effectiveBias = getEffectiveBias(biasTF, { [biasTF]: { bias: htfBias } }, biasOverrides);
         const trendAligned  = ebp.direction === effectiveBias;
