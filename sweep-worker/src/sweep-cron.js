@@ -687,7 +687,10 @@ export async function handleSweepCron(tf, env, debugLog = null) {
     await cleanupExpiredSignals(env.DB);
     await cleanupExpiredFVGs(env.DB);
     await cleanupExpiredChains(env.DB);
-    log('Cleaned up expired pending signals, FVGs, and chains');
+    await env.DB.prepare(
+      `DELETE FROM api_call_log WHERE called_at < ?`
+    ).bind(Date.now() - (2 * 24 * 60 * 60 * 1000)).run();
+    log('Cleaned up expired pending signals, FVGs, chains, and API call log');
   }
 
   const { results: filtered } = await env.DB.prepare(`

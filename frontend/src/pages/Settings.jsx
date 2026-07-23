@@ -32,7 +32,19 @@ export default function Settings() {
       const token = await getToken();
       const data  = await api.get('/health/datasources', token);
       setDsHealth(data);
-    } catch {}
+    } catch (e) {
+      console.error('Health fetch failed:', e);
+      // Show an empty (all-zero) state instead of an error message
+      setDsHealth({
+        sources: {
+          finnhub:    { lastCall: null, callsToday: 0, lastSuccess: false },
+          yahoo:      { lastCall: null, callsToday: 0, lastSuccess: false },
+          twelvedata: { lastCall: null, callsToday: 0, lastSuccess: false },
+        },
+        twelvedataToday: 0,
+        twelvedataLimit: 800,
+      });
+    }
     setDsLoading(false);
   };
 
