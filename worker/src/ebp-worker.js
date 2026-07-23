@@ -267,15 +267,29 @@ async function fetchFinnhub(symbol, tf, apiKey, count = 10) {
   }
 }
 
-async function fetchCandles(symbol, tf, twelveApiKey, finnhubApiKey, count = 10) {
+async function logApiCall(db, source, symbol, timeframe, success = 1) {
+  try {
+    await db.prepare(
+      'INSERT INTO api_call_log (id, source, symbol, timeframe, called_at, success) VALUES (?, ?, ?, ?, ?, ?)'
+    ).bind(crypto.randomUUID(), source, symbol, timeframe, Date.now(), success).run();
+  } catch {}
+}
+
+async function fetchCandles(symbol, tf, twelveApiKey, finnhubApiKey, count = 10, db = null) {
   // 1. Finnhub — primary (60 calls/min, no daily cap)
   const finnhubCandles = await fetchFinnhub(symbol, tf, finnhubApiKey, count);
-  if (finnhubCandles && finnhubCandles.length >= 3) return finnhubCandles;
+  if (finnhubCandles && finnhubCandles.length >= 3) {
+    if (db) await logApiCall(db, 'finnhub', symbol, tf);
+    return finnhubCandles;
+  }
 
   // 2. Yahoo Finance — fallback (unlimited, no key)
   try {
     const c = await fetchYahooFinance(symbol, tf, count);
-    if (c && c.length >= 3) return c;
+    if (c && c.length >= 3) {
+      if (db) await logApiCall(db, 'yahoo', symbol, tf);
+      return c;
+    }
   } catch (e) {
     console.warn(`Yahoo failed ${symbol} ${tf}: ${e.message}`);
   }
@@ -283,7 +297,10 @@ async function fetchCandles(symbol, tf, twelveApiKey, finnhubApiKey, count = 10)
   // 3. Twelve Data — emergency only (800 calls/day)
   try {
     const c = await fetchTwelveData(symbol, tf, twelveApiKey, count);
-    if (c && c.length >= 3) return c;
+    if (c && c.length >= 3) {
+      if (db) await logApiCall(db, 'twelvedata', symbol, tf);
+      return c;
+    }
   } catch (e) {
     console.error(`All sources failed ${symbol} ${tf}: ${e.message}`);
   }
@@ -654,12 +671,12 @@ async function handleCron(cronExpr, env) {
 
   for (const [symbol, userRows] of symbolMap) {
     try {
-      const candles = await fetchCandles(symbol, tf, env.TWELVE_DATA_API_KEY, env.FINNHUB_API_KEY);
+      const candles = await fetchCandles(symbol, tf, env.TWELVE_DATA_API_KEY, env.FINNHUB_API_KEY, 10, env.DB);
       if (!candles || candles.length < 2) continue;
 
       let htfBias = 'neutral';
       if (htfTF) {
-        const htfCandles = await fetchCandles(symbol, htfTF, env.TWELVE_DATA_API_KEY, env.FINNHUB_API_KEY);
+        const htfCandles = await fetchCandles(symbol, htfTF, env.TWELVE_DATA_API_KEY, env.FINNHUB_API_KEY, 10, env.DB);
         if (htfCandles?.length >= 3) {
           const r = calcTTradesBias({ bar1: htfCandles[1], bar2: htfCandles[2] });
           htfBias = r.bias;
@@ -982,19 +999,163 @@ router.get('/dashboard', async (req, env) => {
   return json(assets.results ?? [], 200, origin);
 });
 
+// ── EBP Configs ───────────────────────────────────────────────
+
+router.get('/user/ebp-configs/:assetId', async (req, env) => {
+  const { user: clerkUser, origin, error } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  const { results } = await env.DB.prepare(
+    'SELECT * FROM user_ebp_configs WHERE user_id = ? AND asset_id = ? ORDER BY created_at ASC'
+  ).bind(clerkUser.id, req._params.assetId).all();
+  return json(results ?? [], 200, origin);
+});
+
+router.post('/user/ebp-configs/:assetId', async (req, env) => {
+  const { user: clerkUser, origin, error } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  const { timeframe, alert_mode = 'aligned' } = await req.json();
+  if (!timeframe) return json({ error: 'timeframe required' }, 400, origin);
+  const id = crypto.randomUUID();
+  await env.DB.prepare(
+    'INSERT INTO user_ebp_configs (id, user_id, asset_id, timeframe, alert_mode, enabled, created_at) VALUES (?,?,?,?,?,1,?)'
+  ).bind(id, clerkUser.id, req._params.assetId, timeframe, alert_mode, Date.now()).run();
+  return json({ id }, 201, origin);
+});
+
+router.patch('/user/ebp-configs/:id', async (req, env) => {
+  const { user: clerkUser, origin, error } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  const body = await req.json();
+  const sets = []; const vals = [];
+  if (body.alert_mode !== undefined) { sets.push('alert_mode = ?'); vals.push(body.alert_mode); }
+  if (body.enabled !== undefined)    { sets.push('enabled = ?');    vals.push(body.enabled ? 1 : 0); }
+  if (!sets.length) return json({ ok: true }, 200, origin);
+  vals.push(clerkUser.id, req._params.id);
+  await env.DB.prepare(`UPDATE user_ebp_configs SET ${sets.join(', ')} WHERE user_id = ? AND id = ?`).bind(...vals).run();
+  return json({ ok: true }, 200, origin);
+});
+
+router.delete('/user/ebp-configs/:id', async (req, env) => {
+  const { user: clerkUser, origin, error } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  await env.DB.prepare('DELETE FROM user_ebp_configs WHERE user_id = ? AND id = ?').bind(clerkUser.id, req._params.id).run();
+  return json({ ok: true }, 200, origin);
+});
+
+// ── Sweep Configs ─────────────────────────────────────────────
+
+router.get('/user/sweep-configs/:assetId', async (req, env) => {
+  const { user: clerkUser, origin, error } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  const { results } = await env.DB.prepare(
+    'SELECT * FROM user_sweep_configs WHERE user_id = ? AND asset_id = ? ORDER BY created_at ASC'
+  ).bind(clerkUser.id, req._params.assetId).all();
+  return json(results ?? [], 200, origin);
+});
+
+router.post('/user/sweep-configs/:assetId', async (req, env) => {
+  const { user: clerkUser, origin, error } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  const { timeframe, alert_mode = 'aligned' } = await req.json();
+  if (!timeframe) return json({ error: 'timeframe required' }, 400, origin);
+  const id = crypto.randomUUID();
+  await env.DB.prepare(
+    'INSERT INTO user_sweep_configs (id, user_id, asset_id, timeframe, alert_mode, enabled, created_at) VALUES (?,?,?,?,?,1,?)'
+  ).bind(id, clerkUser.id, req._params.assetId, timeframe, alert_mode, Date.now()).run();
+  return json({ id }, 201, origin);
+});
+
+router.patch('/user/sweep-configs/:id', async (req, env) => {
+  const { user: clerkUser, origin, error } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  const body = await req.json();
+  const sets = []; const vals = [];
+  if (body.alert_mode !== undefined) { sets.push('alert_mode = ?'); vals.push(body.alert_mode); }
+  if (body.enabled !== undefined)    { sets.push('enabled = ?');    vals.push(body.enabled ? 1 : 0); }
+  if (!sets.length) return json({ ok: true }, 200, origin);
+  vals.push(clerkUser.id, req._params.id);
+  await env.DB.prepare(`UPDATE user_sweep_configs SET ${sets.join(', ')} WHERE user_id = ? AND id = ?`).bind(...vals).run();
+  return json({ ok: true }, 200, origin);
+});
+
+router.delete('/user/sweep-configs/:id', async (req, env) => {
+  const { user: clerkUser, origin, error } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  await env.DB.prepare('DELETE FROM user_sweep_configs WHERE user_id = ? AND id = ?').bind(clerkUser.id, req._params.id).run();
+  return json({ ok: true }, 200, origin);
+});
+
+// ── Bias Cache ────────────────────────────────────────────────
+
+router.get('/user/bias/:symbol', async (req, env) => {
+  const { user: clerkUser, origin, error } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  const symbol = decodeURIComponent(req._params.symbol);
+  const { results } = await env.DB.prepare(
+    'SELECT timeframe, bias, updated_at FROM bias_cache WHERE symbol = ?'
+  ).bind(symbol).all();
+  const out = {};
+  for (const row of (results ?? [])) out[row.timeframe] = { bias: row.bias, updated_at: row.updated_at };
+  return json(out, 200, origin);
+});
+
+// ── Health / Data Sources ─────────────────────────────────────
+
+router.get('/health/datasources', async (req, env) => {
+  const { user: clerkUser, origin, error } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  const dayStart = Date.now() - 24 * 60 * 60 * 1000;
+  const { results } = await env.DB.prepare(
+    `SELECT source, MAX(called_at) as lastCall, SUM(CASE WHEN called_at > ? THEN 1 ELSE 0 END) as callsToday,
+     MAX(CASE WHEN called_at > ? THEN success ELSE 0 END) as lastSuccess
+     FROM api_call_log GROUP BY source`
+  ).bind(dayStart, dayStart).all();
+  const sources = {};
+  for (const r of (results ?? [])) {
+    sources[r.source] = { lastCall: r.lastCall, callsToday: r.callsToday, lastSuccess: r.lastSuccess === 1 };
+  }
+  const twelvedataToday = sources.twelvedata?.callsToday ?? 0;
+  return json({ sources, twelvedataToday, twelvedataLimit: 800 }, 200, origin);
+});
+
 // ── Alerts ────────────────────────────────────────────────────
 
 router.get('/alerts/history', async (req, env) => {
   const { user: clerkUser, origin, error } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const url   = new URL(req.url);
-  const type  = url.searchParams.get('type') ?? 'all';
-  const limit = parseInt(url.searchParams.get('limit') ?? '100');
-  let query   = 'SELECT * FROM alert_history WHERE user_id = ?';
-  const params = [clerkUser.id];
+  const url    = new URL(req.url);
+  const type   = url.searchParams.get('type') ?? 'all';
+  const limit  = parseInt(url.searchParams.get('limit') ?? '100');
+  const days   = parseInt(url.searchParams.get('days') ?? '30');
+  const assetId = url.searchParams.get('assetId');
+  const since  = Date.now() - days * 24 * 60 * 60 * 1000;
+  let query    = 'SELECT * FROM alert_history WHERE user_id = ? AND fired_at > ?';
+  const params = [clerkUser.id, since];
   if (type !== 'all') { query += ' AND alert_type = ?'; params.push(type); }
+  if (assetId) {
+    const asset = await env.DB.prepare('SELECT symbol FROM user_assets WHERE id = ? AND user_id = ?').bind(assetId, clerkUser.id).first();
+    if (asset) { query += ' AND symbol = ?'; params.push(asset.symbol); }
+  }
   query += ' ORDER BY fired_at DESC LIMIT ?';
   params.push(limit);
+  const alerts = await env.DB.prepare(query).bind(...params).all();
+  return json(alerts.results ?? [], 200, origin);
+});
+
+router.get('/alerts/export', async (req, env) => {
+  const { user: clerkUser, origin, error } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  const url    = new URL(req.url);
+  const from   = parseInt(url.searchParams.get('from') ?? '0');
+  const to     = parseInt(url.searchParams.get('to') ?? String(Date.now()));
+  const assetId = url.searchParams.get('assetId');
+  let query    = 'SELECT * FROM alert_history WHERE user_id = ? AND fired_at >= ? AND fired_at <= ?';
+  const params = [clerkUser.id, from, to];
+  if (assetId) {
+    const asset = await env.DB.prepare('SELECT symbol FROM user_assets WHERE id = ? AND user_id = ?').bind(assetId, clerkUser.id).first();
+    if (asset) { query += ' AND symbol = ?'; params.push(asset.symbol); }
+  }
+  query += ' ORDER BY fired_at DESC LIMIT 5000';
   const alerts = await env.DB.prepare(query).bind(...params).all();
   return json(alerts.results ?? [], 200, origin);
 });

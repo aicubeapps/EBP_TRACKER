@@ -1,9 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import {
   Container, Typography, Stack, Paper, Button, Alert,
   Divider, RadioGroup, FormControlLabel, Radio,
-  FormControl, FormLabel, CircularProgress, Box, Chip, Switch
+  FormControl, FormLabel, CircularProgress, Box, Chip, Switch,
+  LinearProgress,
 } from '@mui/material';
 import { useUser } from '../hooks/useUser';
 import { useThemeMode } from '../context/ThemeContext';
@@ -17,11 +18,70 @@ import {
 import api from '../lib/api';
 import { useTheme } from '@mui/material/styles';
 
+function fmtNY(ts) {
+  if (!ts) return '—';
+  return new Date(ts).toLocaleString('en-US', {
+    timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit',
+  }) + ' NY';
+}
+
+function SourceRow({ name, data, intervalMins }) {
+  const theme = useTheme();
+  const now = Date.now();
+  const age = data?.lastCall ? now - data.lastCall : Infinity;
+  const intervalMs = intervalMins * 60 * 1000;
+  const statusColor = age < intervalMs * 2  ? theme.palette.success.main
+    : age < intervalMs * 4 ? theme.palette.warning.main
+    : theme.palette.error.main;
+  const statusLabel = age < intervalMs * 2 ? 'Live' : age < intervalMs * 4 ? 'Slow' : 'Stale';
+
+  return (
+    <Stack direction="row" alignItems="center" spacing={1.5} sx={{ py: 0.75 }}>
+      <Box sx={{
+        width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+        bgcolor: data ? statusColor : theme.palette.text.disabled,
+      }} />
+      <Typography variant="body2" sx={{ minWidth: 100, fontWeight: 500 }}>{name}</Typography>
+      <Typography variant="caption" sx={{ color: statusColor, minWidth: 40 }}>
+        {data ? statusLabel : 'No data'}
+      </Typography>
+      <Typography variant="caption" color="text.disabled">
+        Last: {fmtNY(data?.lastCall)}
+      </Typography>
+      <Box sx={{ flexGrow: 1 }} />
+      <Typography variant="caption" color="text.disabled">
+        {data?.callsToday ?? 0} calls today
+      </Typography>
+    </Stack>
+  );
+}
+
 export default function Settings() {
   const { getToken }          = useAuth();
   const { user }              = useUser();
   const { mode, toggleTheme } = useThemeMode();
   const theme                 = useTheme();
+
+  // Data sources state
+  const [dsData,       setDsData]       = useState(null);
+  const [dsLoading,    setDsLoading]    = useState(true);
+  const dsIntervalRef = useRef(null);
+
+  const fetchDatasources = async () => {
+    try {
+      const token = await getToken();
+      const data  = await api.get('/health/datasources', token);
+      setDsData(data);
+    } catch {} finally {
+      setDsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchDatasources();
+    dsIntervalRef.current = setInterval(fetchDatasources, 5 * 60 * 1000);
+    return () => clearInterval(dsIntervalRef.current);
+  }, []);
 
   // Telegram state
   const [tgStatus, setTgStatus]     = useState(null);
@@ -140,6 +200,43 @@ export default function Settings() {
   return (
     <Container maxWidth="md" sx={{ py: 3 }}>
       <Typography variant="h5" fontWeight={700} sx={{ mb: 3 }}>Settings</Typography>
+
+      {/* Data Sources */}
+      <Paper sx={{ p: 3, mb: 3 }}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
+          <Typography variant="subtitle1" fontWeight={600}>Data Sources</Typography>
+          <Button size="small" variant="text" onClick={fetchDatasources} disabled={dsLoading}>
+            Refresh
+          </Button>
+        </Stack>
+        <Divider sx={{ mb: 1 }} />
+        {dsLoading ? (
+          <LinearProgress sx={{ my: 1 }} />
+        ) : (
+          <>
+            <SourceRow name="Finnhub"     data={dsData?.sources?.finnhub}     intervalMins={5} />
+            <SourceRow name="Yahoo"       data={dsData?.sources?.yahoo}       intervalMins={15} />
+            <SourceRow name="Twelve Data" data={dsData?.sources?.twelvedata}  intervalMins={60} />
+            {(dsData?.twelvedataToday ?? 0) > 0 && (
+              <Box sx={{ mt: 1.5 }}>
+                <Stack direction="row" justifyContent="space-between" sx={{ mb: 0.5 }}>
+                  <Typography variant="caption" color="text.secondary">
+                    Twelve Data usage: {dsData.twelvedataToday} / {dsData.twelvedataLimit}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    {Math.round((dsData.twelvedataToday / dsData.twelvedataLimit) * 100)}%
+                  </Typography>
+                </Stack>
+                <LinearProgress
+                  variant="determinate"
+                  value={Math.min(100, (dsData.twelvedataToday / dsData.twelvedataLimit) * 100)}
+                  color={dsData.twelvedataToday > 700 ? 'error' : dsData.twelvedataToday > 500 ? 'warning' : 'success'}
+                />
+              </Box>
+            )}
+          </>
+        )}
+      </Paper>
 
       {/* Appearance */}
       <Paper sx={{ p: 3, mb: 3 }}>

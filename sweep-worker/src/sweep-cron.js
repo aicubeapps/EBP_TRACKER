@@ -189,16 +189,30 @@ async function fetchFinnhub(symbol, tf, apiKey, count = 10) {
   }
 }
 
-async function fetchCandles(symbol, tf, twelveApiKey, finnhubApiKey, _log, count = 10) {
+async function logApiCall(db, source, symbol, timeframe, success = 1) {
+  try {
+    await db.prepare(
+      'INSERT INTO api_call_log (id, source, symbol, timeframe, called_at, success) VALUES (?, ?, ?, ?, ?, ?)'
+    ).bind(crypto.randomUUID(), source, symbol, timeframe, Date.now(), success).run();
+  } catch {}
+}
+
+async function fetchCandles(symbol, tf, twelveApiKey, finnhubApiKey, _log, count = 10, db = null) {
   // 1. Finnhub — primary (60 calls/min, no daily cap)
   const finnhubCandles = await fetchFinnhub(symbol, tf, finnhubApiKey, count);
-  if (finnhubCandles && finnhubCandles.length >= 3) return finnhubCandles;
+  if (finnhubCandles && finnhubCandles.length >= 3) {
+    if (db) await logApiCall(db, 'finnhub', symbol, tf);
+    return finnhubCandles;
+  }
   if (_log) _log.push(`[WARN] Finnhub failed ${symbol} ${tf} — trying Yahoo`);
 
   // 2. Yahoo Finance — fallback (unlimited, no key)
   try {
     const c = await fetchYahooFinance(symbol, tf, count);
-    if (c && c.length >= 3) return c;
+    if (c && c.length >= 3) {
+      if (db) await logApiCall(db, 'yahoo', symbol, tf);
+      return c;
+    }
   } catch (e) {
     if (_log) _log.push(`[WARN] Yahoo failed ${symbol} ${tf}: ${e.message}`);
   }
@@ -206,7 +220,10 @@ async function fetchCandles(symbol, tf, twelveApiKey, finnhubApiKey, _log, count
   // 3. Twelve Data — emergency only (800 calls/day)
   try {
     const c = await fetchTwelveData(symbol, tf, twelveApiKey, count);
-    if (c && c.length >= 3) return c;
+    if (c && c.length >= 3) {
+      if (db) await logApiCall(db, 'twelvedata', symbol, tf);
+      return c;
+    }
   } catch (e) {
     const msg = `All sources failed ${symbol} ${tf}: ${e.message}`;
     console.error(msg);
@@ -587,7 +604,8 @@ export async function handleSweepCron(tf, env, debugLog = null) {
   if (tf === 'M5') {
     await cleanupExpiredSignals(env.DB);
     await cleanupExpiredFVGs(env.DB);
-    log('Cleaned up expired pending signals and FVGs');
+    await env.DB.prepare('DELETE FROM api_call_log WHERE called_at < ?').bind(Date.now() - 2 * 24 * 60 * 60 * 1000).run();
+    log('Cleaned up expired pending signals, FVGs, and api_call_log');
   }
 
   const rows = await env.DB.prepare(`
@@ -621,7 +639,7 @@ export async function handleSweepCron(tf, env, debugLog = null) {
 
   for (const [symbol, userRows] of symbolMap) {
     try {
-      const candles = await fetchCandles(symbol, tf, env.TWELVE_DATA_API_KEY, env.FINNHUB_API_KEY, debugLog);
+      const candles = await fetchCandles(symbol, tf, env.TWELVE_DATA_API_KEY, env.FINNHUB_API_KEY, debugLog, 10, env.DB);
       log(`[${symbol}] candles fetched: ${candles?.length ?? 'null'}`);
       if (!candles || candles.length < 2) {
         log(`[${symbol}] SKIP: insufficient candles`);
@@ -630,7 +648,7 @@ export async function handleSweepCron(tf, env, debugLog = null) {
 
       let htfBias = 'neutral';
       if (htfTF) {
-        const htfCandles = await fetchCandles(symbol, htfTF, env.TWELVE_DATA_API_KEY, env.FINNHUB_API_KEY, debugLog);
+        const htfCandles = await fetchCandles(symbol, htfTF, env.TWELVE_DATA_API_KEY, env.FINNHUB_API_KEY, debugLog, 10, env.DB);
         log(`[${symbol}] htf candles fetched: ${htfCandles?.length ?? 'null'}`);
         if (htfCandles?.length >= 3) {
           const result = calcTTradesBias({ bar1: htfCandles[1], bar2: htfCandles[2] });

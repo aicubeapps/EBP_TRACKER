@@ -158,3 +158,42 @@ CREATE TABLE IF NOT EXISTS swing_state (
 );
 
 CREATE INDEX IF NOT EXISTS idx_swing_state_lookup ON swing_state(symbol, timeframe);
+
+-- Phase 4 additions
+ALTER TABLE alert_history ADD COLUMN details TEXT DEFAULT '{}';
+
+CREATE TABLE IF NOT EXISTS user_ebp_configs (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL,
+  asset_id    TEXT NOT NULL,
+  timeframe   TEXT NOT NULL,
+  alert_mode  TEXT DEFAULT 'aligned',
+  enabled     INTEGER DEFAULT 1,
+  created_at  INTEGER NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  FOREIGN KEY (asset_id) REFERENCES user_assets(id)
+);
+CREATE INDEX IF NOT EXISTS idx_ebp_configs_lookup ON user_ebp_configs(user_id, asset_id, enabled);
+
+CREATE TABLE IF NOT EXISTS user_sweep_configs (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL,
+  asset_id    TEXT NOT NULL,
+  timeframe   TEXT NOT NULL,
+  alert_mode  TEXT DEFAULT 'aligned',
+  enabled     INTEGER DEFAULT 1,
+  created_at  INTEGER NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  FOREIGN KEY (asset_id) REFERENCES user_assets(id)
+);
+CREATE INDEX IF NOT EXISTS idx_sweep_configs_lookup ON user_sweep_configs(user_id, asset_id, enabled);
+
+CREATE TABLE IF NOT EXISTS api_call_log (
+  id          TEXT PRIMARY KEY,
+  source      TEXT NOT NULL,
+  symbol      TEXT NOT NULL,
+  timeframe   TEXT NOT NULL,
+  called_at   INTEGER NOT NULL,
+  success     INTEGER DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_api_call_log_time ON api_call_log(source, called_at DESC);
