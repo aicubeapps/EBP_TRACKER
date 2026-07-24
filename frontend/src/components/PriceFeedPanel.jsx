@@ -37,7 +37,6 @@ export default function PriceFeedPanel({ keys = [] }) {
 
   const twelveKeys = keys.filter(k => k.source === 'twelvedata' && k.enabled && !k.exhausted);
 
-  // Clean up WebSocket on unmount (tab navigation)
   useEffect(() => () => {
     wsRef.current?.close();
     wsRef.current = null;
@@ -92,7 +91,6 @@ export default function PriceFeedPanel({ keys = [] }) {
     };
 
     ws.onclose = () => {
-      // Keep 'error' state if already set; otherwise revert to disconnected
       setStatus(prev => (prev === 'error' ? prev : 'disconnected'));
       wsRef.current = null;
     };
@@ -122,9 +120,9 @@ export default function PriceFeedPanel({ keys = [] }) {
     setPrices(prev => { const n = { ...prev }; delete n[sym]; return n; });
   };
 
-  const isActive   = status === 'connected' || status === 'connecting';
-  const dotColor   = { connected: '#22c55e', connecting: '#f59e0b', error: '#ef4444', disconnected: '#6b7280' }[status];
-  const dotLabel   = { connected: 'CONNECTED', connecting: 'CONNECTING…', error: 'ERROR', disconnected: 'DISCONNECTED' }[status];
+  const isActive  = status === 'connected' || status === 'connecting';
+  const dotColor  = { connected: '#22c55e', connecting: '#f59e0b', error: '#ef4444', disconnected: '#6b7280' }[status];
+  const dotLabel  = { connected: 'CONNECTED', connecting: 'CONNECTING…', error: 'ERROR', disconnected: 'DISCONNECTED' }[status];
 
   return (
     <div>
@@ -190,7 +188,7 @@ export default function PriceFeedPanel({ keys = [] }) {
       {/* ── Symbol toolbar ────────────────────────────────────── */}
       <div style={{
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-        marginBottom: 10, flexWrap: 'wrap', gap: 8,
+        marginBottom: 12, flexWrap: 'wrap', gap: 8,
       }}>
         <div className="section-heading" style={{ marginBottom: 0 }}>
           Live Prices
@@ -211,86 +209,69 @@ export default function PriceFeedPanel({ keys = [] }) {
         </div>
       </div>
 
-      {/* ── Price table ───────────────────────────────────────── */}
-      <div className="card" style={{ padding: 0 }}>
-        <div className="table-wrap">
-          <table className="alert-table">
-            <thead>
-              <tr>
-                <th>Pair</th>
-                <th style={{ textAlign: 'right' }}>Price</th>
-                <th style={{ textAlign: 'center', width: 40 }}>Dir</th>
-                <th>Updated</th>
-                <th>Pip Δ</th>
-                <th style={{ width: 32 }}></th>
-              </tr>
-            </thead>
-            <tbody>
-              {symbols.length === 0 ? (
-                <tr>
-                  <td colSpan={6} style={{ textAlign: 'center', color: 'var(--muted)', padding: 24 }}>
-                    No pairs added — type a symbol above and click Add
-                  </td>
-                </tr>
-              ) : symbols.map(sym => {
-                const tick = prices[sym];
-                const dir  = tick?.direction;
-                return (
-                  <tr key={sym}>
-                    {/* Symbol */}
-                    <td style={{ fontWeight: 600, fontFamily: 'var(--font-mono)', fontSize: 13 }}>
-                      {sym}
-                    </td>
-
-                    {/* Price — colour shifts on tick direction */}
-                    <td style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 15, fontWeight: 700 }}>
-                      {tick
-                        ? <span style={{
-                            color: dir === 'up' ? 'var(--bull)' : dir === 'down' ? 'var(--bear)' : 'inherit',
-                            transition: 'color 0.3s',
-                          }}>
-                            {fmtPrice(tick.price, sym)}
-                          </span>
-                        : <span style={{ color: 'var(--muted)' }}>—</span>
-                      }
-                    </td>
-
-                    {/* Direction arrow */}
-                    <td style={{ textAlign: 'center', fontSize: 14 }}>
-                      {dir === 'up'
-                        ? <span style={{ color: '#22c55e' }}>▲</span>
-                        : dir === 'down'
-                          ? <span style={{ color: '#ef4444' }}>▼</span>
-                          : <span style={{ color: 'var(--muted)' }}>—</span>
-                      }
-                    </td>
-
-                    {/* Timestamp */}
-                    <td style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'var(--font-mono)' }}>
-                      {tick ? fmtTime(tick.updatedAt) : '—'}
-                    </td>
-
-                    {/* Pip Δ — admin fills by eye */}
-                    <td style={{ color: 'var(--muted)', fontSize: 12 }}>—</td>
-
-                    {/* Remove */}
-                    <td>
-                      <button
-                        className="add-link"
-                        style={{ color: '#ef4444', fontSize: 13, padding: '2px 4px' }}
-                        onClick={() => removeSymbol(sym)}
-                        title={`Remove ${sym}`}
-                      >
-                        ✕
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+      {/* ── Price cards ───────────────────────────────────────── */}
+      {symbols.length === 0 ? (
+        <div className="card" style={{ textAlign: 'center', padding: 32, color: 'var(--muted)' }}>
+          No pairs added — type a symbol above and click Add
         </div>
-      </div>
+      ) : (
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
+          gap: 12,
+        }}>
+          {symbols.map(sym => {
+            const tick = prices[sym];
+            const dir  = tick?.direction;
+            const priceColor = dir === 'up' ? 'var(--bull)' : dir === 'down' ? 'var(--bear)' : 'inherit';
+            return (
+              <div key={sym} className="card" style={{ position: 'relative', padding: '14px 16px' }}>
+                <button
+                  className="add-link"
+                  onClick={() => removeSymbol(sym)}
+                  title={`Remove ${sym}`}
+                  style={{
+                    position: 'absolute', top: 8, right: 8,
+                    color: 'var(--muted)', fontSize: 13, padding: '2px 6px',
+                    lineHeight: 1,
+                  }}
+                >
+                  ✕
+                </button>
+
+                <div style={{
+                  fontFamily: 'var(--font-mono)', fontWeight: 700,
+                  fontSize: 13, letterSpacing: '0.04em', marginBottom: 6,
+                }}>
+                  {sym}
+                </div>
+
+                <div style={{
+                  fontFamily: 'var(--font-mono)', fontSize: 22, fontWeight: 700,
+                  color: priceColor, transition: 'color 0.3s',
+                  marginBottom: 6,
+                }}>
+                  {tick ? fmtPrice(tick.price, sym) : <span style={{ color: 'var(--muted)' }}>—</span>}
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ fontSize: 14 }}>
+                    {dir === 'up'
+                      ? <span style={{ color: '#22c55e' }}>▲</span>
+                      : dir === 'down'
+                        ? <span style={{ color: '#ef4444' }}>▼</span>
+                        : <span style={{ color: 'var(--muted)' }}>—</span>
+                    }
+                  </span>
+                  <span style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'var(--font-mono)' }}>
+                    {tick ? fmtTime(tick.updatedAt) : 'waiting…'}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       <p className="text-muted" style={{ fontSize: 11, marginTop: 8 }}>
         Non-JPY: 5 dp · JPY: 3 dp · No auto-reconnect — click Connect each session.

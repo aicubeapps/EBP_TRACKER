@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 56 56" width="56" height="56">
+  <circle cx="28" cy="28" r="28" fill="#0f172a"/>
+  <text x="50%" y="52%" text-anchor="middle" dominant-baseline="middle"
+    fill="#38bdf8" font-family="Outfit, ui-monospace, monospace"
+    font-size="15" font-weight="700" letter-spacing="1">EBP</text>
+</svg>

@@ -66,32 +66,6 @@ CREATE TABLE IF NOT EXISTS candle_cache (
   PRIMARY KEY (symbol, timeframe)
 );
 
-CREATE TABLE IF NOT EXISTS pending_signals (
-  id             TEXT PRIMARY KEY,
-  user_id        TEXT NOT NULL,
-  symbol         TEXT NOT NULL,
-  direction      TEXT NOT NULL,
-  signal_type    TEXT NOT NULL,
-  timeframe      TEXT NOT NULL,
-  fired_at       INTEGER NOT NULL,
-  expires_at     INTEGER NOT NULL,
-  consumed_pairs TEXT DEFAULT '[]',
-  FOREIGN KEY (user_id) REFERENCES users(id)
-);
-
-CREATE TABLE IF NOT EXISTS payment_log (
-  id           TEXT PRIMARY KEY,
-  user_id      TEXT NOT NULL,
-  tier         TEXT NOT NULL,
-  amount_inr   INTEGER NOT NULL,
-  upi_ref      TEXT,
-  status       TEXT DEFAULT 'pending',
-  submitted_at INTEGER NOT NULL,
-  approved_at  INTEGER,
-  approved_by  TEXT,
-  FOREIGN KEY (user_id) REFERENCES users(id)
-);
-
 CREATE TABLE IF NOT EXISTS invite_tokens (
   token      TEXT PRIMARY KEY,
   created_at INTEGER NOT NULL,
@@ -118,9 +92,6 @@ CREATE INDEX IF NOT EXISTS idx_ua_user_id      ON user_assets(user_id);
 CREATE INDEX IF NOT EXISTS idx_ua_symbol       ON user_assets(symbol);
 CREATE INDEX IF NOT EXISTS idx_ah_user_id      ON alert_history(user_id);
 CREATE INDEX IF NOT EXISTS idx_ah_fired_at     ON alert_history(fired_at);
-CREATE INDEX IF NOT EXISTS idx_ps_user_symbol  ON pending_signals(user_id, symbol);
-CREATE INDEX IF NOT EXISTS idx_pl_status       ON payment_log(status);
-
 -- FVG Detection Table (Phase 1)
 CREATE TABLE IF NOT EXISTS detected_fvgs (
   id              TEXT PRIMARY KEY,

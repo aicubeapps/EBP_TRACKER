@@ -1,12 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '@clerk/clerk-react';
-import { useNavigate } from 'react-router-dom';
 import { useUser } from '../hooks/useUser';
 import api from '../lib/api';
-import { fmtDate, fmtNY, daysRemaining, capitalise } from '../lib/utils';
-
-const TIER_EMOJI = { free: '', chai: '🍵', coffee: '☕', beer: '🍺', wine: '🍷', whiskey: '🥃' };
-const TIERS = ['coffee', 'beer', 'wine'];
+import { fmtDate, fmtNY, capitalise } from '../lib/utils';
 
 function dotClass(lastCall) {
   if (!lastCall) return 'dead';
@@ -19,9 +15,6 @@ function dotClass(lastCall) {
 export default function Settings() {
   const { getToken } = useAuth();
   const { user }     = useUser();
-  const navigate      = useNavigate();
-
-  const [selectedTier, setSelectedTier] = useState('');
 
   // Data sources
   const [dsHealth,  setDsHealth]  = useState(null);
@@ -34,7 +27,6 @@ export default function Settings() {
       setDsHealth(data);
     } catch (e) {
       console.error('Health fetch failed:', e);
-      // Show an empty (all-zero) state instead of an error message
       setDsHealth({
         sources: {
           finnhub:    { lastCall: null, callsToday: 0, lastSuccess: false },
@@ -143,38 +135,9 @@ export default function Settings() {
           <span className="settings-value">{fmtDate(user?.created_at)}</span>
         </div>
         <div className="settings-row">
-          <span className="settings-label">Current Plan</span>
-          <span className="settings-value">
-            {TIER_EMOJI[user?.plan] ?? ''} {user?.plan ? capitalise(user.plan) : 'Free'}
-          </span>
-        </div>
-        <div className="settings-row">
-          <span className="settings-label">Days Remaining</span>
-          <span className="settings-value">{daysRemaining(user?.expires_at)} days</span>
-        </div>
-        <div className="settings-row">
           <span className="settings-label">Asset Slots</span>
           <span className="settings-value">{user?.asset_limit ?? 3}</span>
         </div>
-
-        <div className="divider" />
-        <div className="section-heading">Upgrade</div>
-        <div className="upgrade-group">
-          {TIERS.map(t => (
-            <label key={t} className={`upgrade-option ${t === user?.plan ? 'current' : ''}`}>
-              <input type="radio" name="tier" value={t}
-                checked={selectedTier === t}
-                disabled={t === user?.plan}
-                onChange={() => setSelectedTier(t)} />
-              <span>{TIER_EMOJI[t]} {capitalise(t)}</span>
-            </label>
-          ))}
-        </div>
-        {selectedTier && selectedTier !== user?.plan && (
-          <button className="upgrade-cta" onClick={() => navigate('/upgrade')}>
-            Upgrade to {capitalise(selectedTier)}
-          </button>
-        )}
       </div>
 
       {/* Data Sources */}

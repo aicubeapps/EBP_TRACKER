@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@clerk/clerk-react';
 import { useAssets } from '../hooks/useAssets';
 import { useUser } from '../hooks/useUser';
@@ -7,8 +6,12 @@ import ApiErrorAlert from '../components/ApiErrorAlert';
 import AssetCard from '../components/AssetCard';
 import api from '../lib/api';
 
+function fmtTZ(ts, tz, locale) {
+  if (!ts) return null;
+  return new Date(ts).toLocaleTimeString(locale, { timeZone: tz, hour: '2-digit', minute: '2-digit' });
+}
+
 export default function Dashboard() {
-  const navigate = useNavigate();
   const { getToken } = useAuth();
   const { user }                                          = useUser();
   const { assets, loading, error, addAsset, removeAsset } = useAssets();
@@ -18,6 +21,7 @@ export default function Dashboard() {
   const [addError, setAddError]               = useState(null);
   const [showLimitModal, setShowLimitModal]   = useState(false);
   const [assetCount, setAssetCount]           = useState({ count: 0, limit: 5, remaining: 5 });
+  const [lastApiCall, setLastApiCall]         = useState(null);
 
   const fetchAssetCount = useCallback(async () => {
     try {
@@ -27,7 +31,22 @@ export default function Dashboard() {
     } catch {}
   }, [getToken]);
 
+  const fetchApiStatus = useCallback(async () => {
+    try {
+      const token = await getToken();
+      const data  = await api.get('/health/datasources', token);
+      const calls = Object.values(data.sources ?? {}).map(s => s.lastCall).filter(Boolean);
+      if (calls.length > 0) setLastApiCall(Math.max(...calls));
+    } catch {}
+  }, [getToken]);
+
   useEffect(() => { fetchAssetCount(); }, [fetchAssetCount, assets]);
+
+  useEffect(() => {
+    fetchApiStatus();
+    const iv = setInterval(fetchApiStatus, 60_000);
+    return () => clearInterval(iv);
+  }, [fetchApiStatus]);
 
   async function handleAddAsset() {
     const symbol = query.trim().toUpperCase();
@@ -82,10 +101,18 @@ export default function Dashboard() {
           </button>
         </div>
 
-        <span className="text-mono text-muted">
-          {assetCount.count} / {assetCount.limit} assets used
-          {assetCount.remaining === 0 && ' — limit reached'}
-        </span>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
+          <span className="text-mono text-muted">
+            {assetCount.count} / {assetCount.limit} assets used
+            {assetCount.remaining === 0 && ' — limit reached'}
+          </span>
+          {lastApiCall && (
+            <span className="text-mono text-muted" style={{ fontSize: 11 }}>
+              Last call: {fmtTZ(lastApiCall, 'America/New_York', 'en-US')} NY
+              {' · '}{fmtTZ(lastApiCall, 'Asia/Kolkata', 'en-IN')} IST
+            </span>
+          )}
+        </div>
 
         {validationState === 'invalid' && (
           <span className="search-msg error">Symbol not found — please check and try again</span>
@@ -104,17 +131,16 @@ export default function Dashboard() {
             <div className="overlay-icon">⚡</div>
             <div className="card-title mb-sm">Plan Expired</div>
             <p className="text-muted mb-md" style={{ fontSize: 12 }}>
-              Your EBP Tracker subscription has expired. Renew to continue receiving alerts and monitoring your assets.
+              Your EBP Tracker subscription has expired. Contact the admin to renew your plan.
             </p>
-            <div className="divider" />
-            <button className="btn btn-primary btn-lg btn-block" onClick={() => navigate('/upgrade')}>
-              Renew Plan
-            </button>
           </div>
         </div>
       )}
 
       <ApiErrorAlert error={error} />
+
+      {/* Forex & Crypto */}
+      <div className="section-heading">Forex &amp; Crypto</div>
 
       {loading ? (
         <>
@@ -142,6 +168,17 @@ export default function Dashboard() {
           />
         ))
       )}
+
+      {/* NSE Market */}
+      <div className="section-heading" style={{ marginTop: 24 }}>NSE Market</div>
+      <div className="card" style={{ textAlign: 'center', padding: 32 }}>
+        <div style={{ fontSize: 32, marginBottom: 8 }}>🇮🇳</div>
+        <div className="card-title" style={{ borderBottom: 'none', paddingBottom: 0 }}>Indian share market alerts</div>
+        <p className="text-muted" style={{ fontSize: 13, margin: '6px 0 16px' }}>
+          NSE and BSE stocks, indices and more
+        </p>
+        <button className="btn btn-outline" disabled>Add Share Market Asset</button>
+      </div>
 
       {showLimitModal && (
         <div className="modal-overlay" onClick={() => setShowLimitModal(false)}>

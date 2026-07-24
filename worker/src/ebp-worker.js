@@ -968,8 +968,8 @@ async function getOrCreateUser(db, clerkUser) {
   const now     = Date.now();
   const expires = now + 30 * 24 * 60 * 60 * 1000;
   await db.prepare(`
-    INSERT INTO users (id, email, name, created_at, expires_at)
-    VALUES (?,?,?,?,?)
+    INSERT INTO users (id, email, name, created_at, expires_at, asset_limit)
+    VALUES (?,?,?,?,?,5)
     ON CONFLICT(id) DO NOTHING
   `).bind(clerkUser.id, clerkUser.email, clerkUser.email.split('@')[0], now, expires).run();
 
@@ -1543,40 +1543,6 @@ router.delete('/user/telegram', async (req, env) => {
   return json({ success: true }, 200, origin);
 });
 
-// ── Payments ──────────────────────────────────────────────────
-
-router.post('/payment/submit', async (req, env) => {
-  const { user: clerkUser, origin, error } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const body        = await req.json();
-  const tierAmounts = { coffee: 99, beer: 249, wine: 499 };
-  const amount      = tierAmounts[body.tier];
-  if (!amount) return json({ error: 'Invalid tier' }, 400, origin);
-
-  const id = crypto.randomUUID();
-  await env.DB.prepare(`
-    INSERT INTO payment_log (id, user_id, tier, amount_inr, upi_ref, submitted_at)
-    VALUES (?,?,?,?,?,?)
-  `).bind(id, clerkUser.id, body.tier, amount, body.upiRef ?? '', Date.now()).run();
-
-  if (env.DEVELOPER_TELEGRAM_CHAT_ID && env.SHARED_BOT_TOKEN) {
-    await sendTelegramMessage(env.SHARED_BOT_TOKEN, env.DEVELOPER_TELEGRAM_CHAT_ID,
-      `💰 <b>Payment pending</b>\nUser: ${clerkUser.email}\nTier: ${body.tier}\nAmount: ₹${amount}\nUPI Ref: ${body.upiRef ?? 'not provided'}\nID: ${id}`
-    ).catch(() => {});
-  }
-
-  return json({ id, status: 'pending' }, 201, origin);
-});
-
-router.get('/payment/status', async (req, env) => {
-  const { user: clerkUser, origin, error } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const payments = await env.DB.prepare(
-    'SELECT * FROM payment_log WHERE user_id = ? ORDER BY submitted_at DESC LIMIT 5'
-  ).bind(clerkUser.id).all();
-  return json(payments.results ?? [], 200, origin);
-});
-
 // ── Admin ─────────────────────────────────────────────────────
 
 async function requireAdmin(clerkUser, db) {
@@ -1596,18 +1562,6 @@ router.get('/admin/users', async (req, env) => {
     FROM users u ORDER BY u.created_at DESC
   `).all();
   return json(users.results ?? [], 200, origin);
-});
-
-router.get('/admin/payments', async (req, env) => {
-  const { user: clerkUser, origin, error } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
-  const payments = await env.DB.prepare(`
-    SELECT p.*, u.email, u.name FROM payment_log p
-    JOIN users u ON u.id = p.user_id
-    ORDER BY p.submitted_at DESC
-  `).all();
-  return json(payments.results ?? [], 200, origin);
 });
 
 router.get('/admin/tokens', async (req, env) => {
@@ -1630,50 +1584,6 @@ router.post('/admin/invite', async (req, env) => {
   ).bind(token, Date.now()).run();
   const appUrl = env.APP_URL ?? 'https://ebp-tracker.pages.dev';
   return json({ token, url: `${appUrl}/invite/${token}` }, 201, origin);
-});
-
-router.post('/admin/approve/:id', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
-
-  const payment = await env.DB.prepare('SELECT * FROM payment_log WHERE id = ?').bind(params.id).first();
-  if (!payment) return json({ error: 'Not found' }, 404, origin);
-
-  const tierLimits = { coffee: 5, beer: 8, wine: 13 };
-  const tierCfg    = await env.DB.prepare('SELECT asset_limit FROM tier_config WHERE tier = ?').bind(payment.tier).first();
-  const newLimit   = tierCfg?.asset_limit ?? tierLimits[payment.tier] ?? 3;
-  const newExpiry  = Date.now() + 30 * 24 * 60 * 60 * 1000;
-
-  await env.DB.prepare(
-    'UPDATE users SET plan = ?, asset_limit = ?, expires_at = ?, active = 1 WHERE id = ?'
-  ).bind(payment.tier, newLimit, newExpiry, payment.user_id).run();
-
-  await env.DB.prepare(
-    "UPDATE payment_log SET status = 'approved', approved_at = ?, approved_by = ? WHERE id = ?"
-  ).bind(Date.now(), clerkUser.id, params.id).run();
-
-  const tg = await env.DB.prepare(
-    'SELECT chat_id FROM user_telegram WHERE user_id = ? AND verified = 1'
-  ).bind(payment.user_id).first();
-  if (tg?.chat_id) {
-    const emoji = { coffee: '☕', beer: '🍺', wine: '🍷' }[payment.tier] ?? '✅';
-    await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id,
-      `${emoji} <b>Payment approved!</b>\n\nYour ${payment.tier} tier is now active. You have ${newLimit} asset slots for the next 30 days.`
-    ).catch(() => {});
-  }
-
-  return json({ success: true }, 200, origin);
-});
-
-router.post('/admin/reject/:id', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
-  await env.DB.prepare(
-    "UPDATE payment_log SET status = 'rejected' WHERE id = ?"
-  ).bind(params.id).run();
-  return json({ success: true }, 200, origin);
 });
 
 router.post('/admin/expire/:id', async (req, env) => {
@@ -1751,56 +1661,6 @@ router.patch('/admin/users/:id/asset-limit', async (req, env) => {
   }
   await env.DB.prepare(`UPDATE users SET asset_limit=? WHERE id=?`).bind(asset_limit, params.id).run();
   return json({ ok: true, asset_limit }, 200, origin);
-});
-
-router.get('/admin/tiers', async (req, env) => {
-  const { user: clerkUser, origin, error } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
-  const tiers = await env.DB.prepare(
-    'SELECT * FROM tier_config ORDER BY price_inr ASC'
-  ).all();
-  return json(tiers.results ?? [], 200, origin);
-});
-
-router.patch('/admin/tiers/:tier', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
-  const body = await req.json();
-  await env.DB.prepare(`
-    INSERT INTO tier_config (tier, label, emoji, price_inr, asset_limit, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(tier) DO UPDATE SET
-      price_inr = excluded.price_inr,
-      asset_limit = excluded.asset_limit,
-      updated_at = excluded.updated_at
-  `).bind(
-    params.tier,
-    body.label ?? params.tier,
-    body.emoji ?? '☕',
-    body.price_inr,
-    body.asset_limit,
-    Date.now()
-  ).run();
-  return json({ success: true }, 200, origin);
-});
-
-// ── Public tier pricing ─────────────────────────────────────
-
-router.get('/tiers', async (req, env) => {
-  const { origin } = req._ctx;
-  const tiers = await env.DB.prepare(
-    'SELECT tier, label, emoji, price_inr, asset_limit FROM tier_config ORDER BY price_inr ASC'
-  ).all();
-  if (!tiers.results?.length) {
-    return json([
-      { tier: 'coffee', label: 'Coffee', emoji: '☕', price_inr: 99,  asset_limit: 5  },
-      { tier: 'beer',   label: 'Beer',   emoji: '🍺', price_inr: 249, asset_limit: 8  },
-      { tier: 'wine',   label: 'Wine',   emoji: '🍷', price_inr: 499, asset_limit: 13 },
-    ], 200, origin);
-  }
-  return json(tiers.results, 200, origin);
 });
 
 // ── Invite token validation ───────────────────────────────────

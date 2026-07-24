@@ -4,6 +4,7 @@ import { useClerk } from '@clerk/clerk-react';
 import { useUser } from '../hooks/useUser';
 import { daysRemaining, capitalise } from '../lib/utils';
 import ExpiryBanner from './ExpiryBanner';
+import logoSrc from '../assets/logo.svg';
 
 const NAV = [
   { id: 'nav-dash',     path: '/dashboard', icon: '📊', label: 'Dashboard' },
@@ -50,6 +51,9 @@ export default function Layout({ children }) {
 
       <div className="app-body">
         <nav className="sidebar">
+          <div style={{ display: 'flex', justifyContent: 'center', padding: '16px 0' }}>
+            <img src={logoSrc} alt="EBP Tracker" style={{ width: 56, height: 56, borderRadius: '50%' }} />
+          </div>
           <div className="sidebar-section">Navigation</div>
           {nav.map(item => (
             <button
