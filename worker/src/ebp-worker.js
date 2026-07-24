@@ -728,22 +728,6 @@ ${swingLabel}: ${mss.level?.toFixed(5)}
 }
 
 // ============================================================
-// DST Helper
-// ============================================================
-function isUSDST(date = new Date()) {
-  const y  = date.getUTCFullYear();
-  const m3 = new Date(Date.UTC(y, 2, 1));
-  const dstStart = new Date(Date.UTC(y, 2, 1 + (7 - m3.getUTCDay()) % 7 + 7));
-  const m11 = new Date(Date.UTC(y, 10, 1));
-  const dstEnd   = new Date(Date.UTC(y, 10, 1 + (7 - m11.getUTCDay()) % 7));
-  return date >= dstStart && date < dstEnd;
-}
-
-function getNYCloseUTCHour(date = new Date()) {
-  return isUSDST(date) ? 21 : 22;
-}
-
-// ============================================================
 // Candle Cache
 // ============================================================
 async function updateCandleCache(db, symbol, tf, candles) {
@@ -766,25 +750,13 @@ async function updateCandleCache(db, symbol, tf, candles) {
 }
 
 // ============================================================
-// Cron Handler
+// Cron Handler — invoked via POST /cron/ebp (cron-job.org), tf is
+// explicit (each cron-job.org job fires a fixed tf on its own schedule,
+// mirroring the old native cron expressions this replaces).
 // ============================================================
-async function handleCron(cronExpr, env) {
-  const now  = new Date();
-  const hour = now.getUTCHours();
-  const min  = now.getUTCMinutes();
-  const nyCloseHour = getNYCloseUTCHour(now);
-  const isNYClose   = hour === nyCloseHour && min === 0;
-  const isFriday    = now.getUTCDay() === 5;
-  const isWeekday   = now.getUTCDay() >= 1 && now.getUTCDay() <= 5;
-
-  let tf;
-  if (isNYClose && isFriday)       tf = 'W';
-  else if (isNYClose && isWeekday) tf = 'D';
-  else if (min === 0 && hour % 4 === 0) tf = '4H';
-  else if (min === 0)              tf = '1H';
-  else                             tf = 'M15';
-
-  console.log(`Cron ${cronExpr} → TF: ${tf}`);
+async function handleEBPCron(tf, env, debugLog = null) {
+  const log = (msg) => { console.log(msg); if (debugLog) debugLog.push(msg); };
+  log(`EBP trigger → TF: ${tf}`);
 
   const { results: filtered } = await env.DB.prepare(`
     SELECT ec.id as config_id, ec.alert_mode,
@@ -796,7 +768,10 @@ async function handleCron(cronExpr, env) {
     WHERE ec.timeframe=? AND ec.enabled=1
     AND ua.active=1 AND u.active=1
   `).bind(tf).all();
-  if (!filtered?.length) return;
+  if (!filtered?.length) {
+    log(`No enabled EBP configs for TF ${tf}`);
+    return { symbolsProcessed: 0 };
+  }
 
   const symbolMap = new Map();
   for (const row of filtered) {
@@ -804,12 +779,17 @@ async function handleCron(cronExpr, env) {
     symbolMap.get(row.symbol).push(row);
   }
 
+  log(`Processing ${symbolMap.size} symbol(s) on ${tf}`);
+
   const biasTF = BIAS_SOURCE.ebp[tf] ?? null;
 
   for (const [symbol, userRows] of symbolMap) {
     try {
       const candles = await fetchCandles(symbol, tf, env.TWELVE_DATA_API_KEY, env.FINNHUB_API_KEY, 10, env.DB);
-      if (!candles || candles.length < 2) continue;
+      if (!candles || candles.length < 2) {
+        log(`[${symbol}] SKIP: insufficient candles`);
+        continue;
+      }
 
       let htfBias = 'neutral';
       if (biasTF) {
@@ -861,7 +841,10 @@ async function handleCron(cronExpr, env) {
       }
 
       const ebp = detectEBP(candles);
-      if (!ebp) continue;
+      if (!ebp) {
+        log(`[${symbol}] no EBP detected`);
+        continue;
+      }
 
       for (const row of userRows) {
         const alertMode     = row.alert_mode ?? 'aligned';
@@ -910,9 +893,13 @@ async function handleCron(cronExpr, env) {
 
       await new Promise(r => setTimeout(r, 1000));
     } catch (err) {
-      console.error(`Error ${symbol} ${tf}:`, err.message);
+      const msg = `Error ${symbol} ${tf}: ${err.message}`;
+      console.error(msg);
+      if (debugLog) debugLog.push(`[ERROR] ${msg}`);
     }
   }
+
+  return { symbolsProcessed: symbolMap.size };
 }
 
 // ============================================================
@@ -1376,6 +1363,29 @@ router.post('/user/telegram/test', async (req, env) => {
   return json({ success: true }, 200, origin);
 });
 
+// EBP cron trigger — public route, secured by X-Cron-Secret (cron-job.org)
+router.post('/cron/ebp', async (req, env) => {
+  const origin = getOrigin(req);
+  const secret = req.headers.get('X-Cron-Secret');
+  if (!secret || secret !== env.CRON_SECRET) {
+    return json({ error: 'Forbidden' }, 403, origin);
+  }
+
+  let body = {};
+  try { body = await req.json(); } catch {}
+  const { tf } = body;
+  if (!tf) return json({ error: 'tf required' }, 400, origin);
+
+  try {
+    const debugLog = [];
+    const result = await handleEBPCron(tf, env, debugLog);
+    return json({ ok: true, tf, fired_at: new Date().toISOString(), debug: debugLog, ...result }, 200, origin);
+  } catch (err) {
+    console.error(`EBP cron trigger error TF=${tf}:`, err.message);
+    return json({ error: err.message }, 500, origin);
+  }
+});
+
 // Telegram bot webhook — public route, no Clerk auth
 router.post('/telegram/webhook', async (req, env) => {
   const origin = getOrigin(req);
@@ -1708,7 +1718,9 @@ export default {
     }
   },
 
+  // Cloudflare scheduled handler — not used (cron-job.org handles scheduling
+  // via POST /cron/ebp; no [triggers] block in wrangler.toml calls this)
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(handleCron(event.cron, env));
+    console.log('Scheduled event received — scheduling handled via cron-job.org HTTP triggers');
   },
 };
