@@ -33,14 +33,16 @@ export default function PriceFeedPanel({ keys = [] }) {
   const wsRef  = useRef(null);
   const logRef = useRef([]);
 
-  const [apiKey, setApiKey]     = useState('');
-  const [symbols, setSymbols]   = useState([...DEFAULT_SYMBOLS]);
-  const [newSym, setNewSym]     = useState('');
-  const [status, setStatus]     = useState('disconnected');
-  const [errorMsg, setErrorMsg] = useState('');
-  const [prices, setPrices]     = useState({});
-  const [rawLog, setRawLog]     = useState([]);   // visible log lines
-  const [connInfo, setConnInfo] = useState(null); // { url, subscribeMsg }
+  const [apiKey, setApiKey]       = useState('');
+  const [symbols, setSymbols]     = useState([...DEFAULT_SYMBOLS]);
+  const [newSym, setNewSym]       = useState('');
+  const [status, setStatus]       = useState('disconnected');
+  const [errorMsg, setErrorMsg]   = useState('');
+  const [prices, setPrices]       = useState({});
+  const [subStatus, setSubStatus] = useState({}); // { 'EUR/USD': 'ok' | 'fail' }
+  const [failCount, setFailCount] = useState(0);
+  const [rawLog, setRawLog]       = useState([]);
+  const [connInfo, setConnInfo]   = useState(null);
 
   const twelveKeys = keys.filter(k => k.source === 'twelvedata' && k.enabled && !k.exhausted);
 
@@ -50,7 +52,7 @@ export default function PriceFeedPanel({ keys = [] }) {
   }, []);
 
   const pushLog = (line) => {
-    const ts  = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const ts    = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     const entry = `[${ts}] ${line}`;
     logRef.current = [entry, ...logRef.current].slice(0, 20);
     setRawLog([...logRef.current]);
@@ -67,11 +69,13 @@ export default function PriceFeedPanel({ keys = [] }) {
     setStatus('connecting');
     setErrorMsg('');
     setPrices({});
+    setSubStatus({});
+    setFailCount(0);
     logRef.current = [];
     setRawLog([]);
 
-    const url = `${WS_ENDPOINT}?apikey=${encodeURIComponent(apiKey.trim())}`;
-    const maskedUrl = `${WS_ENDPOINT}?apikey=${maskKey(apiKey.trim())}`;
+    const url          = `${WS_ENDPOINT}?apikey=${encodeURIComponent(apiKey.trim())}`;
+    const maskedUrl    = `${WS_ENDPOINT}?apikey=${maskKey(apiKey.trim())}`;
     const subscribeMsg = JSON.stringify({ action: 'subscribe', params: { symbols: symbols.join(',') } });
 
     setConnInfo({ url: maskedUrl, subscribeMsg });
@@ -90,6 +94,16 @@ export default function PriceFeedPanel({ keys = [] }) {
       pushLog(`MSG: ${evt.data}`);
       try {
         const msg = JSON.parse(evt.data);
+
+        if (msg.event === 'subscribe-status') {
+          const next = {};
+          (msg.success ?? []).forEach(s => { next[s.symbol] = 'ok'; });
+          (msg.fails   ?? []).forEach(s => { next[s.symbol] = 'fail'; });
+          setSubStatus(prev => ({ ...prev, ...next }));
+          setFailCount((msg.fails ?? []).length);
+          return;
+        }
+
         if (msg.event === 'price' && msg.symbol && msg.price != null) {
           setPrices(prev => {
             const old = prev[msg.symbol];
@@ -147,11 +161,12 @@ export default function PriceFeedPanel({ keys = [] }) {
     }
     setSymbols(prev => prev.filter(s => s !== sym));
     setPrices(prev => { const n = { ...prev }; delete n[sym]; return n; });
+    setSubStatus(prev => { const n = { ...prev }; delete n[sym]; return n; });
   };
 
-  const isActive  = status === 'connected' || status === 'connecting';
-  const dotColor  = { connected: '#22c55e', connecting: '#f59e0b', error: '#ef4444', disconnected: '#6b7280' }[status];
-  const dotLabel  = { connected: 'CONNECTED', connecting: 'CONNECTING…', error: 'ERROR', disconnected: 'DISCONNECTED' }[status];
+  const isActive = status === 'connected' || status === 'connecting';
+  const dotColor = { connected: '#22c55e', connecting: '#f59e0b', error: '#ef4444', disconnected: '#6b7280' }[status];
+  const dotLabel = { connected: 'CONNECTED', connecting: 'CONNECTING…', error: 'ERROR', disconnected: 'DISCONNECTED' }[status];
 
   return (
     <div>
@@ -203,26 +218,35 @@ export default function PriceFeedPanel({ keys = [] }) {
 
         {errorMsg && (
           <div style={{
-            marginTop: 10, padding: '8px 12px',
-            borderRadius: 'var(--radius-sm)',
+            marginTop: 10, padding: '8px 12px', borderRadius: 'var(--radius-sm)',
             background: 'var(--bear-lt)', color: 'var(--bear)',
-            fontSize: 12, fontWeight: 500,
-            border: '1px solid #f0b8b8',
+            fontSize: 12, fontWeight: 500, border: '1px solid #f0b8b8',
           }}>
             {errorMsg}
           </div>
         )}
       </div>
 
+      {/* ── Plan limit warning ────────────────────────────────── */}
+      {failCount > 0 && (
+        <div style={{
+          marginBottom: 16, padding: '10px 14px', borderRadius: 'var(--radius-sm)',
+          background: '#fefce8', border: '1px solid #fde047', color: '#713f12',
+          fontSize: 12, lineHeight: 1.5,
+        }}>
+          <strong>{failCount} symbol{failCount > 1 ? 's' : ''} rejected by Twelve Data.</strong>
+          {' '}Your plan's WebSocket subscription limit has been reached.
+          Twelve Data free plans allow 1 symbol; paid plans allow more.
+          Remove failed pairs or upgrade your Twelve Data plan.
+        </div>
+      )}
+
       {/* ── Raw message log ───────────────────────────────────── */}
       {(rawLog.length > 0 || connInfo) && (
         <div style={{ marginBottom: 16 }}>
           <div className="section-heading" style={{ marginBottom: 6 }}>Raw WS Log</div>
           {connInfo && (
-            <div style={{
-              fontFamily: 'var(--font-mono)', fontSize: 11,
-              color: '#94a3b8', marginBottom: 4,
-            }}>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: '#94a3b8', marginBottom: 4 }}>
               URL: {connInfo.url}<br />
               Subscribe: {connInfo.subscribeMsg}
             </div>
@@ -231,7 +255,7 @@ export default function PriceFeedPanel({ keys = [] }) {
             background: '#0f172a', color: '#e2e8f0',
             fontFamily: 'var(--font-mono)', fontSize: 11,
             padding: '10px 12px', borderRadius: 'var(--radius-sm)',
-            maxHeight: 260, overflowY: 'auto',
+            maxHeight: 220, overflowY: 'auto',
             border: '1px solid #1e293b',
           }}>
             {rawLog.length === 0
@@ -239,9 +263,9 @@ export default function PriceFeedPanel({ keys = [] }) {
               : rawLog.map((line, i) => (
                 <div key={i} style={{
                   padding: '1px 0',
-                  color: line.includes('ERROR') || line.includes('CLOSE')
+                  color: line.includes('ERROR') || line.includes('CLOSE') || line.includes('"fail')
                     ? '#f87171'
-                    : line.includes('OPEN') || line.includes('price')
+                    : line.includes('OPEN') || line.includes('"price"')
                       ? '#86efac'
                       : '#e2e8f0',
                 }}>
@@ -253,7 +277,7 @@ export default function PriceFeedPanel({ keys = [] }) {
           <button
             className="add-link"
             style={{ fontSize: 11, marginTop: 4 }}
-            onClick={() => { logRef.current = []; setRawLog([]); }}
+            onClick={() => { logRef.current = []; setRawLog([]); setConnInfo(null); }}
           >
             Clear log
           </button>
@@ -296,50 +320,74 @@ export default function PriceFeedPanel({ keys = [] }) {
           gap: 12,
         }}>
           {symbols.map(sym => {
-            const tick = prices[sym];
-            const dir  = tick?.direction;
+            const tick    = prices[sym];
+            const dir     = tick?.direction;
+            const sub     = subStatus[sym]; // 'ok' | 'fail' | undefined
             const priceColor = dir === 'up' ? 'var(--bull)' : dir === 'down' ? 'var(--bear)' : 'inherit';
+
             return (
-              <div key={sym} className="card" style={{ position: 'relative', padding: '14px 16px' }}>
+              <div
+                key={sym}
+                className="card"
+                style={{
+                  position: 'relative', padding: '14px 16px',
+                  opacity: sub === 'fail' ? 0.6 : 1,
+                  border: sub === 'fail' ? '1px solid #fca5a5' : undefined,
+                }}
+              >
                 <button
                   className="add-link"
                   onClick={() => removeSymbol(sym)}
                   title={`Remove ${sym}`}
                   style={{
                     position: 'absolute', top: 8, right: 8,
-                    color: 'var(--muted)', fontSize: 13, padding: '2px 6px',
-                    lineHeight: 1,
+                    color: 'var(--muted)', fontSize: 13, padding: '2px 6px', lineHeight: 1,
                   }}
                 >
                   ✕
                 </button>
 
-                <div style={{
-                  fontFamily: 'var(--font-mono)', fontWeight: 700,
-                  fontSize: 13, letterSpacing: '0.04em', marginBottom: 6,
-                }}>
-                  {sym}
+                {/* Symbol + subscription badge */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                  <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, fontSize: 13, letterSpacing: '0.04em' }}>
+                    {sym}
+                  </span>
+                  {sub === 'ok' && (
+                    <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '0.08em', color: '#16a34a',
+                      background: '#dcfce7', borderRadius: 3, padding: '1px 5px' }}>LIVE</span>
+                  )}
+                  {sub === 'fail' && (
+                    <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '0.08em', color: '#dc2626',
+                      background: '#fee2e2', borderRadius: 3, padding: '1px 5px' }}>FAILED</span>
+                  )}
                 </div>
 
                 <div style={{
                   fontFamily: 'var(--font-mono)', fontSize: 22, fontWeight: 700,
-                  color: priceColor, transition: 'color 0.3s',
-                  marginBottom: 6,
+                  color: sub === 'fail' ? 'var(--muted)' : priceColor,
+                  transition: 'color 0.3s', marginBottom: 6,
                 }}>
-                  {tick ? fmtPrice(tick.price, sym) : <span style={{ color: 'var(--muted)' }}>—</span>}
+                  {sub === 'fail'
+                    ? <span style={{ fontSize: 13 }}>plan limit</span>
+                    : tick
+                      ? fmtPrice(tick.price, sym)
+                      : <span style={{ color: 'var(--muted)' }}>—</span>
+                  }
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   <span style={{ fontSize: 14 }}>
-                    {dir === 'up'
-                      ? <span style={{ color: '#22c55e' }}>▲</span>
-                      : dir === 'down'
-                        ? <span style={{ color: '#ef4444' }}>▼</span>
-                        : <span style={{ color: 'var(--muted)' }}>—</span>
+                    {sub === 'fail'
+                      ? <span style={{ color: '#ef4444', fontSize: 12 }}>✕</span>
+                      : dir === 'up'
+                        ? <span style={{ color: '#22c55e' }}>▲</span>
+                        : dir === 'down'
+                          ? <span style={{ color: '#ef4444' }}>▼</span>
+                          : <span style={{ color: 'var(--muted)' }}>—</span>
                     }
                   </span>
                   <span style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'var(--font-mono)' }}>
-                    {tick ? fmtTime(tick.updatedAt) : 'waiting…'}
+                    {sub === 'fail' ? 'not subscribed' : tick ? fmtTime(tick.updatedAt) : 'waiting…'}
                   </span>
                 </div>
               </div>
