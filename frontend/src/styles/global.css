@@ -1122,7 +1122,11 @@ html, body, #root {
   gap: 2px;
   border-bottom: 2px solid var(--border);
   margin-bottom: var(--sp-lg);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
 }
+.tabs::-webkit-scrollbar { display: none; }
 
 .tab {
   font-family: var(--font-mono);
@@ -1137,6 +1141,8 @@ html, body, #root {
   color: var(--muted);
   cursor: pointer;
   transition: all .15s;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .tab:hover { color: var(--ink); }
