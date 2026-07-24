@@ -202,17 +202,11 @@ async function logApiCall(db, source, symbol, timeframe, success = 1) {
 }
 
 // ── Twelve Data key rotation ──────────────────────────────
-// Three keys, tried in order; a key that comes back exhausted (daily credit
-// cap) is marked and skipped until the next UTC midnight instead of failing
-// the whole fetch. Falls through to Yahoo only once all three are exhausted.
-
-const TWELVE_DATA_KEYS_ENV = [
-  'TWELVE_DATA_API_KEY_1',
-  'TWELVE_DATA_API_KEY_2',
-  'TWELVE_DATA_API_KEY_3',
-];
-
-const KEY_NAMES = ['twelvedata_1', 'twelvedata_2', 'twelvedata_3'];
+// Keys live in D1 (api_keys, source='twelvedata') rather than being a fixed
+// env-var list, so rotation works dynamically regardless of how many keys
+// are configured. A key that comes back exhausted (daily credit cap) is
+// marked and skipped until the next UTC midnight instead of failing the
+// whole fetch. Falls through to Yahoo only once every key is exhausted.
 
 function nextMidnightUTC() {
   const now = new Date();
@@ -228,16 +222,31 @@ async function resetExhaustedKeys(db) {
   ).bind(nextMidnightUTC(), now).run();
 }
 
-async function getActiveKey(db, env) {
-  const { results } = await db.prepare(`SELECT * FROM api_key_state ORDER BY key_name ASC`).all();
+async function ensureKeyStateRow(db, keyName) {
+  await db.prepare(
+    `INSERT OR IGNORE INTO api_key_state (key_name, exhausted, calls_today, reset_at) VALUES (?, 0, 0, 0)`
+  ).bind(keyName).run();
+}
 
-  for (let i = 0; i < KEY_NAMES.length; i++) {
-    const state = results.find(r => r.key_name === KEY_NAMES[i]);
-    if (!state || state.exhausted === 0) {
-      return { keyName: KEY_NAMES[i], apiKey: env[TWELVE_DATA_KEYS_ENV[i]], index: i };
+async function getActiveTwelveDataKey(db) {
+  await resetExhaustedKeys(db);
+
+  const { results } = await db.prepare(`
+    SELECT ak.id, ak.key_value, ak.label,
+           COALESCE(aks.exhausted, 0) as exhausted,
+           COALESCE(aks.calls_today, 0) as calls_today
+    FROM api_keys ak
+    LEFT JOIN api_key_state aks ON ak.id = aks.key_name
+    WHERE ak.source='twelvedata' AND ak.enabled=1
+    ORDER BY ak.label ASC
+  `).all();
+
+  for (const row of (results ?? [])) {
+    if (row.exhausted === 0) {
+      return { keyName: row.id, apiKey: row.key_value, label: row.label };
     }
   }
-  return null; // all keys exhausted — fall through to Yahoo
+  return null; // all keys exhausted (or none configured) — fall through to Yahoo
 }
 
 async function markKeyExhausted(db, keyName) {
@@ -262,33 +271,34 @@ function isTwelveDataExhausted(data) {
 }
 
 async function fetchTwelveDataWithRotation(symbol, tf, db, env, _log = null, count = 10) {
-  await resetExhaustedKeys(db);
-
   const interval = tfToTwelveInterval(tf);
 
-  for (let attempt = 0; attempt < KEY_NAMES.length; attempt++) {
-    const active = await getActiveKey(db, env);
-    if (!active) break; // all keys exhausted
+  const maxAttempts = 5; // safety cap — more than the realistic key count
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const active = await getActiveTwelveDataKey(db);
+    if (!active) break; // all keys exhausted (or none configured)
+
+    await ensureKeyStateRow(db, active.keyName);
 
     const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=${interval}&outputsize=${count}&order=DESC&timezone=America/New_York&apikey=${active.apiKey}`;
 
     try {
       const res = await fetch(url);
       if (!res.ok) {
-        if (_log) _log.push(`[WARN] Twelve Data HTTP ${res.status} for ${symbol} ${tf} on ${active.keyName}`);
-        continue;
+        if (_log) _log.push(`[WARN] Twelve Data HTTP ${res.status} for ${symbol} ${tf} on ${active.label}`);
+        return null;
       }
 
       const data = await res.json();
 
       if (isTwelveDataExhausted(data)) {
         await markKeyExhausted(db, active.keyName);
-        if (_log) _log.push(`[WARN] ${active.keyName} exhausted — rotating`);
-        continue;
+        if (_log) _log.push(`[WARN] ${active.label} exhausted — rotating`);
+        continue; // try next key
       }
 
       if (data.status === 'error' || !data.values || data.values.length < 3) {
-        if (_log) _log.push(`[WARN] Twelve Data no data for ${symbol} ${tf} on ${active.keyName}: ${data.message ?? 'unknown'}`);
+        if (_log) _log.push(`[WARN] Twelve Data no data for ${symbol} ${tf} on ${active.label}: ${data.message ?? 'unknown'}`);
         return null; // symbol error — don't rotate, just fail
       }
 
@@ -304,7 +314,7 @@ async function fetchTwelveDataWithRotation(symbol, tf, db, env, _log = null, cou
       }));
 
     } catch (e) {
-      if (_log) _log.push(`[ERROR] Twelve Data fetch error ${symbol} ${tf} on ${active.keyName}: ${e.message}`);
+      if (_log) _log.push(`[ERROR] Twelve Data fetch error ${symbol} ${tf} on ${active.label}: ${e.message}`);
       return null;
     }
   }

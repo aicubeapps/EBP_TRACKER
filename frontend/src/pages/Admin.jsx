@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import api from '../lib/api';
 
-const TABS = ['Users', 'Payments', 'Invite Tokens', 'Tier Config'];
+const TABS = ['Users', 'Payments', 'Invite Tokens', 'Tier Config', 'API Keys', 'User Limits'];
 
 export default function Admin() {
   const { getToken }                  = useAuth();
@@ -12,10 +12,14 @@ export default function Admin() {
   const [payments, setPayments]       = useState([]);
   const [tokens, setTokens]           = useState([]);
   const [tiers, setTiers]             = useState([]);
+  const [keys, setKeys]               = useState([]);
   const [loading, setLoading]         = useState(true);
   const [editingTier, setEditingTier] = useState(null);
   const [tierForm, setTierForm]       = useState({});
   const [savingTier, setSavingTier]   = useState(false);
+  const [newKey, setNewKey]           = useState({ source: 'twelvedata', key_value: '', label: '' });
+  const [addingKey, setAddingKey]     = useState(false);
+  const [editingLimit, setEditingLimit] = useState({});
 
   useEffect(() => {
     (async () => {
@@ -25,16 +29,18 @@ export default function Admin() {
         const admin = me.is_admin === 1;
         setIsAdmin(admin);
         if (admin) {
-          const [u, p, t, tc] = await Promise.all([
+          const [u, p, t, tc, k] = await Promise.all([
             api.get('/admin/users',    token),
             api.get('/admin/payments', token),
             api.get('/admin/tokens',   token),
             api.get('/admin/tiers',    token),
+            api.get('/admin/api-keys', token),
           ]);
           setUsers(Array.isArray(u) ? u : []);
           setPayments(Array.isArray(p) ? p : []);
           setTokens(Array.isArray(t) ? t : []);
           setTiers(Array.isArray(tc) ? tc : []);
+          setKeys(Array.isArray(k) ? k : []);
         }
       } catch (e) {
         console.error('Admin load error:', e);
@@ -71,6 +77,45 @@ export default function Admin() {
     if (!window.confirm('Expire this user account?')) return;
     const token = await getToken();
     await api.post(`/admin/expire/${userId}`, {}, token);
+    const u = await api.get('/admin/users', token);
+    setUsers(Array.isArray(u) ? u : []);
+  };
+
+  const loadKeys = async () => {
+    const token = await getToken();
+    const k = await api.get('/admin/api-keys', token);
+    setKeys(Array.isArray(k) ? k : []);
+  };
+
+  const handleAddKey = async () => {
+    setAddingKey(true);
+    try {
+      const token = await getToken();
+      await api.post('/admin/api-keys', newKey, token);
+      setNewKey({ source: 'twelvedata', key_value: '', label: '' });
+      await loadKeys();
+    } finally {
+      setAddingKey(false);
+    }
+  };
+
+  const handleToggleKey = async (id, enabled) => {
+    const token = await getToken();
+    await api.patch(`/admin/api-keys/${id}`, { enabled }, token);
+    await loadKeys();
+  };
+
+  const handleDeleteKey = async (id) => {
+    if (!window.confirm('Delete this API key?')) return;
+    const token = await getToken();
+    await api.delete(`/admin/api-keys/${id}`, token);
+    await loadKeys();
+  };
+
+  const handleUpdateLimit = async (userId, limit) => {
+    const token = await getToken();
+    await api.patch(`/admin/users/${userId}/asset-limit`, { asset_limit: parseInt(limit, 10) }, token);
+    setEditingLimit(p => ({ ...p, [userId]: undefined }));
     const u = await api.get('/admin/users', token);
     setUsers(Array.isArray(u) ? u : []);
   };
@@ -268,6 +313,119 @@ export default function Admin() {
           {tiers.length === 0 && (
             <div className="banner banner-info">No tier config found. Run the SQL migration in D1 Console first.</div>
           )}
+        </div>
+      )}
+
+      {tab === 4 && (
+        <div>
+          <div className="section-heading">API Keys</div>
+          <div className="card" style={{ padding: 0 }}>
+            <div className="table-wrap">
+              <table className="alert-table">
+                <thead>
+                  <tr>
+                    <th>Label</th><th>Source</th><th>Key</th>
+                    <th>Status</th><th>Calls Today</th><th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {keys.length === 0 ? (
+                    <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--muted)', padding: 24 }}>No API keys yet</td></tr>
+                  ) : keys.map(k => (
+                    <tr key={k.id}>
+                      <td className="text-mono">{k.label}</td>
+                      <td><span className="badge badge-forex">{k.source}</span></td>
+                      <td className="text-mono">{k.key_preview}</td>
+                      <td>
+                        <span className={`badge ${k.exhausted ? 'badge-bear' : 'badge-t3'}`}>
+                          {k.exhausted ? 'Exhausted' : k.enabled ? 'Active' : 'Disabled'}
+                        </span>
+                      </td>
+                      <td className="tabular-nums">{k.calls_today}</td>
+                      <td>
+                        <button className="add-link" onClick={() => handleToggleKey(k.id, !k.enabled)}>
+                          {k.enabled ? 'Disable' : 'Enable'}
+                        </button>
+                        {' · '}
+                        <button className="add-link" style={{ color: '#ef4444' }} onClick={() => handleDeleteKey(k.id)}>
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="divider" />
+          <div className="section-heading">Add New Key</div>
+          <div className="config-row">
+            <select className="select-sm" value={newKey.source}
+              onChange={e => setNewKey(p => ({ ...p, source: e.target.value }))}>
+              <option value="twelvedata">Twelve Data</option>
+              <option value="yahoo">Yahoo</option>
+            </select>
+            <input className="search-input" style={{ maxWidth: 200 }}
+              placeholder="Label e.g. Key 4"
+              value={newKey.label}
+              onChange={e => setNewKey(p => ({ ...p, label: e.target.value }))} />
+            <input className="search-input" style={{ maxWidth: 300 }}
+              placeholder="API key value"
+              type="password"
+              value={newKey.key_value}
+              onChange={e => setNewKey(p => ({ ...p, key_value: e.target.value }))} />
+            <button className="search-btn" onClick={handleAddKey} disabled={addingKey || !newKey.key_value || !newKey.label}>
+              {addingKey ? '…' : 'Add'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {tab === 5 && (
+        <div>
+          <div className="section-heading">User Asset Limits</div>
+          <div className="card" style={{ padding: 0 }}>
+            <div className="table-wrap">
+              <table className="alert-table">
+                <thead>
+                  <tr>
+                    <th>User</th><th>Email</th><th>Current Limit</th>
+                    <th>Assets Used</th><th>Update Limit</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {users.length === 0 ? (
+                    <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--muted)', padding: 24 }}>No users yet</td></tr>
+                  ) : users.map(u => (
+                    <tr key={u.id}>
+                      <td className="text-mono">{u.name ?? '—'}</td>
+                      <td className="text-mono">{u.email}</td>
+                      <td className="tabular-nums">{u.asset_limit ?? 5}</td>
+                      <td className="tabular-nums">{u.asset_count ?? 0}</td>
+                      <td>
+                        <div className="config-row" style={{ marginBottom: 0 }}>
+                          <input
+                            className="select-sm"
+                            type="number"
+                            min="1"
+                            max="50"
+                            style={{ width: 60 }}
+                            value={editingLimit[u.id] ?? u.asset_limit ?? 5}
+                            onChange={e => setEditingLimit(p => ({ ...p, [u.id]: e.target.value }))}
+                          />
+                          <button className="add-link"
+                            onClick={() => handleUpdateLimit(u.id, editingLimit[u.id] ?? u.asset_limit ?? 5)}>
+                            Save
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       )}
     </div>

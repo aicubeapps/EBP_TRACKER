@@ -313,6 +313,8 @@ html, body, #root {
 .badge-equity    { background: #f0fdf4; color: #166534; }
 .badge-etf       { background: #fef3c7; color: #92400e; }
 .badge-nse       { background: #dcfce7; color: #166534; }
+.badge-bull      { background: var(--bull-lt); color: var(--bull); }
+.badge-bear      { background: var(--bear-lt); color: var(--bear); }
 
 /* ── Alert type badges ── */
 .badge-ebp   { background: #dbeafe; color: #1e40af; }
@@ -1343,6 +1345,68 @@ html, body, #root {
 }
 
 .overlay-icon { font-size: 40px; margin-bottom: var(--sp-sm); }
+
+/* ── Modal ── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(14, 12, 10, 0.6);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-md);
+}
+
+.modal-box {
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--sp-lg);
+  max-width: 400px;
+  width: 100%;
+  box-shadow: 0 16px 48px rgba(0,0,0,0.3);
+}
+
+.modal-title {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--ink);
+  margin-bottom: var(--sp-md);
+  padding-bottom: var(--sp-sm);
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-body {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.modal-body strong {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.modal-close-btn {
+  margin-top: var(--sp-lg);
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  padding: 10px;
+  background: var(--nav-bg);
+  color: #f1f5f9;
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background .15s;
+}
+
+.modal-close-btn:hover { background: var(--nav-hover); }
 
 /* ── Skeleton loading ── */
 .skeleton {

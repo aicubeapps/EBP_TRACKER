@@ -280,17 +280,11 @@ async function logApiCall(db, source, symbol, timeframe, success = 1) {
 }
 
 // ── Twelve Data key rotation ──────────────────────────────
-// Three keys, tried in order; a key that comes back exhausted (daily credit
-// cap) is marked and skipped until the next UTC midnight instead of failing
-// the whole fetch. Falls through to Yahoo only once all three are exhausted.
-
-const TWELVE_DATA_KEYS_ENV = [
-  'TWELVE_DATA_API_KEY_1',
-  'TWELVE_DATA_API_KEY_2',
-  'TWELVE_DATA_API_KEY_3',
-];
-
-const KEY_NAMES = ['twelvedata_1', 'twelvedata_2', 'twelvedata_3'];
+// Keys live in D1 (api_keys, source='twelvedata') rather than being a fixed
+// env-var list, so rotation works dynamically regardless of how many keys
+// are configured. A key that comes back exhausted (daily credit cap) is
+// marked and skipped until the next UTC midnight instead of failing the
+// whole fetch. Falls through to Yahoo only once every key is exhausted.
 
 function nextMidnightUTC() {
   const now = new Date();
@@ -306,16 +300,31 @@ async function resetExhaustedKeys(db) {
   ).bind(nextMidnightUTC(), now).run();
 }
 
-async function getActiveKey(db, env) {
-  const { results } = await db.prepare(`SELECT * FROM api_key_state ORDER BY key_name ASC`).all();
+async function ensureKeyStateRow(db, keyName) {
+  await db.prepare(
+    `INSERT OR IGNORE INTO api_key_state (key_name, exhausted, calls_today, reset_at) VALUES (?, 0, 0, 0)`
+  ).bind(keyName).run();
+}
 
-  for (let i = 0; i < KEY_NAMES.length; i++) {
-    const state = results.find(r => r.key_name === KEY_NAMES[i]);
-    if (!state || state.exhausted === 0) {
-      return { keyName: KEY_NAMES[i], apiKey: env[TWELVE_DATA_KEYS_ENV[i]], index: i };
+async function getActiveTwelveDataKey(db) {
+  await resetExhaustedKeys(db);
+
+  const { results } = await db.prepare(`
+    SELECT ak.id, ak.key_value, ak.label,
+           COALESCE(aks.exhausted, 0) as exhausted,
+           COALESCE(aks.calls_today, 0) as calls_today
+    FROM api_keys ak
+    LEFT JOIN api_key_state aks ON ak.id = aks.key_name
+    WHERE ak.source='twelvedata' AND ak.enabled=1
+    ORDER BY ak.label ASC
+  `).all();
+
+  for (const row of (results ?? [])) {
+    if (row.exhausted === 0) {
+      return { keyName: row.id, apiKey: row.key_value, label: row.label };
     }
   }
-  return null; // all keys exhausted — fall through to Yahoo
+  return null; // all keys exhausted (or none configured) — fall through to Yahoo
 }
 
 async function markKeyExhausted(db, keyName) {
@@ -340,32 +349,33 @@ function isTwelveDataExhausted(data) {
 }
 
 async function fetchTwelveDataWithRotation(symbol, tf, db, env, count = 10) {
-  await resetExhaustedKeys(db);
-
   const interval = tfToTwelveInterval(tf);
 
-  for (let attempt = 0; attempt < KEY_NAMES.length; attempt++) {
-    const active = await getActiveKey(db, env);
-    if (!active) break; // all keys exhausted
+  const maxAttempts = 5; // safety cap — more than the realistic key count
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const active = await getActiveTwelveDataKey(db);
+    if (!active) break; // all keys exhausted (or none configured)
+
+    await ensureKeyStateRow(db, active.keyName);
 
     const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=${interval}&outputsize=${count}&order=DESC&timezone=America/New_York&apikey=${active.apiKey}`;
 
     try {
       const res = await fetch(url);
       if (!res.ok) {
-        console.warn(`[TWELVE_DATA] HTTP ${res.status} for ${symbol} ${tf} on ${active.keyName}`);
-        continue;
+        console.warn(`[TWELVE_DATA] HTTP ${res.status} for ${symbol} ${tf} on ${active.label}`);
+        return null;
       }
 
       const data = await res.json();
 
       if (isTwelveDataExhausted(data)) {
         await markKeyExhausted(db, active.keyName);
-        continue;
+        continue; // try next key
       }
 
       if (data.status === 'error' || !data.values || data.values.length < 3) {
-        console.warn(`[TWELVE_DATA] No data for ${symbol} ${tf} on ${active.keyName}: ${data.message ?? 'unknown'}`);
+        console.warn(`[TWELVE_DATA] No data for ${symbol} ${tf} on ${active.label}: ${data.message ?? 'unknown'}`);
         return null; // symbol error — don't rotate, just fail
       }
 
@@ -381,7 +391,7 @@ async function fetchTwelveDataWithRotation(symbol, tf, db, env, count = 10) {
       }));
 
     } catch (e) {
-      console.error(`[TWELVE_DATA] Fetch error ${symbol} ${tf} on ${active.keyName}: ${e.message}`);
+      console.error(`[TWELVE_DATA] Fetch error ${symbol} ${tf} on ${active.label}: ${e.message}`);
       return null;
     }
   }
@@ -434,26 +444,8 @@ function normaliseSymbol(symbol) {
   return symbol; // NSE stocks / indices etc. — passthrough
 }
 
-function getAssetType(instrumentType, symbol) {
-  if (!instrumentType) return guessAssetType(symbol); // fallback when Yahoo lookup failed
-
-  const it = instrumentType.toUpperCase();
-
-  if (it === 'CURRENCY')       return 'forex';
-  if (it === 'CRYPTOCURRENCY') return 'crypto';
-  if (it === 'INDEX')          return 'index';
-  if (it === 'EQUITY') {
-    if (symbol.endsWith('.NS') || symbol.startsWith('NSE:')) return 'nse';
-    return 'equity';
-  }
-  if (it === 'FUTURE')         return 'commodity';
-  if (it === 'ETF')            return 'etf';
-
-  return guessAssetType(symbol); // fallback for unknown types
-}
-
-// String-only heuristic — used when Yahoo doesn't return an instrumentType
-// (lookup failed / symbol not found there). Kept deliberately conservative.
+// String-only heuristic — used when the Twelve Data key pool is exhausted
+// or its symbol_search request fails outright. Kept deliberately conservative.
 function guessAssetType(symbol) {
   if (symbol.includes('/')) {
     const base = symbol.split('/')[0];
@@ -1052,7 +1044,7 @@ router.post('/user/assets', async (req, env) => {
     'SELECT COUNT(*) as cnt FROM user_assets WHERE user_id = ? AND active = 1'
   ).bind(clerkUser.id).first();
   if (count.cnt >= user.asset_limit) {
-    return json({ error: 'Asset slot limit reached. Upgrade to add more.' }, 403, origin);
+    return json({ error: 'asset_limit_reached', limit: user.asset_limit }, 403, origin);
   }
 
   const symbolStr = normaliseSymbol(String(body.symbol ?? '').toUpperCase().trim());
@@ -1082,6 +1074,20 @@ router.post('/user/assets', async (req, env) => {
   return json({ id, symbol: symbolStr }, 201, origin);
 });
 
+router.get('/user/assets/count', async (req, env) => {
+  const { user: clerkUser, origin, error } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  const row = await env.DB.prepare(
+    'SELECT COUNT(*) as cnt FROM user_assets WHERE user_id = ? AND active = 1'
+  ).bind(clerkUser.id).first();
+  const userRow = await env.DB.prepare(
+    'SELECT asset_limit FROM users WHERE id = ?'
+  ).bind(clerkUser.id).first();
+  const count = row?.cnt ?? 0;
+  const limit = userRow?.asset_limit ?? 5;
+  return json({ count, limit, remaining: Math.max(0, limit - count) }, 200, origin);
+});
+
 router.delete('/user/assets/:id', async (req, env) => {
   const { user: clerkUser, origin, error, params } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
@@ -1104,14 +1110,68 @@ router.patch('/user/assets/:id/bias-overrides', async (req, env) => {
 router.get('/user/assets/validate', async (req, env) => {
   const { user: clerkUser, origin, error } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const url    = new URL(req.url);
-  const symbol = normaliseSymbol((url.searchParams.get('symbol') ?? '').toUpperCase().trim());
-  if (!symbol) return json({ valid: false, error: 'Symbol is required' }, 400, origin);
+  const url       = new URL(req.url);
+  const rawSymbol = url.searchParams.get('symbol');
+  if (!rawSymbol) return json({ valid: false, error: 'Symbol is required' }, 400, origin);
 
-  const validation = await validateSymbol(symbol, env.TWELVE_DATA_API_KEY);
-  const asset_type = getAssetType(validation.instrumentType, symbol);
-  return json({ valid: validation.valid, asset_type }, 200, origin);
+  const symbol = normaliseSymbol(rawSymbol.trim().toUpperCase());
+
+  // Twelve Data's symbol_search has no exact entry for bare index names like
+  // NIFTY/SENSEX/DJI — it falls back to an unrelated ETF or namesake stock
+  // (e.g. "SPX" matches a Common Stock ticker, not the S&P 500 index).
+  // Short-circuit these before ever hitting the API.
+  if (['NIFTY', 'SENSEX', 'SPX', 'DJI', 'NDX'].includes(symbol)) {
+    return json({ valid: true, symbol, asset_type: 'index' }, 200, origin);
+  }
+
+  const active = await getActiveTwelveDataKey(env.DB);
+
+  if (!active) {
+    // All keys exhausted (or none configured) — fall back to a plain guess
+    return json({ valid: true, symbol, asset_type: guessAssetType(symbol), source: 'fallback' }, 200, origin);
+  }
+
+  try {
+    const res  = await fetch(
+      `https://api.twelvedata.com/symbol_search?symbol=${encodeURIComponent(symbol)}&outputsize=5&apikey=${active.apiKey}`
+    );
+    const data = await res.json();
+
+    if (!data.data || data.data.length === 0) {
+      return json({ valid: false, error: 'Symbol not found' }, 200, origin);
+    }
+
+    const match = data.data.find(d =>
+      d.symbol.toUpperCase() === symbol.toUpperCase() ||
+      d.symbol.toUpperCase().replace('/', '') === symbol.toUpperCase().replace('/', '')
+    ) ?? data.data[0];
+
+    const asset_type = mapTwelveDataType(match.instrument_type);
+
+    return json({
+      valid: true,
+      symbol,
+      asset_type,
+      exchange: match.exchange,
+      name: match.instrument_name,
+    }, 200, origin);
+
+  } catch (e) {
+    return json({ valid: true, symbol, asset_type: guessAssetType(symbol), source: 'fallback' }, 200, origin);
+  }
 });
+
+function mapTwelveDataType(instrumentType) {
+  if (!instrumentType) return 'forex';
+  const t = instrumentType.toUpperCase();
+  if (t === 'FOREX PAIR' || t === 'PHYSICAL CURRENCY') return 'forex';
+  if (t === 'DIGITAL CURRENCY') return 'crypto';
+  if (t === 'INDEX') return 'index';
+  if (t === 'ETF') return 'etf';
+  if (t === 'COMMON STOCK') return 'equity';
+  if (t === 'COMMODITY') return 'commodity';
+  return 'forex';
+}
 
 // ── EBP Configs ───────────────────────────────────────────────
 
@@ -1285,17 +1345,19 @@ router.get('/health/datasources', async (req, env) => {
      MAX(CASE WHEN called_at > ? THEN success ELSE 0 END) as lastSuccess
      FROM api_call_log GROUP BY source`
   ).bind(dayStart, dayStart).all();
-  const sources = {
-    twelvedata_1: { lastCall: null, callsToday: 0, lastSuccess: false },
-    twelvedata_2: { lastCall: null, callsToday: 0, lastSuccess: false },
-    twelvedata_3: { lastCall: null, callsToday: 0, lastSuccess: false },
-    yahoo:        { lastCall: null, callsToday: 0, lastSuccess: false },
-  };
+
+  const { results: tdKeys } = await env.DB.prepare(
+    `SELECT id FROM api_keys WHERE source='twelvedata' AND enabled=1`
+  ).all();
+  const keyIds = (tdKeys ?? []).map(k => k.id);
+
+  const sources = { yahoo: { lastCall: null, callsToday: 0, lastSuccess: false } };
+  for (const id of keyIds) sources[id] = { lastCall: null, callsToday: 0, lastSuccess: false };
   for (const r of (results ?? [])) {
     sources[r.source] = { lastCall: r.lastCall, callsToday: r.callsToday, lastSuccess: r.lastSuccess === 1 };
   }
-  const twelvedataToday = KEY_NAMES.reduce((sum, k) => sum + (sources[k]?.callsToday ?? 0), 0);
-  return json({ sources, twelvedataToday, twelvedataLimit: 800 * KEY_NAMES.length }, 200, origin);
+  const twelvedataToday = keyIds.reduce((sum, id) => sum + (sources[id]?.callsToday ?? 0), 0);
+  return json({ sources, twelvedataToday, twelvedataLimit: 800 * (keyIds.length || 1) }, 200, origin);
 });
 
 // ── Alerts ────────────────────────────────────────────────────
@@ -1622,6 +1684,73 @@ router.post('/admin/expire/:id', async (req, env) => {
     'UPDATE users SET active = 0, expires_at = ? WHERE id = ?'
   ).bind(Date.now(), params.id).run();
   return json({ success: true }, 200, origin);
+});
+
+// ── API key management ───────────────────────────────────────
+
+router.get('/admin/api-keys', async (req, env) => {
+  const { user: clerkUser, origin, error } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
+  const { results } = await env.DB.prepare(`
+    SELECT ak.id, ak.source, ak.label, ak.enabled, ak.added_at,
+           COALESCE(aks.exhausted, 0) as exhausted,
+           COALESCE(aks.calls_today, 0) as calls_today,
+           '****' || substr(ak.key_value, -4) as key_preview
+    FROM api_keys ak
+    LEFT JOIN api_key_state aks ON ak.id = aks.key_name
+    ORDER BY ak.source, ak.label ASC
+  `).all();
+  return json(results ?? [], 200, origin);
+});
+
+router.post('/admin/api-keys', async (req, env) => {
+  const { user: clerkUser, origin, error } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
+  const { source, key_value, label } = await req.json();
+  if (!source || !key_value || !label) return json({ error: 'source, key_value, label required' }, 400, origin);
+  const id  = crypto.randomUUID();
+  const now = Date.now();
+  await env.DB.prepare(
+    `INSERT INTO api_keys (id, source, key_value, label, enabled, added_at, added_by) VALUES (?,?,?,?,1,?,?)`
+  ).bind(id, source, key_value, label, now, clerkUser.id).run();
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO api_key_state (key_name, exhausted, calls_today, reset_at) VALUES (?,0,0,0)`
+  ).bind(id).run();
+  return json({ ok: true, id }, 201, origin);
+});
+
+router.patch('/admin/api-keys/:id', async (req, env) => {
+  const { user: clerkUser, origin, error, params } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
+  const { enabled } = await req.json();
+  await env.DB.prepare(`UPDATE api_keys SET enabled=? WHERE id=?`).bind(enabled ? 1 : 0, params.id).run();
+  return json({ ok: true }, 200, origin);
+});
+
+router.delete('/admin/api-keys/:id', async (req, env) => {
+  const { user: clerkUser, origin, error, params } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
+  await env.DB.prepare(`DELETE FROM api_keys WHERE id=?`).bind(params.id).run();
+  await env.DB.prepare(`DELETE FROM api_key_state WHERE key_name=?`).bind(params.id).run();
+  return json({ ok: true }, 200, origin);
+});
+
+// ── Per-user asset limit ──────────────────────────────────────
+
+router.patch('/admin/users/:id/asset-limit', async (req, env) => {
+  const { user: clerkUser, origin, error, params } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
+  const { asset_limit } = await req.json();
+  if (!asset_limit || asset_limit < 1 || asset_limit > 50) {
+    return json({ error: 'asset_limit must be between 1 and 50' }, 400, origin);
+  }
+  await env.DB.prepare(`UPDATE users SET asset_limit=? WHERE id=?`).bind(asset_limit, params.id).run();
+  return json({ ok: true, asset_limit }, 200, origin);
 });
 
 router.get('/admin/tiers', async (req, env) => {

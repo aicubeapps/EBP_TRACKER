@@ -260,7 +260,21 @@ CREATE TABLE IF NOT EXISTS api_call_log (
 );
 CREATE INDEX IF NOT EXISTS idx_api_call_log_source_time ON api_call_log(source, called_at);
 
--- ── Twelve Data 3-key rotation ───────────────────────────────
+-- ── Twelve Data key rotation ─────────────────────────────────
+-- api_keys holds the actual key material (admin-managed via /admin/api-keys)
+-- so rotation works dynamically regardless of how many keys are configured.
+-- api_key_state.key_name references api_keys.id.
+CREATE TABLE IF NOT EXISTS api_keys (
+  id         TEXT PRIMARY KEY,
+  source     TEXT NOT NULL,
+  key_value  TEXT NOT NULL,
+  label      TEXT NOT NULL,
+  enabled    INTEGER DEFAULT 1,
+  added_at   INTEGER NOT NULL,
+  added_by   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_api_keys_source ON api_keys(source, enabled);
+
 CREATE TABLE IF NOT EXISTS api_key_state (
   key_name     TEXT PRIMARY KEY,
   exhausted    INTEGER DEFAULT 0,
@@ -270,5 +284,9 @@ CREATE TABLE IF NOT EXISTS api_key_state (
 );
 
 -- Seed rows (D1 Console — INSERT OR IGNORE is safe to re-run):
+-- INSERT INTO api_keys (id, source, key_value, label, enabled, added_at, added_by)
+-- VALUES ('tdkey-001', 'twelvedata', 'YOUR_KEY_1', 'Twelve Data Key 1', 1, unixepoch()*1000, 'system'),
+--        ('tdkey-002', 'twelvedata', 'YOUR_KEY_2', 'Twelve Data Key 2', 1, unixepoch()*1000, 'system'),
+--        ('tdkey-003', 'twelvedata', 'YOUR_KEY_3', 'Twelve Data Key 3', 1, unixepoch()*1000, 'system');
 -- INSERT OR IGNORE INTO api_key_state (key_name, exhausted, calls_today, reset_at)
--- VALUES ('twelvedata_1', 0, 0, 0), ('twelvedata_2', 0, 0, 0), ('twelvedata_3', 0, 0, 0);
+-- VALUES ('tdkey-001', 0, 0, 0), ('tdkey-002', 0, 0, 0), ('tdkey-003', 0, 0, 0);

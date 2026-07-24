@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@clerk/clerk-react';
 import { useAssets } from '../hooks/useAssets';
@@ -16,6 +16,18 @@ export default function Dashboard() {
   const [query, setQuery]                     = useState('');
   const [validationState, setValidationState] = useState(null); // null | 'validating' | 'invalid' | 'duplicate'
   const [addError, setAddError]               = useState(null);
+  const [showLimitModal, setShowLimitModal]   = useState(false);
+  const [assetCount, setAssetCount]           = useState({ count: 0, limit: 5, remaining: 5 });
+
+  const fetchAssetCount = useCallback(async () => {
+    try {
+      const token = await getToken();
+      const data  = await api.get('/user/assets/count', token);
+      setAssetCount(data);
+    } catch {}
+  }, [getToken]);
+
+  useEffect(() => { fetchAssetCount(); }, [fetchAssetCount, assets]);
 
   async function handleAddAsset() {
     const symbol = query.trim().toUpperCase();
@@ -35,12 +47,17 @@ export default function Dashboard() {
         setValidationState('invalid');
         return;
       }
-      await addAsset(symbol, symbol, data.asset_type ?? 'forex');
+      await addAsset(data.symbol ?? symbol, data.symbol ?? symbol, data.asset_type ?? 'forex');
       setValidationState(null);
       setQuery('');
+      fetchAssetCount();
     } catch (e) {
       setValidationState(null);
-      setAddError(e.message);
+      if (e.message === 'asset_limit_reached') {
+        setShowLimitModal(true);
+      } else {
+        setAddError(e.message);
+      }
     }
   }
 
@@ -50,20 +67,26 @@ export default function Dashboard() {
         <div className="search-input-wrap">
           <input
             className="search-input"
-            placeholder="Search and add asset — EUR/USD, NIFTY, BTC/USD…"
+            placeholder="Enter symbol — EURUSD, XAU/USD, NIFTY, BTC/USD…"
             value={query}
             onChange={e => { setQuery(e.target.value); setValidationState(null); setAddError(null); }}
             onKeyDown={e => e.key === 'Enter' && handleAddAsset()}
-            disabled={validationState === 'validating'}
+            disabled={validationState === 'validating' || assetCount.remaining === 0}
           />
           <button
             className="search-btn"
             onClick={handleAddAsset}
-            disabled={validationState === 'validating' || !query.trim()}
+            disabled={validationState === 'validating' || !query.trim() || assetCount.remaining === 0}
           >
             {validationState === 'validating' ? '…' : 'Add'}
           </button>
         </div>
+
+        <span className="text-mono text-muted">
+          {assetCount.count} / {assetCount.limit} assets used
+          {assetCount.remaining === 0 && ' — limit reached'}
+        </span>
+
         {validationState === 'invalid' && (
           <span className="search-msg error">Symbol not found — please check and try again</span>
         )}
@@ -115,9 +138,29 @@ export default function Dashboard() {
             key={asset.id}
             asset={asset}
             tier={user?.plan ?? 'free'}
-            onRemove={removeAsset}
+            onRemove={async (id) => { await removeAsset(id); fetchAssetCount(); }}
           />
         ))
+      )}
+
+      {showLimitModal && (
+        <div className="modal-overlay" onClick={() => setShowLimitModal(false)}>
+          <div className="modal-box" onClick={e => e.stopPropagation()}>
+            <div className="modal-title">Asset Limit Reached</div>
+            <div className="modal-body">
+              <p>You have reached the maximum of {assetCount.limit} assets.</p>
+              <p className="mt-md">
+                To add more assets, please contribute a minimum of <strong>$15.00</strong> towards server upkeep and maintenance.
+              </p>
+              <p className="mt-md">
+                Contact the server admin for payment details.
+              </p>
+            </div>
+            <button className="modal-close-btn" onClick={() => setShowLimitModal(false)}>
+              Close
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );
