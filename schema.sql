@@ -246,3 +246,29 @@ CREATE TABLE IF NOT EXISTS user_sweep_configs (
   FOREIGN KEY (asset_id) REFERENCES user_assets(id)
 );
 CREATE INDEX IF NOT EXISTS idx_sweep_configs_lookup ON user_sweep_configs(user_id, asset_id, enabled);
+
+-- Data-source call log — powers /health/datasources.
+-- (Documented here for the first time — was created ad hoc directly in D1
+-- before this table ever made it into schema.sql.)
+CREATE TABLE IF NOT EXISTS api_call_log (
+  id         TEXT PRIMARY KEY,
+  source     TEXT NOT NULL,
+  symbol     TEXT NOT NULL,
+  timeframe  TEXT NOT NULL,
+  called_at  INTEGER NOT NULL,
+  success    INTEGER DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_api_call_log_source_time ON api_call_log(source, called_at);
+
+-- ── Twelve Data 3-key rotation ───────────────────────────────
+CREATE TABLE IF NOT EXISTS api_key_state (
+  key_name     TEXT PRIMARY KEY,
+  exhausted    INTEGER DEFAULT 0,
+  exhausted_at INTEGER,
+  calls_today  INTEGER DEFAULT 0,
+  reset_at     INTEGER
+);
+
+-- Seed rows (D1 Console — INSERT OR IGNORE is safe to re-run):
+-- INSERT OR IGNORE INTO api_key_state (key_name, exhausted, calls_today, reset_at)
+-- VALUES ('twelvedata_1', 0, 0, 0), ('twelvedata_2', 0, 0, 0), ('twelvedata_3', 0, 0, 0);

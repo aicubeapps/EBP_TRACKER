@@ -166,28 +166,6 @@ function toYahooInterval(tf) {
   return map[tf] ?? '1h';
 }
 
-async function fetchTwelveData(symbol, tf, apiKey, outputSize = 3) {
-  const interval = tfToTwelveInterval(tf);
-  const params   = new URLSearchParams({
-    symbol, interval,
-    outputsize: String(outputSize),
-    apikey: apiKey,
-    ...(tf === 'D' ? { timezone: 'America/New_York' } : {}),
-  });
-  const res  = await fetch(`https://api.twelvedata.com/time_series?${params}`);
-  const data = await res.json();
-  if (data.status === 'error' || !data.values) {
-    throw new Error(`Twelve Data: ${data.message ?? 'no values'}`);
-  }
-  return data.values.map(v => ({
-    open:  parseFloat(v.open),
-    high:  parseFloat(v.high),
-    low:   parseFloat(v.low),
-    close: parseFloat(v.close),
-    time:  new Date(v.datetime).getTime(),
-  }));
-}
-
 async function fetchYahooFinance(symbol, tf, outputSize = 3) {
   const yahooSymbol = toYahooSymbol(symbol);
   const interval    = toYahooInterval(tf);
@@ -215,62 +193,6 @@ async function fetchYahooFinance(symbol, tf, outputSize = 3) {
   return candles;
 }
 
-function toFinnhubSymbol(symbol) {
-  const map = {
-    'EUR/USD': { symbol: 'OANDA:EUR_USD', endpoint: 'forex' },
-    'GBP/USD': { symbol: 'OANDA:GBP_USD', endpoint: 'forex' },
-    'GBP/JPY': { symbol: 'OANDA:GBP_JPY', endpoint: 'forex' },
-    'USD/JPY': { symbol: 'OANDA:USD_JPY', endpoint: 'forex' },
-    'XAU/USD': { symbol: 'OANDA:XAU_USD', endpoint: 'forex' },
-    'BTC/USD': { symbol: 'BINANCE:BTCUSDT', endpoint: 'crypto' },
-    'ETH/USD': { symbol: 'BINANCE:ETHUSDT', endpoint: 'crypto' },
-    'NIFTY':   { symbol: 'NSE:NIFTY',       endpoint: 'stock' },
-  };
-  if (map[symbol]) return map[symbol];
-  if (symbol.endsWith('.NS')) {
-    return { symbol: `NSE:${symbol.replace('.NS', '')}`, endpoint: 'stock' };
-  }
-  return null;
-}
-
-function toFinnhubResolution(tf) {
-  const map = {
-    'M5': '5', 'M15': '15', 'M30': '30',
-    '1H': '60', '4H': '240', 'D': 'D', 'W': 'W',
-  };
-  return map[tf] ?? null;
-}
-
-async function fetchFinnhub(symbol, tf, apiKey, count = 10) {
-  const mapped     = toFinnhubSymbol(symbol);
-  const resolution = toFinnhubResolution(tf);
-  if (!mapped || !resolution) return null;
-
-  const now = Math.floor(Date.now() / 1000);
-  const tfSeconds = {
-    'M5': 300, 'M15': 900, 'M30': 1800,
-    '1H': 3600, '4H': 14400, 'D': 86400, 'W': 604800,
-  };
-  const from = now - (tfSeconds[tf] * count * 2);
-
-  const url = `https://finnhub.io/api/v1/${mapped.endpoint}/candle?symbol=${encodeURIComponent(mapped.symbol)}&resolution=${resolution}&from=${from}&to=${now}&token=${apiKey}`;
-  try {
-    const res  = await fetch(url);
-    if (!res.ok) return null;
-    const data = await res.json();
-    if (data.s !== 'ok' || !data.c || data.c.length < 3) return null;
-    return data.c.map((_, i) => ({
-      open:  data.o[i],
-      high:  data.h[i],
-      low:   data.l[i],
-      close: data.c[i],
-      time:  data.t[i] * 1000,
-    })).reverse();
-  } catch {
-    return null;
-  }
-}
-
 async function logApiCall(db, source, symbol, timeframe, success = 1) {
   try {
     await db.prepare(
@@ -279,9 +201,120 @@ async function logApiCall(db, source, symbol, timeframe, success = 1) {
   } catch {}
 }
 
+// ── Twelve Data key rotation ──────────────────────────────
+// Three keys, tried in order; a key that comes back exhausted (daily credit
+// cap) is marked and skipped until the next UTC midnight instead of failing
+// the whole fetch. Falls through to Yahoo only once all three are exhausted.
+
+const TWELVE_DATA_KEYS_ENV = [
+  'TWELVE_DATA_API_KEY_1',
+  'TWELVE_DATA_API_KEY_2',
+  'TWELVE_DATA_API_KEY_3',
+];
+
+const KEY_NAMES = ['twelvedata_1', 'twelvedata_2', 'twelvedata_3'];
+
+function nextMidnightUTC() {
+  const now = new Date();
+  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0, 0);
+}
+
+async function resetExhaustedKeys(db) {
+  const now = Date.now();
+  await db.prepare(
+    `UPDATE api_key_state
+     SET exhausted=0, calls_today=0, exhausted_at=NULL, reset_at=?
+     WHERE exhausted=1 AND reset_at < ?`
+  ).bind(nextMidnightUTC(), now).run();
+}
+
+async function getActiveKey(db, env) {
+  const { results } = await db.prepare(`SELECT * FROM api_key_state ORDER BY key_name ASC`).all();
+
+  for (let i = 0; i < KEY_NAMES.length; i++) {
+    const state = results.find(r => r.key_name === KEY_NAMES[i]);
+    if (!state || state.exhausted === 0) {
+      return { keyName: KEY_NAMES[i], apiKey: env[TWELVE_DATA_KEYS_ENV[i]], index: i };
+    }
+  }
+  return null; // all keys exhausted — fall through to Yahoo
+}
+
+async function markKeyExhausted(db, keyName) {
+  const now = Date.now();
+  await db.prepare(
+    `UPDATE api_key_state SET exhausted=1, exhausted_at=?, reset_at=? WHERE key_name=?`
+  ).bind(now, nextMidnightUTC(), keyName).run();
+  console.warn(`[ROTATION] ${keyName} exhausted — rotating to next key`);
+}
+
+async function incrementKeyCallCount(db, keyName) {
+  await db.prepare(
+    `UPDATE api_key_state SET calls_today=calls_today+1 WHERE key_name=?`
+  ).bind(keyName).run();
+}
+
+function isTwelveDataExhausted(data) {
+  if (data?.code === 429) return true;
+  if (data?.status === 'error' && data?.message?.toLowerCase().includes('run out')) return true;
+  if (data?.status === 'error' && data?.message?.toLowerCase().includes('api credits')) return true;
+  return false;
+}
+
+async function fetchTwelveDataWithRotation(symbol, tf, db, env, _log = null, count = 10) {
+  await resetExhaustedKeys(db);
+
+  const interval = tfToTwelveInterval(tf);
+
+  for (let attempt = 0; attempt < KEY_NAMES.length; attempt++) {
+    const active = await getActiveKey(db, env);
+    if (!active) break; // all keys exhausted
+
+    const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=${interval}&outputsize=${count}&order=DESC&timezone=America/New_York&apikey=${active.apiKey}`;
+
+    try {
+      const res = await fetch(url);
+      if (!res.ok) {
+        if (_log) _log.push(`[WARN] Twelve Data HTTP ${res.status} for ${symbol} ${tf} on ${active.keyName}`);
+        continue;
+      }
+
+      const data = await res.json();
+
+      if (isTwelveDataExhausted(data)) {
+        await markKeyExhausted(db, active.keyName);
+        if (_log) _log.push(`[WARN] ${active.keyName} exhausted — rotating`);
+        continue;
+      }
+
+      if (data.status === 'error' || !data.values || data.values.length < 3) {
+        if (_log) _log.push(`[WARN] Twelve Data no data for ${symbol} ${tf} on ${active.keyName}: ${data.message ?? 'unknown'}`);
+        return null; // symbol error — don't rotate, just fail
+      }
+
+      await incrementKeyCallCount(db, active.keyName);
+      await logApiCall(db, active.keyName, symbol, tf, 1);
+
+      return data.values.map(v => ({
+        open:  parseFloat(v.open),
+        high:  parseFloat(v.high),
+        low:   parseFloat(v.low),
+        close: parseFloat(v.close),
+        time:  new Date(v.datetime).getTime(),
+      }));
+
+    } catch (e) {
+      if (_log) _log.push(`[ERROR] Twelve Data fetch error ${symbol} ${tf} on ${active.keyName}: ${e.message}`);
+      return null;
+    }
+  }
+
+  return null; // all keys exhausted or failed
+}
+
 // Bare 6-char pairs (GBPUSD, XAUUSD, ...) fall through every data source
-// unchanged — toYahooSymbol()/toFinnhubSymbol() only translate slash-delimited
-// symbols. Normalise to BASE/QUOTE so those lookups actually resolve.
+// unchanged — toYahooSymbol() only translates slash-delimited symbols.
+// Normalise to BASE/QUOTE so those lookups actually resolve.
 function normaliseSymbol(symbol) {
   if (!symbol) return symbol;
   if (symbol.includes('/')) return symbol; // already slash format
@@ -302,41 +335,28 @@ function normaliseSymbol(symbol) {
   return symbol; // NSE stocks / indices etc. — passthrough
 }
 
-async function fetchCandles(symbol, tf, twelveApiKey, finnhubApiKey, _log, count = 10, db = null) {
+async function fetchCandles(symbol, tf, db, env, _log = null, count = 10) {
   symbol = normaliseSymbol(symbol);
 
-  // 1. Finnhub — primary (60 calls/min, no daily cap)
-  const finnhubCandles = await fetchFinnhub(symbol, tf, finnhubApiKey, count);
-  if (finnhubCandles && finnhubCandles.length >= 3) {
-    if (db) await logApiCall(db, 'finnhub', symbol, tf);
-    return finnhubCandles;
-  }
-  if (_log) _log.push(`[WARN] Finnhub failed ${symbol} ${tf} — trying Yahoo`);
+  // 1. Twelve Data — primary (3-key rotation)
+  const twelveCandles = await fetchTwelveDataWithRotation(symbol, tf, db, env, _log, count);
+  if (twelveCandles && twelveCandles.length >= 3) return twelveCandles;
+  if (_log) _log.push(`[WARN] Twelve Data failed ${symbol} ${tf} — trying Yahoo`);
 
-  // 2. Yahoo Finance — fallback (unlimited, no key)
+  // 2. Yahoo Finance — final fallback (unlimited, no key)
   try {
     const c = await fetchYahooFinance(symbol, tf, count);
     if (c && c.length >= 3) {
-      if (db) await logApiCall(db, 'yahoo', symbol, tf);
+      await logApiCall(db, 'yahoo', symbol, tf);
       return c;
     }
   } catch (e) {
     if (_log) _log.push(`[WARN] Yahoo failed ${symbol} ${tf}: ${e.message}`);
   }
 
-  // 3. Twelve Data — emergency only (800 calls/day)
-  try {
-    const c = await fetchTwelveData(symbol, tf, twelveApiKey, count);
-    if (c && c.length >= 3) {
-      if (db) await logApiCall(db, 'twelvedata', symbol, tf);
-      return c;
-    }
-  } catch (e) {
-    const msg = `All sources failed ${symbol} ${tf}: ${e.message}`;
-    console.error(msg);
-    if (_log) _log.push(`[ERROR] ${msg}`);
-  }
-
+  const msg = `All sources failed ${symbol} ${tf}`;
+  console.error(msg);
+  if (_log) _log.push(`[ERROR] ${msg}`);
   return null;
 }
 
@@ -712,10 +732,11 @@ export async function handleSweepCron(tf, env, debugLog = null) {
     await cleanupExpiredSignals(env.DB);
     await cleanupExpiredFVGs(env.DB);
     await cleanupExpiredChains(env.DB);
+    await resetExhaustedKeys(env.DB); // in case midnight UTC has passed
     await env.DB.prepare(
       `DELETE FROM api_call_log WHERE called_at < ?`
     ).bind(Date.now() - (2 * 24 * 60 * 60 * 1000)).run();
-    log('Cleaned up expired pending signals, FVGs, chains, and API call log');
+    log('Cleaned up expired pending signals, FVGs, chains, key state, and API call log');
   }
 
   const { results: filtered } = await env.DB.prepare(`
@@ -746,7 +767,7 @@ export async function handleSweepCron(tf, env, debugLog = null) {
 
   for (const [symbol, userRows] of symbolMap) {
     try {
-      const candles = await fetchCandles(symbol, tf, env.TWELVE_DATA_API_KEY, env.FINNHUB_API_KEY, debugLog, 10, env.DB);
+      const candles = await fetchCandles(symbol, tf, env.DB, env, debugLog, 10);
       log(`[${symbol}] candles fetched: ${candles?.length ?? 'null'}`);
       if (!candles || candles.length < 2) {
         log(`[${symbol}] SKIP: insufficient candles`);
@@ -755,7 +776,7 @@ export async function handleSweepCron(tf, env, debugLog = null) {
 
       let htfBias = 'neutral';
       if (biasTF) {
-        const htfCandles = await fetchCandles(symbol, biasTF, env.TWELVE_DATA_API_KEY, env.FINNHUB_API_KEY, debugLog, 10, env.DB);
+        const htfCandles = await fetchCandles(symbol, biasTF, env.DB, env, debugLog, 10);
         log(`[${symbol}] htf candles fetched: ${htfCandles?.length ?? 'null'}`);
         if (htfCandles?.length >= 2) {
           const biasResult = calcTTradesBias({ bar1: htfCandles[0], bar2: htfCandles[1] });
