@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import api from '../lib/api';
+import PriceFeedPanel from '../components/PriceFeedPanel';
 
-const TABS = ['Users', 'Payments', 'Invite Tokens', 'Tier Config', 'API Keys', 'User Limits'];
+const TABS = ['Users', 'Payments', 'Invite Tokens', 'Tier Config', 'API Keys', 'User Limits', 'Price Feed'];
 
 export default function Admin() {
   const { getToken }                  = useAuth();
@@ -381,6 +382,8 @@ export default function Admin() {
           </div>
         </div>
       )}
+
+      {tab === 6 && <PriceFeedPanel keys={keys} />}
 
       {tab === 5 && (
         <div>
