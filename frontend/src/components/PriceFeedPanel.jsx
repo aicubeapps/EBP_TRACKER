@@ -18,22 +18,29 @@ function fmtTime(ts) {
   });
 }
 
-// Normalise bare 6-char input (EURUSD) → EUR/USD
 function normalisePair(raw) {
   const s = raw.trim().toUpperCase();
   if (s.length === 6 && !s.includes('/')) return `${s.slice(0, 3)}/${s.slice(3)}`;
   return s;
 }
 
+function maskKey(key) {
+  if (!key || key.length < 4) return '****';
+  return '****' + key.slice(-4);
+}
+
 export default function PriceFeedPanel({ keys = [] }) {
-  const wsRef = useRef(null);
+  const wsRef  = useRef(null);
+  const logRef = useRef([]);
 
   const [apiKey, setApiKey]     = useState('');
   const [symbols, setSymbols]   = useState([...DEFAULT_SYMBOLS]);
   const [newSym, setNewSym]     = useState('');
-  const [status, setStatus]     = useState('disconnected'); // disconnected | connecting | connected | error
+  const [status, setStatus]     = useState('disconnected');
   const [errorMsg, setErrorMsg] = useState('');
-  const [prices, setPrices]     = useState({});            // { 'EUR/USD': { price, direction, updatedAt } }
+  const [prices, setPrices]     = useState({});
+  const [rawLog, setRawLog]     = useState([]);   // visible log lines
+  const [connInfo, setConnInfo] = useState(null); // { url, subscribeMsg }
 
   const twelveKeys = keys.filter(k => k.source === 'twelvedata' && k.enabled && !k.exhausted);
 
@@ -41,6 +48,13 @@ export default function PriceFeedPanel({ keys = [] }) {
     wsRef.current?.close();
     wsRef.current = null;
   }, []);
+
+  const pushLog = (line) => {
+    const ts  = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const entry = `[${ts}] ${line}`;
+    logRef.current = [entry, ...logRef.current].slice(0, 20);
+    setRawLog([...logRef.current]);
+  };
 
   const connect = () => {
     if (!apiKey.trim()) {
@@ -53,19 +67,27 @@ export default function PriceFeedPanel({ keys = [] }) {
     setStatus('connecting');
     setErrorMsg('');
     setPrices({});
+    logRef.current = [];
+    setRawLog([]);
 
-    const ws = new WebSocket(`${WS_ENDPOINT}?apikey=${encodeURIComponent(apiKey.trim())}`);
+    const url = `${WS_ENDPOINT}?apikey=${encodeURIComponent(apiKey.trim())}`;
+    const maskedUrl = `${WS_ENDPOINT}?apikey=${maskKey(apiKey.trim())}`;
+    const subscribeMsg = JSON.stringify({ action: 'subscribe', params: { symbols: symbols.join(',') } });
+
+    setConnInfo({ url: maskedUrl, subscribeMsg });
+    pushLog(`CONNECTING → ${maskedUrl}`);
+
+    const ws = new WebSocket(url);
     wsRef.current = ws;
 
     ws.onopen = () => {
       setStatus('connected');
-      ws.send(JSON.stringify({
-        action: 'subscribe',
-        params: { symbols: symbols.join(',') },
-      }));
+      pushLog(`OPEN — sending: ${subscribeMsg}`);
+      ws.send(subscribeMsg);
     };
 
     ws.onmessage = (evt) => {
+      pushLog(`MSG: ${evt.data}`);
       try {
         const msg = JSON.parse(evt.data);
         if (msg.event === 'price' && msg.symbol && msg.price != null) {
@@ -85,12 +107,15 @@ export default function PriceFeedPanel({ keys = [] }) {
       } catch { /* ignore non-JSON frames */ }
     };
 
-    ws.onerror = () => {
+    ws.onerror = (evt) => {
+      const detail = evt.message ?? evt.type ?? 'unknown error';
       setStatus('error');
-      setErrorMsg('WebSocket error — verify the API key and try again.');
+      setErrorMsg('WebSocket error — see raw log for details.');
+      pushLog(`ERROR: ${detail}`);
     };
 
-    ws.onclose = () => {
+    ws.onclose = (evt) => {
+      pushLog(`CLOSE — code ${evt.code} reason: "${evt.reason || 'none'}"`);
       setStatus(prev => (prev === 'error' ? prev : 'disconnected'));
       wsRef.current = null;
     };
@@ -108,13 +133,17 @@ export default function PriceFeedPanel({ keys = [] }) {
     setSymbols(prev => [...prev, s]);
     setNewSym('');
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ action: 'subscribe', params: { symbols: s } }));
+      const msg = JSON.stringify({ action: 'subscribe', params: { symbols: s } });
+      wsRef.current.send(msg);
+      pushLog(`SEND: ${msg}`);
     }
   };
 
   const removeSymbol = (sym) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ action: 'unsubscribe', params: { symbols: sym } }));
+      const msg = JSON.stringify({ action: 'unsubscribe', params: { symbols: sym } });
+      wsRef.current.send(msg);
+      pushLog(`SEND: ${msg}`);
     }
     setSymbols(prev => prev.filter(s => s !== sym));
     setPrices(prev => { const n = { ...prev }; delete n[sym]; return n; });
@@ -184,6 +213,52 @@ export default function PriceFeedPanel({ keys = [] }) {
           </div>
         )}
       </div>
+
+      {/* ── Raw message log ───────────────────────────────────── */}
+      {(rawLog.length > 0 || connInfo) && (
+        <div style={{ marginBottom: 16 }}>
+          <div className="section-heading" style={{ marginBottom: 6 }}>Raw WS Log</div>
+          {connInfo && (
+            <div style={{
+              fontFamily: 'var(--font-mono)', fontSize: 11,
+              color: '#94a3b8', marginBottom: 4,
+            }}>
+              URL: {connInfo.url}<br />
+              Subscribe: {connInfo.subscribeMsg}
+            </div>
+          )}
+          <div style={{
+            background: '#0f172a', color: '#e2e8f0',
+            fontFamily: 'var(--font-mono)', fontSize: 11,
+            padding: '10px 12px', borderRadius: 'var(--radius-sm)',
+            maxHeight: 260, overflowY: 'auto',
+            border: '1px solid #1e293b',
+          }}>
+            {rawLog.length === 0
+              ? <span style={{ color: '#475569' }}>No messages yet…</span>
+              : rawLog.map((line, i) => (
+                <div key={i} style={{
+                  padding: '1px 0',
+                  color: line.includes('ERROR') || line.includes('CLOSE')
+                    ? '#f87171'
+                    : line.includes('OPEN') || line.includes('price')
+                      ? '#86efac'
+                      : '#e2e8f0',
+                }}>
+                  {line}
+                </div>
+              ))
+            }
+          </div>
+          <button
+            className="add-link"
+            style={{ fontSize: 11, marginTop: 4 }}
+            onClick={() => { logRef.current = []; setRawLog([]); }}
+          >
+            Clear log
+          </button>
+        </div>
+      )}
 
       {/* ── Symbol toolbar ────────────────────────────────────── */}
       <div style={{
