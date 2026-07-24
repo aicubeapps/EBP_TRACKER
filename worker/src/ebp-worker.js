@@ -772,7 +772,7 @@ async function handleEBPCron(tf, env, debugLog = null) {
   const { results: filtered } = await env.DB.prepare(`
     SELECT ec.id as config_id, ec.alert_mode,
            ua.id as asset_id, ua.symbol, ua.bias_overrides,
-           u.id as user_id
+           u.id as user_id, u.user_tf_access
     FROM user_ebp_configs ec
     JOIN user_assets ua ON ec.asset_id = ua.id
     JOIN users u ON ec.user_id = u.id
@@ -825,6 +825,9 @@ async function handleEBPCron(tf, env, debugLog = null) {
         if (mssResult) {
           const htfLabelStr = getHTFLabel(tf);
           for (const row of userRows) {
+            const userTfAccess = JSON.parse(row.user_tf_access || '["M5","M15","M30","1H","4H","D","W"]');
+            if (!userTfAccess.includes(tf)) continue;
+
             const alertMode     = row.alert_mode ?? 'aligned';
             const biasOverrides = JSON.parse(row.bias_overrides || '{}');
             const effectiveBias = getEffectiveBias(biasTF, { [biasTF]: { bias: htfBias } }, biasOverrides);
@@ -858,6 +861,9 @@ async function handleEBPCron(tf, env, debugLog = null) {
       }
 
       for (const row of userRows) {
+        const userTfAccess = JSON.parse(row.user_tf_access || '["M5","M15","M30","1H","4H","D","W"]');
+        if (!userTfAccess.includes(tf)) continue;
+
         const alertMode     = row.alert_mode ?? 'aligned';
         const biasOverrides = JSON.parse(row.bias_overrides || '{}');
         const effectiveBias = getEffectiveBias(biasTF, { [biasTF]: { bias: htfBias } }, biasOverrides);
@@ -968,8 +974,8 @@ async function getOrCreateUser(db, clerkUser) {
   const now     = Date.now();
   const expires = now + 30 * 24 * 60 * 60 * 1000;
   await db.prepare(`
-    INSERT INTO users (id, email, name, created_at, expires_at, asset_limit)
-    VALUES (?,?,?,?,?,5)
+    INSERT INTO users (id, email, name, created_at, expires_at, asset_limit, user_tf_access)
+    VALUES (?,?,?,?,?,5,'["M5","M15","M30","1H","4H","D","W"]')
     ON CONFLICT(id) DO NOTHING
   `).bind(clerkUser.id, clerkUser.email, clerkUser.email.split('@')[0], now, expires).run();
 
@@ -1192,6 +1198,13 @@ router.post('/user/ebp-configs/:assetId', async (req, env) => {
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
   const { timeframe, alert_mode } = await req.json();
   if (!timeframe) return json({ error: 'timeframe required' }, 400, origin);
+
+  const userRow      = await env.DB.prepare('SELECT user_tf_access FROM users WHERE id = ?').bind(clerkUser.id).first();
+  const userTfAccess = JSON.parse(userRow?.user_tf_access || '["M5","M15","M30","1H","4H","D","W"]');
+  if (!userTfAccess.includes(timeframe)) {
+    return json({ error: 'tf_access_denied', message: 'This timeframe is not enabled for your account' }, 403, origin);
+  }
+
   const id = crypto.randomUUID();
   await env.DB.prepare(
     'INSERT INTO user_ebp_configs (id,user_id,asset_id,timeframe,alert_mode,enabled,created_at) VALUES (?,?,?,?,?,1,?)'
@@ -1215,6 +1228,13 @@ router.post('/user/sweep-configs/:assetId', async (req, env) => {
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
   const { timeframe, alert_mode } = await req.json();
   if (!timeframe) return json({ error: 'timeframe required' }, 400, origin);
+
+  const userRow      = await env.DB.prepare('SELECT user_tf_access FROM users WHERE id = ?').bind(clerkUser.id).first();
+  const userTfAccess = JSON.parse(userRow?.user_tf_access || '["M5","M15","M30","1H","4H","D","W"]');
+  if (!userTfAccess.includes(timeframe)) {
+    return json({ error: 'tf_access_denied', message: 'This timeframe is not enabled for your account' }, 403, origin);
+  }
+
   const id = crypto.randomUUID();
   await env.DB.prepare(
     'INSERT INTO user_sweep_configs (id,user_id,asset_id,timeframe,alert_mode,enabled,created_at) VALUES (?,?,?,?,?,1,?)'
@@ -1664,6 +1684,40 @@ router.patch('/admin/users/:id/asset-limit', async (req, env) => {
   }
   await env.DB.prepare(`UPDATE users SET asset_limit=? WHERE id=?`).bind(asset_limit, params.id).run();
   return json({ ok: true, asset_limit }, 200, origin);
+});
+
+router.get('/admin/users/:id/assets', async (req, env) => {
+  const { user: clerkUser, origin, error, params } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
+  const assets = await env.DB.prepare(
+    'SELECT symbol, asset_type, added_at FROM user_assets WHERE user_id = ? AND active = 1 ORDER BY added_at ASC'
+  ).bind(params.id).all();
+  return json(assets.results ?? [], 200, origin);
+});
+
+const ALL_TF_ACCESS = ['M5', 'M15', 'M30', '1H', '4H', 'D', 'W'];
+
+router.get('/admin/users/:id/tf-access', async (req, env) => {
+  const { user: clerkUser, origin, error, params } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
+  const row = await env.DB.prepare('SELECT user_tf_access FROM users WHERE id=?').bind(params.id).first();
+  if (!row) return json({ error: 'User not found' }, 404, origin);
+  const tfAccess = JSON.parse(row.user_tf_access || JSON.stringify(ALL_TF_ACCESS));
+  return json({ user_id: params.id, tf_access: tfAccess }, 200, origin);
+});
+
+router.patch('/admin/users/:id/tf-access', async (req, env) => {
+  const { user: clerkUser, origin, error, params } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
+  const { tf_access } = await req.json();
+  if (!Array.isArray(tf_access) || tf_access.some(tf => !ALL_TF_ACCESS.includes(tf))) {
+    return json({ error: `tf_access must be an array containing only: ${ALL_TF_ACCESS.join(', ')}` }, 400, origin);
+  }
+  await env.DB.prepare(`UPDATE users SET user_tf_access=? WHERE id=?`).bind(JSON.stringify(tf_access), params.id).run();
+  return json({ ok: true }, 200, origin);
 });
 
 // ── Invite token validation ───────────────────────────────────

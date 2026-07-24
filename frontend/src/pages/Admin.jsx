@@ -4,6 +4,8 @@ import api from '../lib/api';
 import PriceFeedPanel from '../components/PriceFeedPanel';
 
 const TABS = ['Users', 'Invite Tokens', 'API Keys', 'User Limits', 'Price Feed'];
+const ALL_TFS      = ['M5', 'M15', 'M30', '1H', '4H', 'D', 'W'];
+const SLOT_OPTIONS = [5, 7, 9, 11, 13];
 
 export default function Admin() {
   const { getToken }                    = useAuth();
@@ -16,6 +18,11 @@ export default function Admin() {
   const [newKey, setNewKey]             = useState({ source: 'twelvedata', key_value: '', label: '' });
   const [addingKey, setAddingKey]       = useState(false);
   const [editingLimit, setEditingLimit] = useState({});
+  const [expandedUsers, setExpandedUsers] = useState({});
+  const [userAssets, setUserAssets]       = useState({});
+  const [userTfAccess, setUserTfAccess]   = useState({});
+  const [detailLoading, setDetailLoading] = useState({});
+  const [tfError, setTfError]             = useState({});
 
   useEffect(() => {
     (async () => {
@@ -98,6 +105,43 @@ export default function Admin() {
     setUsers(Array.isArray(u) ? u : []);
   };
 
+  const toggleUserExpand = async (userId) => {
+    const nowExpanded = !expandedUsers[userId];
+    setExpandedUsers(p => ({ ...p, [userId]: nowExpanded }));
+    if (!nowExpanded || userTfAccess[userId] !== undefined) return;
+
+    setDetailLoading(p => ({ ...p, [userId]: true }));
+    try {
+      const token = await getToken();
+      const [assets, tf] = await Promise.all([
+        api.get(`/admin/users/${userId}/assets`, token),
+        api.get(`/admin/users/${userId}/tf-access`, token),
+      ]);
+      setUserAssets(p => ({ ...p, [userId]: Array.isArray(assets) ? assets : [] }));
+      setUserTfAccess(p => ({ ...p, [userId]: tf?.tf_access ?? ALL_TFS }));
+    } catch (e) {
+      setUserAssets(p => ({ ...p, [userId]: [] }));
+      setUserTfAccess(p => ({ ...p, [userId]: ALL_TFS }));
+      setTfError(p => ({ ...p, [userId]: 'Failed to load user details' }));
+    } finally {
+      setDetailLoading(p => ({ ...p, [userId]: false }));
+    }
+  };
+
+  const handleTfToggle = async (userId, tf, checked) => {
+    const prev = userTfAccess[userId] ?? ALL_TFS;
+    const next = checked ? [...prev, tf] : prev.filter(t => t !== tf);
+    setUserTfAccess(p => ({ ...p, [userId]: next }));
+    setTfError(p => ({ ...p, [userId]: undefined }));
+    try {
+      const token = await getToken();
+      await api.patch(`/admin/users/${userId}/tf-access`, { tf_access: next }, token);
+    } catch (e) {
+      setUserTfAccess(p => ({ ...p, [userId]: prev }));
+      setTfError(p => ({ ...p, [userId]: e.message || 'Failed to update timeframe access' }));
+    }
+  };
+
   if (loading) {
     return <div className="shell" style={{ textAlign: 'center', paddingTop: 60 }}><span className="spinner" /></div>;
   }
@@ -125,34 +169,119 @@ export default function Admin() {
       </div>
 
       {tab === 0 && (
-        <div className="card" style={{ padding: 0 }}>
-          <div className="table-wrap">
-            <table className="alert-table">
-              <thead>
-                <tr>
-                  <th>Email</th><th>Plan</th><th>Expiry</th>
-                  <th>Assets</th><th>Alerts</th><th>Telegram</th><th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {users.length === 0 ? (
-                  <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--muted)', padding: 24 }}>No users yet</td></tr>
-                ) : users.map(u => (
-                  <tr key={u.id}>
-                    <td>{u.email || u.id.slice(0, 16) + '...'}</td>
-                    <td><span className="badge">{u.plan?.toUpperCase() ?? 'FREE'}</span></td>
-                    <td className="ts-cell tabular-nums">{new Date(u.expires_at).toLocaleDateString()}</td>
-                    <td className="tabular-nums">{u.asset_count}</td>
-                    <td className="tabular-nums">{u.alert_count}</td>
-                    <td>{u.telegram_verified ? '✅' : '—'}</td>
-                    <td>
-                      <button className="btn btn-danger btn-sm" onClick={() => handleExpire(u.id)}>Expire</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+        <div>
+          {users.length === 0 ? (
+            <div className="card" style={{ textAlign: 'center', color: 'var(--muted)', padding: 24 }}>
+              No users yet
+            </div>
+          ) : users.map(u => {
+            const expanded  = !!expandedUsers[u.id];
+            const assets    = userAssets[u.id] ?? [];
+            const tfAccess  = userTfAccess[u.id] ?? ALL_TFS;
+            const slotOptions = SLOT_OPTIONS.includes(u.asset_limit)
+              ? SLOT_OPTIONS
+              : [...SLOT_OPTIONS, u.asset_limit].sort((a, b) => a - b);
+
+            return (
+              <div key={u.id} className="card">
+                <button className="user-card-header" onClick={() => toggleUserExpand(u.id)}>
+                  <div>
+                    <div className="card-title">{u.email || u.id.slice(0, 16) + '...'}</div>
+                    <span className="text-muted" style={{ fontSize: 11 }}>
+                      {u.asset_count ?? 0} / {u.asset_limit ?? 5} slots · {u.active ? 'Active' : 'Inactive'}
+                    </span>
+                  </div>
+                  <span className={`user-card-chevron ${expanded ? 'expanded' : ''}`}>▸</span>
+                </button>
+
+                {expanded && (
+                  <div className="user-card-body">
+                    {/* Section A — user info + assets (view only) */}
+                    <div className="section-heading">User Info</div>
+                    <div style={{ fontSize: 12, marginBottom: 'var(--sp-md)', lineHeight: 1.8 }}>
+                      <div><span className="text-muted">Name:</span> {u.name ?? '—'}</div>
+                      <div><span className="text-muted">Created:</span> {new Date(u.created_at).toLocaleDateString()}</div>
+                      <div>
+                        <span className="text-muted">Status:</span>{' '}
+                        <span className={`badge ${u.active ? 'badge-bull' : 'badge-bear'}`}>
+                          {u.active ? 'ACTIVE' : 'INACTIVE'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="section-heading">
+                      Assets ({u.asset_count ?? 0} / {u.asset_limit ?? 5} slots used)
+                    </div>
+                    {detailLoading[u.id] ? (
+                      <span className="spinner" />
+                    ) : (
+                      <div className="table-wrap" style={{ marginBottom: 'var(--sp-md)' }}>
+                        <table className="alert-table">
+                          <thead><tr><th>Symbol</th><th>Type</th><th>Added</th></tr></thead>
+                          <tbody>
+                            {assets.length === 0 ? (
+                              <tr><td colSpan={3} style={{ textAlign: 'center', color: 'var(--muted)', padding: 16 }}>No assets</td></tr>
+                            ) : assets.map(a => (
+                              <tr key={a.symbol + a.added_at}>
+                                <td className="text-mono">{a.symbol}</td>
+                                <td>
+                                  <span className={`badge badge-${(a.asset_type ?? 'forex').toLowerCase().replace(/\s/g, '_')}`}>
+                                    {a.asset_type}
+                                  </span>
+                                </td>
+                                <td className="ts-cell">{new Date(a.added_at).toLocaleDateString()}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+
+                    <div className="divider" />
+
+                    {/* Section B — slot limit control */}
+                    <div className="section-heading">Slot Limit</div>
+                    <div className="config-row">
+                      <select
+                        className="select-sm"
+                        value={u.asset_limit ?? 5}
+                        onChange={e => handleUpdateLimit(u.id, e.target.value)}
+                      >
+                        {slotOptions.map(n => <option key={n} value={n}>{n}</option>)}
+                      </select>
+                      <span className="text-muted" style={{ fontSize: 11 }}>slots</span>
+                    </div>
+
+                    <div className="divider" />
+
+                    {/* Section C — TF access checkboxes */}
+                    <div className="section-heading">Timeframe Access</div>
+                    <div className="tf-check-grid">
+                      {ALL_TFS.map(tf => (
+                        <label key={tf} className="tf-check-row">
+                          <input
+                            type="checkbox"
+                            checked={tfAccess.includes(tf)}
+                            onChange={e => handleTfToggle(u.id, tf, e.target.checked)}
+                          />
+                          <span>{tf}</span>
+                        </label>
+                      ))}
+                    </div>
+                    <p className="text-muted" style={{ fontSize: 11, marginTop: 'var(--sp-sm)' }}>
+                      Disabling a TF stops alerts for that user on that timeframe. Existing configs are preserved.
+                    </p>
+                    {tfError[u.id] && (
+                      <p style={{ color: '#ef4444', fontSize: 11, marginTop: 4 }}>{tfError[u.id]}</p>
+                    )}
+
+                    <div className="divider" />
+                    <button className="btn btn-danger btn-sm" onClick={() => handleExpire(u.id)}>Expire Account</button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 

@@ -704,7 +704,7 @@ export async function handleSweepCron(tf, env, debugLog = null) {
   const { results: filtered } = await env.DB.prepare(`
     SELECT sc.id as config_id, sc.alert_mode,
            ua.id as asset_id, ua.symbol, ua.bias_overrides,
-           u.id as user_id, u.active as user_active
+           u.id as user_id, u.active as user_active, u.user_tf_access
     FROM user_sweep_configs sc
     JOIN user_assets ua ON sc.asset_id = ua.id
     JOIN users u ON sc.user_id = u.id
@@ -761,6 +761,9 @@ export async function handleSweepCron(tf, env, debugLog = null) {
         if (mssResult) {
           const htfLabelStr = getHTFLabel(tf);
           for (const row of userRows) {
+            const userTfAccess = JSON.parse(row.user_tf_access || '["M5","M15","M30","1H","4H","D","W"]');
+            if (!userTfAccess.includes(tf)) continue;
+
             const alertMode     = row.alert_mode ?? 'aligned';
             const biasOverrides = JSON.parse(row.bias_overrides || '{}');
             const effectiveBias = getEffectiveBias(biasTF, { [biasTF]: { bias: htfBias } }, biasOverrides);
@@ -821,6 +824,9 @@ export async function handleSweepCron(tf, env, debugLog = null) {
       log(`[${symbol}] sweep detected: ${sweep.direction} (HTF bias: ${htfBias})`);
 
       for (const row of userRows) {
+        const userTfAccess = JSON.parse(row.user_tf_access || '["M5","M15","M30","1H","4H","D","W"]');
+        if (!userTfAccess.includes(tf)) continue;
+
         const alertMode     = row.alert_mode ?? 'aligned';
         const biasOverrides = JSON.parse(row.bias_overrides || '{}');
         const effectiveBias = getEffectiveBias(biasTF, { [biasTF]: { bias: htfBias } }, biasOverrides);

@@ -2,15 +2,16 @@
 -- Run: npx wrangler d1 execute ebp-tracker-db --file=../schema.sql --remote
 
 CREATE TABLE IF NOT EXISTS users (
-  id          TEXT PRIMARY KEY,
-  email       TEXT NOT NULL,
-  name        TEXT,
-  plan        TEXT DEFAULT 'free',
-  asset_limit INTEGER DEFAULT 3,
-  created_at  INTEGER NOT NULL,
-  expires_at  INTEGER NOT NULL,
-  active      INTEGER DEFAULT 1,
-  is_admin    INTEGER DEFAULT 0
+  id             TEXT PRIMARY KEY,
+  email          TEXT NOT NULL,
+  name           TEXT,
+  plan           TEXT DEFAULT 'free',
+  asset_limit    INTEGER DEFAULT 3,
+  created_at     INTEGER NOT NULL,
+  expires_at     INTEGER NOT NULL,
+  active         INTEGER DEFAULT 1,
+  is_admin       INTEGER DEFAULT 0,
+  user_tf_access TEXT DEFAULT '["M5","M15","M30","1H","4H","D","W"]'
 );
 
 CREATE TABLE IF NOT EXISTS user_assets (

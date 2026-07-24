@@ -424,6 +424,73 @@ html, body, #root {
   border-color: var(--nav-active-accent);
 }
 
+/* ── Admin: collapsible user card ── */
+.user-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-sm);
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.user-card-chevron {
+  color: var(--muted);
+  font-size: 12px;
+  flex-shrink: 0;
+  transition: transform .15s;
+  display: inline-block;
+}
+
+.user-card-chevron.expanded { transform: rotate(90deg); }
+
+.user-card-body {
+  margin-top: var(--sp-md);
+  padding-top: var(--sp-md);
+  border-top: 1px solid var(--border);
+}
+
+/* ── TF access checkboxes (44px min touch target) ── */
+.tf-check-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-sm);
+}
+
+.tf-check-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 var(--sp-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  user-select: none;
+}
+
+.tf-check-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--bull);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.tf-check-row span {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
 /* ── Bias label (inline) ── */
 .bias-label {
   font-family: var(--font-mono);
