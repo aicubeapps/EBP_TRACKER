@@ -447,7 +447,7 @@ ${elapsed !== null ? `\n⏱ Confluence: ${elapsed} min` : ''}
 
 // ── Sweep Detection (inlined from sweep.js) ──────────────────
 
-function detectSweep(candles) {
+export function detectSweep(candles) {
   if (!candles || candles.length < 2) return null;
   const bar0 = candles[0];
   const bar1 = candles[1];
@@ -481,53 +481,6 @@ async function updateSweepCandleCache(db, symbol, tf, candles) {
     b2?.open??null, b2?.high??null, b2?.low??null, b2?.close??null,
     b0?.time??null, b1?.time??null, Date.now()
   ).run();
-}
-
-async function checkPendingSignals(db, userId, symbol, direction, ltfTF) {
-  const now     = Date.now();
-  const pending = await db.prepare(`
-    SELECT * FROM pending_signals
-    WHERE user_id = ? AND symbol = ? AND direction = ? AND expires_at > ?
-    ORDER BY fired_at DESC LIMIT 10
-  `).bind(userId, symbol, direction, now).all();
-
-  if (!pending.results?.length) return [];
-
-  const matches = [];
-  for (const signal of pending.results) {
-    const consumedPairs = JSON.parse(signal.consumed_pairs ?? '[]');
-    const pairKey       = `${signal.timeframe}:${ltfTF}`;
-    if (consumedPairs.includes(pairKey)) continue;
-
-    const asset = await db.prepare(`
-      SELECT combined_pairs, combined_enabled
-      FROM user_assets
-      WHERE user_id = ? AND symbol = ? AND active = 1
-    `).bind(userId, symbol).first();
-
-    if (!asset?.combined_enabled) continue;
-
-    const userPairs = JSON.parse(asset.combined_pairs ?? '[]');
-    const pairMatch = userPairs.find(p => p.htf === signal.timeframe && p.ltf === ltfTF);
-    if (pairMatch) matches.push({ signal, pairKey });
-  }
-  return matches;
-}
-
-async function consumePendingSignal(db, signalId, pairKey) {
-  const signal = await db.prepare(
-    'SELECT consumed_pairs FROM pending_signals WHERE id = ?'
-  ).bind(signalId).first();
-  if (!signal) return;
-  const consumed = JSON.parse(signal.consumed_pairs ?? '[]');
-  consumed.push(pairKey);
-  await db.prepare(
-    'UPDATE pending_signals SET consumed_pairs = ? WHERE id = ?'
-  ).bind(JSON.stringify(consumed), signalId).run();
-}
-
-async function cleanupExpiredSignals(db) {
-  await db.prepare('DELETE FROM pending_signals WHERE expires_at < ?').bind(Date.now()).run();
 }
 
 // ── Swing State + MSS Engine (Phase 1.5 + 2, inlined) ────────
@@ -739,14 +692,13 @@ export async function handleSweepCron(tf, env, debugLog = null) {
   log(`Sweep trigger → TF: ${tf}`);
 
   if (tf === 'M5') {
-    await cleanupExpiredSignals(env.DB);
     await cleanupExpiredFVGs(env.DB);
     await cleanupExpiredChains(env.DB);
     await resetExhaustedKeys(env.DB); // in case midnight UTC has passed
     await env.DB.prepare(
       `DELETE FROM api_call_log WHERE called_at < ?`
     ).bind(Date.now() - (2 * 24 * 60 * 60 * 1000)).run();
-    log('Cleaned up expired pending signals, FVGs, chains, key state, and API call log');
+    log('Cleaned up expired FVGs, chains, key state, and API call log');
   }
 
   const { results: filtered } = await env.DB.prepare(`

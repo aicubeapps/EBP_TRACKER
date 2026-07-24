@@ -1012,7 +1012,10 @@ router.get('/user/assets', async (req, env) => {
   ).bind(clerkUser.id).all();
 
   const enriched = await Promise.all((assets.results ?? []).map(async asset => {
-    const tfs    = asset.timeframes.split(',').map(t => t.trim());
+    const { results: configs } = await env.DB.prepare(
+      'SELECT timeframe FROM user_ebp_configs WHERE asset_id = ? AND enabled = 1'
+    ).bind(asset.id).all();
+    const tfs    = (configs ?? []).map(c => c.timeframe);
     const status = {};
     for (const tf of tfs) {
       const cache = await env.DB.prepare(

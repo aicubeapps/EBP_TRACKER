@@ -8,10 +8,10 @@
 //   GET  /health          — public health check
 //   POST /cron/sweep      — HTTP cron trigger (secured by X-Cron-Secret)
 //   GET  /sweep/dashboard — authenticated, sweep status per asset
-//   GET  /sweep/history   — authenticated, recent sweep/combined alerts
+//   GET  /sweep/history   — authenticated, recent sweep alerts
 // ============================================================
 
-import { handleSweepCron } from './sweep-cron.js';
+import { handleSweepCron, detectSweep } from './sweep-cron.js';
 
 // ── CORS ─────────────────────────────────────────────────────
 
@@ -159,15 +159,18 @@ async function handleFetch(request, env) {
   // GET /sweep/dashboard — sweep status per asset per TF
   if (pathname === '/sweep/dashboard' && request.method === 'GET') {
     const assets = await env.DB.prepare(`
-      SELECT ua.symbol, ua.sweep_timeframes
+      SELECT ua.id as asset_id, ua.symbol
       FROM user_assets ua
-      WHERE ua.user_id = ? AND ua.active = 1 AND ua.sweep_enabled = 1
+      WHERE ua.user_id = ? AND ua.active = 1
     `).bind(clerkUser.id).all();
 
     const result = [];
 
     for (const asset of (assets.results ?? [])) {
-      const tfs    = asset.sweep_timeframes?.split(',').map(t => t.trim()) ?? [];
+      const { results: configs } = await env.DB.prepare(
+        'SELECT timeframe FROM user_sweep_configs WHERE asset_id = ? AND enabled = 1'
+      ).bind(asset.asset_id).all();
+      const tfs    = (configs ?? []).map(c => c.timeframe);
       const status = {};
 
       for (const tf of tfs) {
@@ -176,7 +179,6 @@ async function handleFetch(request, env) {
         ).bind(asset.symbol, tf).first();
 
         if (cache) {
-          const { detectSweep } = await import('./sweep.js');
           const candles = [
             {
               open:  cache.bar_0_open,  high: cache.bar_0_high,
@@ -202,12 +204,12 @@ async function handleFetch(request, env) {
     return json(result, 200, origin);
   }
 
-  // GET /sweep/history — recent sweep and combined alerts
+  // GET /sweep/history — recent sweep alerts
   if (pathname === '/sweep/history' && request.method === 'GET') {
     const limit  = parseInt(url.searchParams.get('limit') ?? '50');
     const alerts = await env.DB.prepare(`
       SELECT * FROM alert_history
-      WHERE user_id = ? AND alert_type IN ('sweep', 'combined')
+      WHERE user_id = ? AND alert_type = 'sweep'
       ORDER BY fired_at DESC LIMIT ?
     `).bind(clerkUser.id, limit).all();
 

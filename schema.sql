@@ -14,21 +14,14 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE TABLE IF NOT EXISTS user_assets (
-  id                   TEXT PRIMARY KEY,
-  user_id              TEXT NOT NULL,
-  symbol               TEXT NOT NULL,
-  display_name         TEXT NOT NULL,
-  asset_type           TEXT NOT NULL,
-  timeframes           TEXT DEFAULT 'W,D,4H,1H,M15',
-  ebp_alert_mode       TEXT DEFAULT 'aligned',
-  sweep_enabled        INTEGER DEFAULT 0,
-  sweep_timeframes     TEXT DEFAULT '4H,1H,M15',
-  sweep_alert_mode     TEXT DEFAULT 'aligned',
-  combined_enabled     INTEGER DEFAULT 0,
-  combined_pairs       TEXT DEFAULT '[]',
-  combined_window_mins INTEGER DEFAULT 60,
-  active               INTEGER DEFAULT 1,
-  added_at             INTEGER NOT NULL,
+  id             TEXT PRIMARY KEY,
+  user_id        TEXT NOT NULL,
+  symbol         TEXT NOT NULL,
+  display_name   TEXT NOT NULL,
+  asset_type     TEXT NOT NULL,
+  active         INTEGER DEFAULT 1,
+  added_at       INTEGER NOT NULL,
+  bias_overrides TEXT DEFAULT '{}',
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
