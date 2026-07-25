@@ -515,7 +515,7 @@ function fmtNY(ts) {
   });
 }
 
-function formatEBPAlert({ symbol, tf, direction, candleTime, trendBias, trendAligned, sweptLevel, closedLevel }) {
+function formatEBPAlert({ symbol, tf, direction, candleTime, trendBias, trendAligned, sweptLevel, closedLevel, signalId }) {
   const emoji     = direction === 'bullish' ? '🟢' : '🔴';
   const label     = direction === 'bullish' ? 'BULLISH EBP' : 'BEARISH EBP';
   const alignMark = trendAligned ? '✅' : '⚠️ No Trend Filter';
@@ -528,7 +528,7 @@ function formatEBPAlert({ symbol, tf, direction, candleTime, trendBias, trendAli
 ━━━━━━━━━━━━━━
 ${swept}: ${sweptLevel}
 ${closed}: ${closedLevel}
-━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━${signalId ? `\n🔗 Signal ID: ${signalId}` : ''}
 <i>EBP Tracker</i>`;
 }
 
@@ -770,6 +770,51 @@ async function updateCandleCache(db, symbol, tf, candles) {
   ).run();
 }
 
+// ── Phase I — EBP Signal IDs (4H/1D/1W only, separate counters from T3/NSE) ──
+async function generateEbpSignalId(tf, symbol, env) {
+  const counterKey = `EBP-${tf}`; // EBP-4H, EBP-1D, EBP-1W
+  const row = await env.DB.prepare(
+    'SELECT series, count FROM signal_counters WHERE template = ?'
+  ).bind(counterKey).first();
+
+  let { series, count } = row;
+  count += 1;
+  if (count > 999) {
+    series = String.fromCharCode(series.charCodeAt(0) + 1);
+    count = 1;
+  }
+
+  await env.DB.prepare(
+    'UPDATE signal_counters SET series = ?, count = ? WHERE template = ?'
+  ).bind(series, count, counterKey).run();
+
+  const normSymbol = symbol.replace('/', '').toUpperCase();
+  const countStr   = count.toString().padStart(3, '0');
+  return `EBP-${normSymbol}-${tf}${series}${countStr}`;
+}
+
+// EBP 4H/1D signals expire end of the current UTC month; 1W signals expire
+// end of the current UTC quarter — these are swept by the daily cleanup in
+// handleEBPCron (tf === 'D') once past expiry.
+function getEbpExpiresAt(tf) {
+  const now = new Date();
+  if (tf === '1W') {
+    const month           = now.getUTCMonth();
+    const quarterEndMonth = Math.floor(month / 3) * 3 + 3;
+    return new Date(Date.UTC(
+      now.getUTCFullYear() + (quarterEndMonth === 12 ? 1 : 0),
+      quarterEndMonth === 12 ? 0 : quarterEndMonth,
+      1
+    )).toISOString();
+  }
+  // 4H and 1D — end of current month
+  return new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth() + 1,
+    1
+  )).toISOString();
+}
+
 // ============================================================
 // Cron Handler — invoked via POST /cron/ebp (cron-job.org), tf is
 // explicit (each cron-job.org job fires a fixed tf on its own schedule,
@@ -777,6 +822,16 @@ async function updateCandleCache(db, symbol, tf, candles) {
 // ============================================================
 async function handleEBPCron(tf, env, debugLog = null) {
   const log = (msg) => { console.log(msg); if (debugLog) debugLog.push(msg); };
+
+  // Daily EBP signal cleanup — sweep expired 4H/1D/1W signals once per day
+  if (tf === 'D') {
+    await env.DB.prepare(`
+      DELETE FROM signals
+      WHERE template_type = 'EBP'
+      AND expires_at IS NOT NULL
+      AND expires_at <= ?
+    `).bind(new Date().toISOString()).run();
+  }
   log(`EBP trigger → TF: ${tf}`);
 
   const { results: filtered } = await env.DB.prepare(`
@@ -787,7 +842,7 @@ async function handleEBPCron(tf, env, debugLog = null) {
     JOIN user_assets ua ON ec.asset_id = ua.id
     JOIN users u ON ec.user_id = u.id
     WHERE ec.timeframe=? AND ec.enabled=1
-    AND ua.active=1 AND u.active=1
+    AND u.active=1
   `).bind(tf).all();
   if (!filtered?.length) {
     log(`No enabled EBP configs for TF ${tf}`);
@@ -870,6 +925,21 @@ async function handleEBPCron(tf, env, debugLog = null) {
         continue;
       }
 
+      // Signal ID generated once per symbol+TF event here (not per user
+      // below) — every user notified for this event shares the same ID.
+      let ebpSignalId = null;
+      if (['4H', 'D', 'W'].includes(tf)) {
+        const signalTf = tf === 'D' ? '1D' : tf === 'W' ? '1W' : '4H';
+        ebpSignalId = await generateEbpSignalId(signalTf, symbol, env);
+        await env.DB.prepare(`
+          INSERT INTO signals (signal_id, template_type, symbol, htf_tf, ltf_tf, direction, fired_at, expires_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+          ebpSignalId, 'EBP', symbol, null, signalTf,
+          ebp.direction, new Date().toISOString(), getEbpExpiresAt(signalTf)
+        ).run();
+      }
+
       for (const row of userRows) {
         const userTfAccess = JSON.parse(row.user_tf_access || '["M5","M15","M30","1H","4H","D","W"]');
         if (!userTfAccess.includes(tf)) continue;
@@ -893,6 +963,7 @@ async function handleEBPCron(tf, env, debugLog = null) {
           trendAligned,
           sweptLevel:  ebp.sweptLevel?.toFixed(5),
           closedLevel: ebp.closedLevel?.toFixed(5),
+          signalId:    ebpSignalId,
         });
 
         await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, msg);
@@ -1024,7 +1095,7 @@ router.get('/user/assets', async (req, env) => {
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
 
   const assets = await env.DB.prepare(
-    'SELECT * FROM user_assets WHERE user_id = ? AND active = 1 ORDER BY added_at ASC'
+    'SELECT * FROM user_assets WHERE user_id = ? ORDER BY added_at ASC'
   ).bind(clerkUser.id).all();
 
   const enriched = await Promise.all((assets.results ?? []).map(async asset => {
@@ -1060,7 +1131,7 @@ router.post('/user/assets', async (req, env) => {
   const user = await getOrCreateUser(env.DB, clerkUser);
 
   const count = await env.DB.prepare(
-    'SELECT COUNT(*) as cnt FROM user_assets WHERE user_id = ? AND active = 1'
+    'SELECT COUNT(*) as cnt FROM user_assets WHERE user_id = ?'
   ).bind(clerkUser.id).first();
   if (count.cnt >= user.asset_limit) {
     return json({ error: 'asset_limit_reached', limit: user.asset_limit }, 403, origin);
@@ -1071,7 +1142,7 @@ router.post('/user/assets', async (req, env) => {
     return json({ error: 'Symbol is required.' }, 400, origin);
   }
   const existing = await env.DB.prepare(
-    'SELECT id FROM user_assets WHERE user_id = ? AND symbol = ? AND active = 1'
+    'SELECT id FROM user_assets WHERE user_id = ? AND symbol = ?'
   ).bind(clerkUser.id, symbolStr).first();
   if (existing) {
     return json({ error: 'Asset already in your list.' }, 400, origin);
@@ -1103,7 +1174,7 @@ router.get('/user/assets/count', async (req, env) => {
   const { user: clerkUser, origin, error } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
   const row = await env.DB.prepare(
-    'SELECT COUNT(*) as cnt FROM user_assets WHERE user_id = ? AND active = 1'
+    'SELECT COUNT(*) as cnt FROM user_assets WHERE user_id = ?'
   ).bind(clerkUser.id).first();
   const userRow = await env.DB.prepare(
     'SELECT asset_limit FROM users WHERE id = ?'
@@ -1116,9 +1187,15 @@ router.get('/user/assets/count', async (req, env) => {
 router.delete('/user/assets/:id', async (req, env) => {
   const { user: clerkUser, origin, error, params } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+
+  await env.DB.prepare('DELETE FROM user_ebp_configs WHERE asset_id = ?').bind(params.id).run();
+  await env.DB.prepare('DELETE FROM user_sweep_configs WHERE asset_id = ?').bind(params.id).run();
+  await env.DB.prepare('DELETE FROM user_templates WHERE asset_id = ?').bind(params.id).run();
+  await env.DB.prepare('DELETE FROM chain_state WHERE asset_id = ?').bind(params.id).run();
   await env.DB.prepare(
-    'UPDATE user_assets SET active = 0 WHERE id = ? AND user_id = ?'
+    'DELETE FROM user_assets WHERE id = ? AND user_id = ?'
   ).bind(params.id, clerkUser.id).run();
+
   return json({ success: true }, 200, origin);
 });
 
@@ -1327,7 +1404,7 @@ router.get('/dashboard', async (req, env) => {
        WHERE user_id = ua.user_id AND symbol = ua.symbol
        ORDER BY fired_at DESC LIMIT 1) as last_alert_at
     FROM user_assets ua
-    WHERE ua.user_id = ? AND ua.active = 1
+    WHERE ua.user_id = ?
     ORDER BY ua.added_at ASC
   `).bind(clerkUser.id).all();
   return json(assets.results ?? [], 200, origin);
@@ -1611,7 +1688,7 @@ router.get('/admin/users', async (req, env) => {
   if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
   const users = await env.DB.prepare(`
     SELECT u.*,
-      (SELECT COUNT(*) FROM user_assets WHERE user_id = u.id AND active = 1) as asset_count,
+      (SELECT COUNT(*) FROM user_assets WHERE user_id = u.id) as asset_count,
       (SELECT COUNT(*) FROM alert_history WHERE user_id = u.id) as alert_count,
       (SELECT verified FROM user_telegram WHERE user_id = u.id) as telegram_verified
     FROM users u ORDER BY u.created_at DESC
@@ -1723,7 +1800,7 @@ router.get('/admin/users/:id/assets', async (req, env) => {
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
   if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
   const assets = await env.DB.prepare(
-    'SELECT symbol, asset_type, added_at FROM user_assets WHERE user_id = ? AND active = 1 ORDER BY added_at ASC'
+    'SELECT symbol, asset_type, added_at FROM user_assets WHERE user_id = ? ORDER BY added_at ASC'
   ).bind(params.id).all();
   return json(assets.results ?? [], 200, origin);
 });

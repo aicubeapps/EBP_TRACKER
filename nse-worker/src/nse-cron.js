@@ -491,7 +491,7 @@ export async function handleNseCron(env, tf) {
     JOIN user_assets ua ON ec.asset_id = ua.id
     JOIN users u ON ec.user_id = u.id
     WHERE ua.asset_type='nse' AND ec.timeframe=? AND ec.enabled=1
-    AND ua.active=1 AND u.active=1
+    AND u.active=1
   `).bind(tf).all();
 
   const { results: sweepRows } = await env.DB.prepare(`
@@ -502,7 +502,7 @@ export async function handleNseCron(env, tf) {
     JOIN user_assets ua ON sc.asset_id = ua.id
     JOIN users u ON sc.user_id = u.id
     WHERE ua.asset_type='nse' AND sc.timeframe=? AND sc.enabled=1
-    AND ua.active=1 AND u.active=1
+    AND u.active=1
   `).bind(tf).all();
 
   const symbolMap = new Map(); // symbol -> { ebp: [rows], sweep: [rows] }

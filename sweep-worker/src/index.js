@@ -161,7 +161,7 @@ async function handleFetch(request, env) {
     const assets = await env.DB.prepare(`
       SELECT ua.id as asset_id, ua.symbol
       FROM user_assets ua
-      WHERE ua.user_id = ? AND ua.active = 1
+      WHERE ua.user_id = ?
     `).bind(clerkUser.id).all();
 
     const result = [];

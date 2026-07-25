@@ -732,7 +732,7 @@ export async function handleSweepCron(tf, env, debugLog = null) {
     JOIN user_assets ua ON sc.asset_id = ua.id
     JOIN users u ON sc.user_id = u.id
     WHERE sc.timeframe=? AND sc.enabled=1
-    AND ua.active=1 AND u.active=1
+    AND u.active=1
   `).bind(tf).all();
 
   if (!filtered?.length) {

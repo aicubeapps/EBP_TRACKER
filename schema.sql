@@ -21,7 +21,6 @@ CREATE TABLE IF NOT EXISTS user_assets (
   symbol         TEXT NOT NULL,
   display_name   TEXT NOT NULL,
   asset_type     TEXT NOT NULL,
-  active         INTEGER DEFAULT 1,
   added_at       INTEGER NOT NULL,
   bias_overrides TEXT DEFAULT '{}',
   FOREIGN KEY (user_id) REFERENCES users(id)
@@ -284,7 +283,8 @@ CREATE TABLE IF NOT EXISTS signals (
   ltf_tf        TEXT,
   direction     TEXT,
   fired_at      TEXT NOT NULL,
-  traded        INTEGER DEFAULT 0
+  traded        INTEGER DEFAULT 0,
+  expires_at    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS signal_counters (
@@ -293,3 +293,6 @@ CREATE TABLE IF NOT EXISTS signal_counters (
   count     INTEGER DEFAULT 0
 );
 -- Seed: INSERT OR IGNORE INTO signal_counters (template, series, count) VALUES ('NSE', 'A', 0);
+-- Seed (migration 008): INSERT OR IGNORE INTO signal_counters (template, series, count) VALUES ('EBP-4H', 'A', 0);
+-- Seed (migration 008): INSERT OR IGNORE INTO signal_counters (template, series, count) VALUES ('EBP-1D', 'A', 0);
+-- Seed (migration 008): INSERT OR IGNORE INTO signal_counters (template, series, count) VALUES ('EBP-1W', 'A', 0);
