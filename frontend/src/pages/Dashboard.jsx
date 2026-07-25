@@ -18,7 +18,10 @@ export default function Dashboard() {
   const { user }                                          = useUser();
   const { assets, loading, error, removeAsset }           = useAssets();
 
-  const [assetCount, setAssetCount]     = useState({ count: 0, limit: 5, remaining: 5 });
+  const [assetCount, setAssetCount]     = useState({
+    forex_crypto_count: 0, forex_crypto_limit: 5, forex_crypto_remaining: 5,
+    nse_count: 0, nse_limit: 'unlimited',
+  });
   const [lastApiCall, setLastApiCall]   = useState(null);
   const [upstoxConfigured, setUpstoxConfigured] = useState(true); // assume configured until checked, avoids a flash of the delay badge
 
@@ -87,8 +90,8 @@ export default function Dashboard() {
       </div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 4, margin: '6px 0 var(--sp-md)' }}>
         <span className="text-mono text-muted" style={{ fontSize: 11 }}>
-          {assetCount.count} / {assetCount.limit} assets used
-          {assetCount.remaining === 0 && ' — limit reached'}
+          {assetCount.forex_crypto_count} / {assetCount.forex_crypto_limit} assets used
+          {assetCount.forex_crypto_remaining === 0 && ' — limit reached'}
         </span>
         {lastApiCall && (
           <span className="text-mono text-muted" style={{ fontSize: 11 }}>

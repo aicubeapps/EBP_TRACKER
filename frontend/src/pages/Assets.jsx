@@ -9,7 +9,10 @@ export default function Assets() {
   const { getToken } = useAuth();
   const { assets, loading, addAsset, removeAsset, refetch } = useAssets();
 
-  const [assetCount, setAssetCount]           = useState({ count: 0, limit: 5 });
+  const [assetCount, setAssetCount]           = useState({
+    forex_crypto_count: 0, forex_crypto_limit: 5, forex_crypto_remaining: 5,
+    nse_count: 0, nse_limit: 'unlimited',
+  });
   const [countLoading, setCountLoading]       = useState(true);
   const [pending, setPending]                 = useState({});
   const [rowErrors, setRowErrors]             = useState({});
@@ -32,7 +35,7 @@ export default function Assets() {
   const ownedMap = {};
   for (const a of assets) ownedMap[a.symbol] = a.id;
 
-  const limitReached = assetCount.count >= assetCount.limit;
+  const limitReached = assetCount.forex_crypto_count >= assetCount.forex_crypto_limit;
 
   async function handleToggle(symbol, assetType, checked) {
     setPending(p => ({ ...p, [symbol]: true }));

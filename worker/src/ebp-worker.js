@@ -1168,11 +1168,17 @@ router.post('/user/assets', async (req, env) => {
   const body = await req.json();
   const user = await getOrCreateUser(env.DB, clerkUser);
 
-  const count = await env.DB.prepare(
-    'SELECT COUNT(*) as cnt FROM user_assets WHERE user_id = ?'
-  ).bind(clerkUser.id).first();
-  if (count.cnt >= user.asset_limit) {
-    return json({ error: 'asset_limit_reached', limit: user.asset_limit }, 403, origin);
+  const assetType = body.assetType ?? 'forex';
+
+  // Slot limit applies to forex/crypto only — NSE assets are unlimited and
+  // never count against asset_limit.
+  if (assetType !== 'nse') {
+    const count = await env.DB.prepare(
+      "SELECT COUNT(*) as cnt FROM user_assets WHERE user_id = ? AND asset_type != 'nse'"
+    ).bind(clerkUser.id).first();
+    if (count.cnt >= user.asset_limit) {
+      return json({ error: 'asset_limit_reached', limit: user.asset_limit }, 403, origin);
+    }
   }
 
   const symbolStr = normaliseSymbol(String(body.symbol ?? '').toUpperCase().trim());
@@ -1186,7 +1192,6 @@ router.post('/user/assets', async (req, env) => {
     return json({ error: 'Asset already in your list.' }, 400, origin);
   }
 
-  const assetType = body.assetType ?? 'forex';
   if (assetType !== 'forex' && assetType !== 'crypto') {
     // NSE ('nse') and any unrecognised type still go through Yahoo validation.
     // Forex/crypto symbols come from the hardcoded asset browser list, so
@@ -1211,15 +1216,28 @@ router.post('/user/assets', async (req, env) => {
 router.get('/user/assets/count', async (req, env) => {
   const { user: clerkUser, origin, error } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const row = await env.DB.prepare(
-    'SELECT COUNT(*) as cnt FROM user_assets WHERE user_id = ?'
+
+  const forexRow = await env.DB.prepare(
+    "SELECT COUNT(*) as cnt FROM user_assets WHERE user_id = ? AND asset_type != 'nse'"
+  ).bind(clerkUser.id).first();
+  const nseRow = await env.DB.prepare(
+    "SELECT COUNT(*) as cnt FROM user_assets WHERE user_id = ? AND asset_type = 'nse'"
   ).bind(clerkUser.id).first();
   const userRow = await env.DB.prepare(
     'SELECT asset_limit FROM users WHERE id = ?'
   ).bind(clerkUser.id).first();
-  const count = row?.cnt ?? 0;
-  const limit = userRow?.asset_limit ?? 5;
-  return json({ count, limit, remaining: Math.max(0, limit - count) }, 200, origin);
+
+  const forexCryptoCount = forexRow?.cnt ?? 0;
+  const nseCount         = nseRow?.cnt ?? 0;
+  const limit            = userRow?.asset_limit ?? 5;
+
+  return json({
+    forex_crypto_count:     forexCryptoCount,
+    forex_crypto_limit:     limit,
+    forex_crypto_remaining: Math.max(0, limit - forexCryptoCount),
+    nse_count:              nseCount,
+    nse_limit:              'unlimited',
+  }, 200, origin);
 });
 
 router.delete('/user/assets/:id', async (req, env) => {
