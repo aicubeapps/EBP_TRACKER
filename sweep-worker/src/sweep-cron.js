@@ -420,6 +420,32 @@ function fmtNY(ts) {
   });
 }
 
+// ── Phase I addendum — trading session at signal fire time ─────
+function deriveSession(firedAtISO) {
+  const date = new Date(firedAtISO);
+
+  function isDST(d) {
+    const year = d.getUTCFullYear();
+    const march = new Date(Date.UTC(year, 2, 1));
+    const dstStart = new Date(Date.UTC(year, 2, 8 + (7 - march.getUTCDay()) % 7));
+    const nov = new Date(Date.UTC(year, 10, 1));
+    const dstEnd = new Date(Date.UTC(year, 10, (7 - nov.getUTCDay()) % 7 + 1));
+    dstStart.setUTCHours(7);
+    dstEnd.setUTCHours(6);
+    return d >= dstStart && d < dstEnd;
+  }
+
+  const offset = isDST(date) ? 4 : 5;
+  const nyHour = (date.getUTCHours() - offset + 24) % 24;
+  const nyMinute = date.getUTCMinutes();
+  const nyTime = nyHour + nyMinute / 60;
+
+  if (nyTime >= 20) return 'Asian';        // 20:00–00:00 NY
+  if (nyTime >= 7  && nyTime < 10) return 'New York';  // 07:00–10:00 NY
+  if (nyTime >= 2  && nyTime < 5)  return 'London';    // 02:00–05:00 NY
+  return 'Off-hours';
+}
+
 function getHTFLabel(tf) {
   const map = { 'M5': '1H', 'M15': '1H', 'M30': '4H', '1H': 'Daily', '4H': 'Weekly', 'D': 'Weekly', 'W': 'Raw' };
   return map[tf] ?? 'HTF';
@@ -817,12 +843,28 @@ export async function handleSweepCron(tf, env, debugLog = null) {
               if (chain.ltf !== tf) continue;
 
               const signalId = await generateSignalId(env.DB, 'T3', symbol);
+              const firedAt  = new Date().toISOString();
+              // price_at_signal: detectMSS() returns {direction, level, candle_time} —
+              // no close field — so the actual MSS-triggering candle's close comes
+              // from `candles` (newest-first, fetched above), not mssResult itself.
+              // htf_bias: the bias for BIAS_SOURCE.sweep[tf] (this LTF's own bias
+              // gating), not a fresh lookup against chain.htf_tf specifically —
+              // may differ from the chain's original EBP HTF in some configs.
+              // htf_close: chain_state has no close-price column and
+              // initiateT3Chain never sets one — always null for T3.
               await env.DB.prepare(`
-                INSERT INTO signals (signal_id, template_type, symbol, htf_tf, ltf_tf, direction, fired_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO signals (
+                  signal_id, template_type, symbol, htf_tf, ltf_tf, direction, fired_at,
+                  price_at_signal, htf_bias, session, htf_close
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               `).bind(
                 signalId, 'T3', symbol, chain.htf_tf, tf,
-                mssResult.direction, new Date().toISOString()
+                mssResult.direction, firedAt,
+                candles[0].close ?? null,
+                htfBias ?? null,
+                deriveSession(firedAt),
+                chain.htf_close ?? null
               ).run();
 
               const t3Msg = formatT3Alert(

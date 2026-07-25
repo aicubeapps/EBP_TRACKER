@@ -276,15 +276,19 @@ CREATE TABLE IF NOT EXISTS nse_candle_cache (
 -- runs A-Z, count runs 1-999 per series, shared globally across all symbols
 -- for that template.
 CREATE TABLE IF NOT EXISTS signals (
-  signal_id     TEXT PRIMARY KEY,
-  template_type TEXT NOT NULL,
-  symbol        TEXT NOT NULL,
-  htf_tf        TEXT,
-  ltf_tf        TEXT,
-  direction     TEXT,
-  fired_at      TEXT NOT NULL,
-  traded        INTEGER DEFAULT 0,
-  expires_at    TEXT
+  signal_id        TEXT PRIMARY KEY,
+  template_type    TEXT NOT NULL,
+  symbol           TEXT NOT NULL,
+  htf_tf           TEXT,
+  ltf_tf           TEXT,
+  direction        TEXT,
+  fired_at         TEXT NOT NULL,
+  traded           INTEGER DEFAULT 0,
+  expires_at       TEXT,
+  price_at_signal  REAL,
+  htf_bias         TEXT,
+  session          TEXT,
+  htf_close        REAL
 );
 
 CREATE TABLE IF NOT EXISTS signal_counters (

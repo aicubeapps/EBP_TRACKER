@@ -515,6 +515,32 @@ function fmtNY(ts) {
   });
 }
 
+// ── Phase I addendum — trading session at signal fire time ─────
+function deriveSession(firedAtISO) {
+  const date = new Date(firedAtISO);
+
+  function isDST(d) {
+    const year = d.getUTCFullYear();
+    const march = new Date(Date.UTC(year, 2, 1));
+    const dstStart = new Date(Date.UTC(year, 2, 8 + (7 - march.getUTCDay()) % 7));
+    const nov = new Date(Date.UTC(year, 10, 1));
+    const dstEnd = new Date(Date.UTC(year, 10, (7 - nov.getUTCDay()) % 7 + 1));
+    dstStart.setUTCHours(7);
+    dstEnd.setUTCHours(6);
+    return d >= dstStart && d < dstEnd;
+  }
+
+  const offset = isDST(date) ? 4 : 5;
+  const nyHour = (date.getUTCHours() - offset + 24) % 24;
+  const nyMinute = date.getUTCMinutes();
+  const nyTime = nyHour + nyMinute / 60;
+
+  if (nyTime >= 20) return 'Asian';        // 20:00–00:00 NY
+  if (nyTime >= 7  && nyTime < 10) return 'New York';  // 07:00–10:00 NY
+  if (nyTime >= 2  && nyTime < 5)  return 'London';    // 02:00–05:00 NY
+  return 'Off-hours';
+}
+
 function formatEBPAlert({ symbol, tf, direction, candleTime, trendBias, trendAligned, sweptLevel, closedLevel, signalId }) {
   const emoji     = direction === 'bullish' ? '🟢' : '🔴';
   const label     = direction === 'bullish' ? 'BULLISH EBP' : 'BEARISH EBP';
@@ -931,12 +957,24 @@ async function handleEBPCron(tf, env, debugLog = null) {
       if (['4H', 'D', 'W'].includes(tf)) {
         const signalTf = tf === 'D' ? '1D' : tf === 'W' ? '1W' : '4H';
         ebpSignalId = await generateEbpSignalId(signalTf, symbol, env);
+        const firedAt = new Date().toISOString();
+        // price_at_signal: detectEBP() has no `ebpCandle` — the EBP candle's
+        // close is ebp.closedLevel (= bar0.close), already computed above.
+        // htf_bias: 'neutral' by design for W-tf signals (BIAS_SOURCE.ebp['W']
+        // is null — there's no timeframe higher than Weekly to bias against).
         await env.DB.prepare(`
-          INSERT INTO signals (signal_id, template_type, symbol, htf_tf, ltf_tf, direction, fired_at, expires_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO signals (
+            signal_id, template_type, symbol, htf_tf, ltf_tf, direction, fired_at, expires_at,
+            price_at_signal, htf_bias, session, htf_close
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).bind(
           ebpSignalId, 'EBP', symbol, null, signalTf,
-          ebp.direction, new Date().toISOString(), getEbpExpiresAt(signalTf)
+          ebp.direction, firedAt, getEbpExpiresAt(signalTf),
+          ebp.closedLevel ?? null,
+          htfBias ?? null,
+          deriveSession(firedAt),
+          null
         ).run();
       }
 

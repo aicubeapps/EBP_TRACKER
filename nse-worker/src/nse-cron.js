@@ -390,6 +390,35 @@ function fmtIST(ts) {
   });
 }
 
+// ── Phase I addendum — trading session at signal fire time ─────
+// Same NY-clock-relative buckets as the EBP/Sweep Workers, applied here
+// unchanged — this labels which global FX session was active when the
+// signal fired, not whether the NSE market itself was open.
+function deriveSession(firedAtISO) {
+  const date = new Date(firedAtISO);
+
+  function isDST(d) {
+    const year = d.getUTCFullYear();
+    const march = new Date(Date.UTC(year, 2, 1));
+    const dstStart = new Date(Date.UTC(year, 2, 8 + (7 - march.getUTCDay()) % 7));
+    const nov = new Date(Date.UTC(year, 10, 1));
+    const dstEnd = new Date(Date.UTC(year, 10, (7 - nov.getUTCDay()) % 7 + 1));
+    dstStart.setUTCHours(7);
+    dstEnd.setUTCHours(6);
+    return d >= dstStart && d < dstEnd;
+  }
+
+  const offset = isDST(date) ? 4 : 5;
+  const nyHour = (date.getUTCHours() - offset + 24) % 24;
+  const nyMinute = date.getUTCMinutes();
+  const nyTime = nyHour + nyMinute / 60;
+
+  if (nyTime >= 20) return 'Asian';        // 20:00–00:00 NY
+  if (nyTime >= 7  && nyTime < 10) return 'New York';  // 07:00–10:00 NY
+  if (nyTime >= 2  && nyTime < 5)  return 'London';    // 02:00–05:00 NY
+  return 'Off-hours';
+}
+
 function formatNseEBPAlert({ symbol, tf, direction, candleTime, trendBias, biasTF, sweptLevel, closedLevel, signalId }) {
   const emoji     = direction === 'bullish' ? '🟢' : '🔴';
   const label     = direction === 'bullish' ? 'BULLISH EBP' : 'BEARISH EBP';
@@ -550,10 +579,19 @@ export async function handleNseCron(env, tf) {
 
       if (mssResult) {
         const signalId = await generateNseSignalId(env, symbol);
+        const firedAt  = new Date().toISOString();
+        // detectMSS() returns {direction, level, candle_time} — no close field —
+        // so price_at_signal comes from candles[0] (newest candle), not mssResult.
         await env.DB.prepare(`
-          INSERT INTO signals (signal_id, template_type, symbol, htf_tf, ltf_tf, direction, fired_at, traded)
-          VALUES (?,?,?,?,?,?,?,0)
-        `).bind(signalId, 'NSE_MSS', symbol, biasTF, tf, mssResult.direction, new Date().toISOString()).run();
+          INSERT INTO signals (
+            signal_id, template_type, symbol, htf_tf, ltf_tf, direction, fired_at, traded,
+            price_at_signal, htf_bias, session, htf_close
+          )
+          VALUES (?,?,?,?,?,?,?,0,?,?,?,?)
+        `).bind(
+          signalId, 'NSE_MSS', symbol, biasTF, tf, mssResult.direction, firedAt,
+          candles[0].close ?? null, htfBias ?? null, deriveSession(firedAt), null
+        ).run();
 
         const message = formatNseMSSAlert({ symbol, tf, mss: mssResult, trendBias: htfBias, biasTF, signalId });
         const seen = new Set();
@@ -569,10 +607,17 @@ export async function handleNseCron(env, tf) {
 
       if (ebpResult && ebpUserRows.length) {
         const signalId = await generateNseSignalId(env, symbol);
+        const firedAt  = new Date().toISOString();
         await env.DB.prepare(`
-          INSERT INTO signals (signal_id, template_type, symbol, htf_tf, ltf_tf, direction, fired_at, traded)
-          VALUES (?,?,?,?,?,?,?,0)
-        `).bind(signalId, 'NSE_EBP', symbol, biasTF, tf, ebpResult.direction, new Date().toISOString()).run();
+          INSERT INTO signals (
+            signal_id, template_type, symbol, htf_tf, ltf_tf, direction, fired_at, traded,
+            price_at_signal, htf_bias, session, htf_close
+          )
+          VALUES (?,?,?,?,?,?,?,0,?,?,?,?)
+        `).bind(
+          signalId, 'NSE_EBP', symbol, biasTF, tf, ebpResult.direction, firedAt,
+          ebpResult.closedLevel ?? null, htfBias ?? null, deriveSession(firedAt), null
+        ).run();
 
         const message = formatNseEBPAlert({
           symbol, tf, direction: ebpResult.direction, candleTime: ebpResult.candleTime,
@@ -590,10 +635,17 @@ export async function handleNseCron(env, tf) {
 
       if (sweepResult && sweepUserRows.length) {
         const signalId = await generateNseSignalId(env, symbol);
+        const firedAt  = new Date().toISOString();
         await env.DB.prepare(`
-          INSERT INTO signals (signal_id, template_type, symbol, htf_tf, ltf_tf, direction, fired_at, traded)
-          VALUES (?,?,?,?,?,?,?,0)
-        `).bind(signalId, 'NSE_SWEEP', symbol, biasTF, tf, sweepResult.direction, new Date().toISOString()).run();
+          INSERT INTO signals (
+            signal_id, template_type, symbol, htf_tf, ltf_tf, direction, fired_at, traded,
+            price_at_signal, htf_bias, session, htf_close
+          )
+          VALUES (?,?,?,?,?,?,?,0,?,?,?,?)
+        `).bind(
+          signalId, 'NSE_SWEEP', symbol, biasTF, tf, sweepResult.direction, firedAt,
+          sweepResult.closedInsideLevel ?? null, htfBias ?? null, deriveSession(firedAt), null
+        ).run();
 
         const message = formatNseSweepAlert({
           symbol, tf, direction: sweepResult.direction, candleTime: sweepResult.candleTime,
