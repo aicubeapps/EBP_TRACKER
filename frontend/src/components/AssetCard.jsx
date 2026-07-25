@@ -82,7 +82,7 @@ export default function AssetCard({ asset, tier, onRemove }) {
       {ebpEnabled && showBiasOverride && (
         <BiasOverridePanel overrides={biasOverrides} onChange={handleOverrideChange} />
       )}
-      {ebpEnabled && <EBPConfigPanel assetId={asset.id} biasCache={biasCache} />}
+      {ebpEnabled && <EBPConfigPanel assetId={asset.id} assetType={asset.asset_type} biasCache={biasCache} />}
 
       {/* Sweep Alerts */}
       <div className="check-row">
@@ -90,7 +90,7 @@ export default function AssetCard({ asset, tier, onRemove }) {
           checked={sweepEnabled} onChange={e => setSweepEnabled(e.target.checked)} />
         <label htmlFor={`sweep-${asset.id}`}>Sweep Alerts</label>
       </div>
-      {sweepEnabled && <SweepConfigPanel assetId={asset.id} biasCache={biasCache} />}
+      {sweepEnabled && <SweepConfigPanel assetId={asset.id} assetType={asset.asset_type} biasCache={biasCache} />}
 
       {/* AI Alerts */}
       <div className="check-row">

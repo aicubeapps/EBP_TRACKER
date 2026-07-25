@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS users (
   expires_at     INTEGER NOT NULL,
   active         INTEGER DEFAULT 1,
   is_admin       INTEGER DEFAULT 0,
-  user_tf_access TEXT DEFAULT '["M5","M15","M30","1H","4H","D","W"]'
+  user_tf_access TEXT DEFAULT '["M5","M15","M30","1H","4H","D","W"]',
+  nse_tf_access  TEXT DEFAULT '["M1","M5","M15","M30","1H","D"]'
 );
 
 CREATE TABLE IF NOT EXISTS user_assets (
@@ -255,3 +256,40 @@ CREATE TABLE IF NOT EXISTS api_key_state (
 --        ('tdkey-003', 'twelvedata', 'YOUR_KEY_3', 'Twelve Data Key 3', 1, unixepoch()*1000, 'system');
 -- INSERT OR IGNORE INTO api_key_state (key_name, exhausted, calls_today, reset_at)
 -- VALUES ('tdkey-001', 0, 0, 0), ('tdkey-002', 0, 0, 0), ('tdkey-003', 0, 0, 0);
+
+-- ── Phase D — NSE Worker ──────────────────────────────────────
+-- Own candle cache, separate from candle_cache/sweep_candle_cache to avoid
+-- TF-set conflicts (NSE runs M1/M5/M15/M30/1H/D; forex/crypto workers don't).
+CREATE TABLE IF NOT EXISTS nse_candle_cache (
+  symbol      TEXT NOT NULL,
+  timeframe   TEXT NOT NULL,
+  bar_0_open  REAL, bar_0_high REAL, bar_0_low REAL, bar_0_close REAL,
+  bar_1_open  REAL, bar_1_high REAL, bar_1_low REAL, bar_1_close REAL,
+  bar_2_open  REAL, bar_2_high REAL, bar_2_low REAL, bar_2_close REAL,
+  bar_0_time  INTEGER, bar_1_time INTEGER,
+  updated_at  INTEGER,
+  PRIMARY KEY (symbol, timeframe)
+);
+
+-- ── Phase I (retrofit) / Phase D — Signal IDs ─────────────────
+-- signals is append-only from Workers; Trade Journal only PATCHes `traded`.
+-- signal_counters holds one row per template ('t3','t4','NSE',...) — series
+-- runs A-Z, count runs 1-999 per series, shared globally across all symbols
+-- for that template.
+CREATE TABLE IF NOT EXISTS signals (
+  signal_id     TEXT PRIMARY KEY,
+  template_type TEXT NOT NULL,
+  symbol        TEXT NOT NULL,
+  htf_tf        TEXT,
+  ltf_tf        TEXT,
+  direction     TEXT,
+  fired_at      TEXT NOT NULL,
+  traded        INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS signal_counters (
+  template  TEXT PRIMARY KEY,
+  series    TEXT DEFAULT 'A',
+  count     INTEGER DEFAULT 0
+);
+-- Seed: INSERT OR IGNORE INTO signal_counters (template, series, count) VALUES ('NSE', 'A', 0);

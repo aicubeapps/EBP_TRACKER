@@ -18,8 +18,9 @@ export default function Dashboard() {
   const { user }                                          = useUser();
   const { assets, loading, error, removeAsset }           = useAssets();
 
-  const [assetCount, setAssetCount]   = useState({ count: 0, limit: 5, remaining: 5 });
-  const [lastApiCall, setLastApiCall] = useState(null);
+  const [assetCount, setAssetCount]     = useState({ count: 0, limit: 5, remaining: 5 });
+  const [lastApiCall, setLastApiCall]   = useState(null);
+  const [upstoxConfigured, setUpstoxConfigured] = useState(true); // assume configured until checked, avoids a flash of the delay badge
 
   const fetchAssetCount = useCallback(async () => {
     try {
@@ -45,6 +46,14 @@ export default function Dashboard() {
     const iv = setInterval(fetchApiStatus, 60_000);
     return () => clearInterval(iv);
   }, [fetchApiStatus]);
+
+  useEffect(() => {
+    // Public route — no token needed, works for non-admin users too.
+    api.get('/nse/status').then(data => setUpstoxConfigured(!!data?.upstox_configured)).catch(() => {});
+  }, []);
+
+  const forexCryptoAssets = assets.filter(a => a.asset_type === 'forex' || a.asset_type === 'crypto');
+  const nseAssets         = assets.filter(a => a.asset_type === 'nse');
 
   return (
     <div className="shell">
@@ -90,14 +99,14 @@ export default function Dashboard() {
             </div>
           ))}
         </>
-      ) : assets.length === 0 ? (
+      ) : forexCryptoAssets.length === 0 ? (
         <div className="card" style={{ textAlign: 'center', padding: 40 }}>
           <p className="text-muted" style={{ fontSize: 13 }}>
             No assets yet — tap "+ Add Asset" above to add your first asset
           </p>
         </div>
       ) : (
-        assets.map(asset => (
+        forexCryptoAssets.map(asset => (
           <AssetCard
             key={asset.id}
             asset={asset}
@@ -108,14 +117,29 @@ export default function Dashboard() {
       )}
 
       {/* NSE Market */}
-      <div className="section-heading" style={{ marginTop: 24 }}>NSE Market</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 24 }}>
+        <div className="section-heading" style={{ marginBottom: 0 }}>NSE Market</div>
+        {!upstoxConfigured && (
+          <span className="badge" style={{ background: 'var(--gold-lt)', color: 'var(--gold)' }}>~15 min delayed</span>
+        )}
+      </div>
+
+      {!loading && nseAssets.length > 0 && nseAssets.map(asset => (
+        <AssetCard
+          key={asset.id}
+          asset={asset}
+          tier={user?.plan ?? 'free'}
+          onRemove={async (id) => { await removeAsset(id); fetchAssetCount(); }}
+        />
+      ))}
+
       <div className="card" style={{ textAlign: 'center', padding: 32 }}>
         <div style={{ fontSize: 32, marginBottom: 8 }}>🇮🇳</div>
         <div className="card-title" style={{ borderBottom: 'none', paddingBottom: 0 }}>Indian share market alerts</div>
         <p className="text-muted" style={{ fontSize: 13, margin: '6px 0 16px' }}>
           NSE and BSE stocks, indices and more
         </p>
-        <button className="btn btn-outline" disabled>Add Share Market Asset</button>
+        <button className="btn btn-outline" onClick={() => navigate('/assets')}>Add Share Market Asset</button>
       </div>
     </div>
   );

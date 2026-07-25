@@ -1566,6 +1566,37 @@ html, body, #root {
   margin: 2px 0 0 4px;
 }
 
+/* ── NSE search modal (Assets page) ── */
+.nse-search-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-sm);
+  min-height: 48px;
+  padding: 4px var(--sp-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.nse-search-add-btn {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 8px 16px;
+  min-height: 44px;
+  min-width: 44px;
+  border: 1.5px solid var(--bull);
+  border-radius: var(--radius-md);
+  background: var(--bull-lt);
+  color: var(--bull);
+  cursor: pointer;
+  transition: opacity .15s;
+  flex-shrink: 0;
+}
+
+.nse-search-add-btn:hover:not(:disabled) { opacity: 0.8; }
+.nse-search-add-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
 /* ── Skeleton loading ── */
 .skeleton {
   background: var(--warm);

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import api from '../lib/api';
-import { EBP_TFS, BIAS_SOURCE_FRONTEND } from '../lib/constants';
+import { EBP_TFS, NSE_EBP_TFS, BIAS_SOURCE_FRONTEND, NSE_BIAS_SOURCE_FRONTEND } from '../lib/constants';
 import { capitalise } from '../lib/utils';
 
 const ALERT_MODES = [
@@ -10,10 +10,13 @@ const ALERT_MODES = [
   { value: 'all',          label: 'All' },
 ];
 
-export default function EBPConfigPanel({ assetId, biasCache }) {
+export default function EBPConfigPanel({ assetId, assetType, biasCache }) {
   const { getToken } = useAuth();
   const [configs, setConfigs] = useState([]);
   const [loading, setLoading] = useState(true);
+
+  const tfOptions  = assetType === 'nse' ? NSE_EBP_TFS : EBP_TFS;
+  const biasSource = assetType === 'nse' ? NSE_BIAS_SOURCE_FRONTEND.ebp : BIAS_SOURCE_FRONTEND.ebp;
 
   const fetchConfigs = useCallback(async () => {
     const token = await getToken();
@@ -25,7 +28,7 @@ export default function EBPConfigPanel({ assetId, biasCache }) {
   useEffect(() => { fetchConfigs(); }, [fetchConfigs]);
 
   async function addConfig() {
-    const tf    = EBP_TFS.find(t => !configs.some(c => c.timeframe === t)) ?? EBP_TFS[0];
+    const tf    = tfOptions.find(t => !configs.some(c => c.timeframe === t)) ?? tfOptions[0];
     const token = await getToken();
     const res   = await api.post(`/user/ebp-configs/${assetId}`, { timeframe: tf, alert_mode: 'aligned' }, token);
     setConfigs(prev => [...prev, { id: res.id, timeframe: tf, alert_mode: 'aligned', enabled: 1 }]);
@@ -51,7 +54,7 @@ export default function EBPConfigPanel({ assetId, biasCache }) {
         <p className="text-muted mb-sm">No EBP alert timeframes configured.</p>
       )}
       {configs.map(cfg => {
-        const biasTF   = BIAS_SOURCE_FRONTEND.ebp[cfg.timeframe] ?? null;
+        const biasTF   = biasSource[cfg.timeframe] ?? null;
         const biasData = biasTF ? biasCache?.[biasTF] : null;
         const bias     = biasData?.bias ?? 'neutral';
 
@@ -59,7 +62,7 @@ export default function EBPConfigPanel({ assetId, biasCache }) {
           <div key={cfg.id} className="config-row">
             <select className="select-sm" value={cfg.timeframe}
               onChange={e => updateConfig(cfg.id, 'timeframe', e.target.value)}>
-              {EBP_TFS.map(tf => <option key={tf} value={tf}>{tf}</option>)}
+              {tfOptions.map(tf => <option key={tf} value={tf}>{tf}</option>)}
             </select>
             <select className="select-sm" value={cfg.alert_mode}
               onChange={e => updateConfig(cfg.id, 'alert_mode', e.target.value)}>

@@ -974,8 +974,8 @@ async function getOrCreateUser(db, clerkUser) {
   const now     = Date.now();
   const expires = now + 30 * 24 * 60 * 60 * 1000;
   await db.prepare(`
-    INSERT INTO users (id, email, name, created_at, expires_at, asset_limit, user_tf_access)
-    VALUES (?,?,?,?,?,5,'["M5","M15","M30","1H","4H","D","W"]')
+    INSERT INTO users (id, email, name, created_at, expires_at, asset_limit, user_tf_access, nse_tf_access)
+    VALUES (?,?,?,?,?,5,'["M5","M15","M30","1H","4H","D","W"]','["M1","M5","M15","M30","1H","D"]')
     ON CONFLICT(id) DO NOTHING
   `).bind(clerkUser.id, clerkUser.email, clerkUser.email.split('@')[0], now, expires).run();
 
@@ -1724,6 +1724,71 @@ router.patch('/admin/users/:id/tf-access', async (req, env) => {
   }
   await env.DB.prepare(`UPDATE users SET user_tf_access=? WHERE id=?`).bind(JSON.stringify(tf_access), params.id).run();
   return json({ ok: true }, 200, origin);
+});
+
+const ALL_NSE_TF_ACCESS = ['M1', 'M5', 'M15', 'M30', '1H', 'D'];
+
+router.get('/admin/users/:id/nse-tf-access', async (req, env) => {
+  const { user: clerkUser, origin, error, params } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
+  const row = await env.DB.prepare('SELECT nse_tf_access FROM users WHERE id=?').bind(params.id).first();
+  if (!row) return json({ error: 'User not found' }, 404, origin);
+  const nseTfAccess = JSON.parse(row.nse_tf_access || JSON.stringify(ALL_NSE_TF_ACCESS));
+  return json({ user_id: params.id, nse_tf_access: nseTfAccess }, 200, origin);
+});
+
+router.patch('/admin/users/:id/nse-tf-access', async (req, env) => {
+  const { user: clerkUser, origin, error, params } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
+  const { nse_tf_access } = await req.json();
+  if (!Array.isArray(nse_tf_access) || nse_tf_access.some(tf => !ALL_NSE_TF_ACCESS.includes(tf))) {
+    return json({ error: `nse_tf_access must be an array containing only: ${ALL_NSE_TF_ACCESS.join(', ')}` }, 400, origin);
+  }
+  await env.DB.prepare(`UPDATE users SET nse_tf_access=? WHERE id=?`).bind(JSON.stringify(nse_tf_access), params.id).run();
+  return json({ ok: true }, 200, origin);
+});
+
+// GET /nse/status — public, no auth required. Dashboard uses this to show
+// the "~15 min delayed" badge for non-admin users, who can't call
+// GET /admin/api-keys directly.
+router.get('/nse/status', async (req, env) => {
+  const { origin } = req._ctx;
+  const key = await env.DB.prepare(
+    "SELECT id FROM api_keys WHERE source='upstox' AND enabled=1 LIMIT 1"
+  ).first();
+  return json({ upstox_configured: !!key }, 200, origin);
+});
+
+// GET /nse/search — proxies Yahoo Finance's symbol search server-side.
+// Yahoo's endpoint sends no Access-Control-Allow-Origin header, so the
+// frontend can't call it directly from the browser; this route exists
+// purely to route around that CORS gap.
+const NSE_KNOWN_INDICES = ['^NSEI', '^NSEBANK', '^BSESN', '^NIFTYBANK'];
+
+router.get('/nse/search', async (req, env) => {
+  const { user: clerkUser, origin, error } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+
+  const url = new URL(req.url);
+  const q   = (url.searchParams.get('q') ?? '').trim();
+  if (!q) return json([], 200, origin);
+
+  try {
+    const yahooRes = await fetch(
+      `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&lang=en-IN&region=IN`,
+      { headers: { 'User-Agent': 'Mozilla/5.0' } }
+    );
+    const data   = await yahooRes.json();
+    const quotes = data?.quotes ?? [];
+    const results = quotes
+      .filter(item => item.symbol?.endsWith('.NS') || item.symbol?.endsWith('.BO') || NSE_KNOWN_INDICES.includes(item.symbol))
+      .map(item => ({ symbol: item.symbol, shortName: item.shortname ?? item.longname ?? item.symbol }));
+    return json(results, 200, origin);
+  } catch (e) {
+    return json({ error: 'Search failed' }, 502, origin);
+  }
 });
 
 // ── Invite token validation ───────────────────────────────────

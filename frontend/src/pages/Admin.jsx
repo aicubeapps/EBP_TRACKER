@@ -5,6 +5,7 @@ import PriceFeedPanel from '../components/PriceFeedPanel';
 
 const TABS = ['Users', 'Invite Tokens', 'API Keys', 'User Limits', 'Price Feed'];
 const ALL_TFS      = ['M5', 'M15', 'M30', '1H', '4H', 'D', 'W'];
+const ALL_NSE_TFS  = ['M1', 'M5', 'M15', 'M30', '1H', 'D'];
 const SLOT_OPTIONS = [5, 7, 9, 11, 13];
 
 export default function Admin() {
@@ -21,8 +22,12 @@ export default function Admin() {
   const [expandedUsers, setExpandedUsers] = useState({});
   const [userAssets, setUserAssets]       = useState({});
   const [userTfAccess, setUserTfAccess]   = useState({});
+  const [userNseTfAccess, setUserNseTfAccess] = useState({});
   const [detailLoading, setDetailLoading] = useState({});
   const [tfError, setTfError]             = useState({});
+  const [nseTfError, setNseTfError]       = useState({});
+  const [upstoxToken, setUpstoxToken]     = useState('');
+  const [savingUpstox, setSavingUpstox]   = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -113,15 +118,18 @@ export default function Admin() {
     setDetailLoading(p => ({ ...p, [userId]: true }));
     try {
       const token = await getToken();
-      const [assets, tf] = await Promise.all([
+      const [assets, tf, nseTf] = await Promise.all([
         api.get(`/admin/users/${userId}/assets`, token),
         api.get(`/admin/users/${userId}/tf-access`, token),
+        api.get(`/admin/users/${userId}/nse-tf-access`, token),
       ]);
       setUserAssets(p => ({ ...p, [userId]: Array.isArray(assets) ? assets : [] }));
       setUserTfAccess(p => ({ ...p, [userId]: tf?.tf_access ?? ALL_TFS }));
+      setUserNseTfAccess(p => ({ ...p, [userId]: nseTf?.nse_tf_access ?? ALL_NSE_TFS }));
     } catch (e) {
       setUserAssets(p => ({ ...p, [userId]: [] }));
       setUserTfAccess(p => ({ ...p, [userId]: ALL_TFS }));
+      setUserNseTfAccess(p => ({ ...p, [userId]: ALL_NSE_TFS }));
       setTfError(p => ({ ...p, [userId]: 'Failed to load user details' }));
     } finally {
       setDetailLoading(p => ({ ...p, [userId]: false }));
@@ -139,6 +147,33 @@ export default function Admin() {
     } catch (e) {
       setUserTfAccess(p => ({ ...p, [userId]: prev }));
       setTfError(p => ({ ...p, [userId]: e.message || 'Failed to update timeframe access' }));
+    }
+  };
+
+  const handleNseTfToggle = async (userId, tf, checked) => {
+    const prev = userNseTfAccess[userId] ?? ALL_NSE_TFS;
+    const next = checked ? [...prev, tf] : prev.filter(t => t !== tf);
+    setUserNseTfAccess(p => ({ ...p, [userId]: next }));
+    setNseTfError(p => ({ ...p, [userId]: undefined }));
+    try {
+      const token = await getToken();
+      await api.patch(`/admin/users/${userId}/nse-tf-access`, { nse_tf_access: next }, token);
+    } catch (e) {
+      setUserNseTfAccess(p => ({ ...p, [userId]: prev }));
+      setNseTfError(p => ({ ...p, [userId]: e.message || 'Failed to update timeframe access' }));
+    }
+  };
+
+  const handleSaveUpstox = async () => {
+    if (!upstoxToken.trim()) return;
+    setSavingUpstox(true);
+    try {
+      const token = await getToken();
+      await api.post('/admin/api-keys', { source: 'upstox', key_value: upstoxToken.trim(), label: 'Upstox Analytics Token' }, token);
+      setUpstoxToken('');
+      await loadKeys();
+    } finally {
+      setSavingUpstox(false);
     }
   };
 
@@ -175,9 +210,10 @@ export default function Admin() {
               No users yet
             </div>
           ) : users.map(u => {
-            const expanded  = !!expandedUsers[u.id];
-            const assets    = userAssets[u.id] ?? [];
-            const tfAccess  = userTfAccess[u.id] ?? ALL_TFS;
+            const expanded    = !!expandedUsers[u.id];
+            const assets      = userAssets[u.id] ?? [];
+            const tfAccess    = userTfAccess[u.id] ?? ALL_TFS;
+            const nseTfAccess = userNseTfAccess[u.id] ?? ALL_NSE_TFS;
             const slotOptions = SLOT_OPTIONS.includes(u.asset_limit)
               ? SLOT_OPTIONS
               : [...SLOT_OPTIONS, u.asset_limit].sort((a, b) => a - b);
@@ -276,6 +312,29 @@ export default function Admin() {
                     )}
 
                     <div className="divider" />
+
+                    {/* NSE TF access checkboxes — separate column, separate default set */}
+                    <div className="section-heading">NSE Market TF Access</div>
+                    <div className="tf-check-grid">
+                      {ALL_NSE_TFS.map(tf => (
+                        <label key={tf} className="tf-check-row">
+                          <input
+                            type="checkbox"
+                            checked={nseTfAccess.includes(tf)}
+                            onChange={e => handleNseTfToggle(u.id, tf, e.target.checked)}
+                          />
+                          <span>{tf}</span>
+                        </label>
+                      ))}
+                    </div>
+                    <p className="text-muted" style={{ fontSize: 11, marginTop: 'var(--sp-sm)' }}>
+                      Disabling a TF stops NSE alerts for that user on that timeframe. Existing configs are preserved.
+                    </p>
+                    {nseTfError[u.id] && (
+                      <p style={{ color: '#ef4444', fontSize: 11, marginTop: 4 }}>{nseTfError[u.id]}</p>
+                    )}
+
+                    <div className="divider" />
                     <button className="btn btn-danger btn-sm" onClick={() => handleExpire(u.id)}>Expire Account</button>
                   </div>
                 )}
@@ -309,10 +368,61 @@ export default function Admin() {
 
       {tab === 2 && (
         <div>
+          <div className="section-heading">Upstox Analytics Token</div>
+          {(() => {
+            const upstoxKey = keys.find(k => k.source === 'upstox');
+            if (!upstoxKey) {
+              return (
+                <div className="card">
+                  <p className="text-muted" style={{ fontSize: 12, marginBottom: 'var(--sp-sm)' }}>
+                    Not configured — Yahoo Finance active
+                  </p>
+                  <div className="config-row" style={{ marginBottom: 0 }}>
+                    <input className="search-input" style={{ maxWidth: 320 }}
+                      type="password"
+                      placeholder="Upstox Analytics Token"
+                      value={upstoxToken}
+                      onChange={e => setUpstoxToken(e.target.value)} />
+                    <button className="search-btn" onClick={handleSaveUpstox} disabled={savingUpstox || !upstoxToken.trim()}>
+                      {savingUpstox ? '…' : 'Save'}
+                    </button>
+                  </div>
+                </div>
+              );
+            }
+            const expiry        = upstoxKey.added_at + 365 * 24 * 60 * 60 * 1000;
+            const daysLeft       = Math.floor((expiry - Date.now()) / (24 * 60 * 60 * 1000));
+            const expiringSoon   = daysLeft <= 30;
+            return (
+              <div className="card">
+                <div className="card-header">
+                  <span className="card-title">Upstox Analytics Token</span>
+                  <span className="badge badge-bull">Active — Upstox primary</span>
+                </div>
+                <div style={{ fontSize: 12, lineHeight: 1.8, marginBottom: 'var(--sp-sm)' }}>
+                  <div><span className="text-muted">Created:</span> {new Date(upstoxKey.added_at).toLocaleDateString()}</div>
+                  <div>
+                    <span className="text-muted">Expires:</span> {new Date(expiry).toLocaleDateString()}
+                    {expiringSoon && (
+                      <span className="badge" style={{ marginLeft: 6, background: 'var(--gold-lt)', color: 'var(--gold)' }}>
+                        {daysLeft <= 0 ? 'Expired' : `Expires in ${daysLeft}d`}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className="divider" />
+                <button className="add-link" style={{ color: '#ef4444' }} onClick={() => handleDeleteKey(upstoxKey.id)}>
+                  Delete Token
+                </button>
+              </div>
+            );
+          })()}
+
+          <div className="divider" />
           <div className="section-heading">API Keys</div>
-          {keys.length === 0 ? (
+          {keys.filter(k => k.source !== 'upstox').length === 0 ? (
             <div className="card" style={{ textAlign: 'center', color: 'var(--muted)', padding: 24 }}>No API keys yet</div>
-          ) : keys.map(k => (
+          ) : keys.filter(k => k.source !== 'upstox').map(k => (
             <div key={k.id} className="card">
               <div className="card-header">
                 <span className="card-title">{k.label}</span>

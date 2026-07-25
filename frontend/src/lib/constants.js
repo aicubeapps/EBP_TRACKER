@@ -23,3 +23,15 @@ export const BIAS_SOURCE_FRONTEND = {
 
 export const EBP_TFS   = ['M15', '1H', '4H', 'D', 'W'];
 export const SWEEP_TFS = ['M5', 'M15', 'M30', '1H', '4H'];
+
+// NSE — separate TF set and bias map (matches nse-worker's NSE_BIAS_SOURCE).
+// NSE M15 maps to 1H bias, not forex's 4H — reusing BIAS_SOURCE_FRONTEND for
+// NSE configs would show the wrong bias timeframe (or look up the wrong
+// bias_cache row entirely) for any TF that appears in both sets.
+export const NSE_BIAS_SOURCE_FRONTEND = {
+  ebp:   { 'M1': 'M15', 'M5': 'M30', 'M15': '1H', 'M30': 'D', '1H': 'D', 'D': null },
+  sweep: { 'M1': 'M15', 'M5': 'M30', 'M15': '1H', 'M30': 'D', '1H': 'D', 'D': null },
+};
+
+export const NSE_EBP_TFS   = ['M1', 'M5', 'M15', 'M30', '1H', 'D'];
+export const NSE_SWEEP_TFS = ['M1', 'M5', 'M15', 'M30', '1H', 'D'];
