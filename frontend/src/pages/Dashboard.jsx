@@ -1,11 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@clerk/clerk-react';
 import { useAssets } from '../hooks/useAssets';
 import { useUser } from '../hooks/useUser';
 import ApiErrorAlert from '../components/ApiErrorAlert';
 import AssetCard from '../components/AssetCard';
-import AssetBrowserModal from '../components/AssetBrowserModal';
-import { CRYPTO_PAIRS } from '../data/assetLists';
 import api from '../lib/api';
 
 function fmtTZ(ts, tz, locale) {
@@ -14,13 +13,13 @@ function fmtTZ(ts, tz, locale) {
 }
 
 export default function Dashboard() {
-  const { getToken } = useAuth();
+  const navigate      = useNavigate();
+  const { getToken }  = useAuth();
   const { user }                                          = useUser();
-  const { assets, loading, error, addAsset, removeAsset } = useAssets();
+  const { assets, loading, error, removeAsset }           = useAssets();
 
   const [assetCount, setAssetCount]   = useState({ count: 0, limit: 5, remaining: 5 });
   const [lastApiCall, setLastApiCall] = useState(null);
-  const [showBrowser, setShowBrowser] = useState(false);
 
   const fetchAssetCount = useCallback(async () => {
     try {
@@ -47,17 +46,6 @@ export default function Dashboard() {
     return () => clearInterval(iv);
   }, [fetchApiStatus]);
 
-  const forexCryptoSymbols = assets
-    .filter(a => a.asset_type === 'forex' || a.asset_type === 'crypto')
-    .map(a => a.symbol);
-
-  async function handleAddFromBrowser(symbol) {
-    const assetType = CRYPTO_PAIRS.includes(symbol) ? 'crypto' : 'forex';
-    await addAsset(symbol, symbol, assetType);
-    fetchAssetCount();
-    setShowBrowser(false);
-  }
-
   return (
     <div className="shell">
       {user?.active === 0 && (
@@ -77,7 +65,7 @@ export default function Dashboard() {
       {/* Forex & Crypto */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
         <div className="section-heading" style={{ marginBottom: 0 }}>Forex &amp; Crypto</div>
-        <button className="btn btn-primary btn-sm" onClick={() => setShowBrowser(true)}>+ Add Asset</button>
+        <button className="btn btn-primary btn-sm" onClick={() => navigate('/assets')}>+ Add Asset</button>
       </div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 4, margin: '6px 0 var(--sp-md)' }}>
         <span className="text-mono text-muted" style={{ fontSize: 11 }}>
@@ -129,15 +117,6 @@ export default function Dashboard() {
         </p>
         <button className="btn btn-outline" disabled>Add Share Market Asset</button>
       </div>
-
-      <AssetBrowserModal
-        isOpen={showBrowser}
-        onClose={() => setShowBrowser(false)}
-        onAdd={handleAddFromBrowser}
-        existingSymbols={forexCryptoSymbols}
-        slotsUsed={assetCount.count}
-        slotLimit={assetCount.limit}
-      />
     </div>
   );
 }

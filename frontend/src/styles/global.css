@@ -1481,40 +1481,8 @@ html, body, #root {
 
 .modal-close-btn:hover { background: var(--nav-hover); }
 
-/* ── Asset Browser modal ── */
-.browser-modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(14, 12, 10, 0.6);
-  z-index: 1000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--sp-md);
-}
-
-.browser-modal-box {
-  background: var(--surface);
-  border: 1.5px solid var(--border);
-  border-radius: var(--radius-lg);
-  width: 100%;
-  max-width: 480px;
-  max-height: 85vh;
-  display: flex;
-  flex-direction: column;
-  box-shadow: 0 16px 48px rgba(0,0,0,0.3);
-  padding: var(--sp-lg);
-  overflow: hidden;
-}
-
-.browser-modal-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: var(--sp-md);
-}
-
-.browser-limit-banner {
+/* ── Assets page ── */
+.asset-limit-banner {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1528,7 +1496,7 @@ html, body, #root {
   margin-bottom: var(--sp-md);
 }
 
-.browser-limit-banner button {
+.asset-limit-banner button {
   background: none;
   border: none;
   color: inherit;
@@ -1538,101 +1506,64 @@ html, body, #root {
   padding: 0;
 }
 
-.chip-row {
-  display: flex;
-  gap: 6px;
-  margin-bottom: var(--sp-md);
-  flex-wrap: wrap;
-}
-
-.chip {
+.asset-sub-header {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
-  letter-spacing: 0.5px;
+  letter-spacing: 1px;
   text-transform: uppercase;
-  padding: 6px 14px;
-  border: 1.5px solid var(--border);
-  border-radius: 20px;
-  background: var(--surface);
   color: var(--muted);
-  cursor: pointer;
-  transition: all .15s;
+  margin: 8px 0 4px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
 }
 
-.chip:hover { border-color: var(--nav-active-accent); }
-.chip.active {
-  background: var(--nav-bg);
-  border-color: var(--nav-bg);
-  color: #f1f5f9;
+.asset-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: var(--sp-md);
 }
 
-.browser-list {
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding-right: 2px;
-}
+.asset-check-wrap { display: flex; flex-direction: column; }
 
-.browser-row-wrap { display: flex; flex-direction: column; }
-
-.browser-row {
+.asset-check-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-sm);
-  min-height: 48px;
+  gap: 6px;
+  min-height: 44px;
   padding: 0 var(--sp-sm);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
+  cursor: pointer;
+  user-select: none;
 }
 
-.browser-symbol {
+.asset-check-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--bull);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.asset-check-row span {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
   color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.browser-add-btn {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 700;
-  padding: 8px 16px;
-  min-height: 44px;
-  min-width: 44px;
-  border: 1.5px solid var(--bull);
-  border-radius: var(--radius-md);
-  background: var(--bull-lt);
-  color: var(--bull);
-  cursor: pointer;
-  transition: opacity .15s;
-  flex-shrink: 0;
-}
+.asset-check-row.pending { opacity: 0.5; pointer-events: none; }
+.asset-check-row.locked  { opacity: 0.6; cursor: not-allowed; }
 
-.browser-add-btn:hover:not(:disabled) { opacity: 0.8; }
-.browser-add-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
-.browser-add-btn-locked {
-  background: var(--cream);
-  border-color: var(--border);
-  color: var(--muted);
-}
-
-.browser-added {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--muted);
-  padding: 8px 14px;
-  flex-shrink: 0;
-}
-
-.browser-row-error {
-  font-size: 10px;
+.asset-check-error {
+  font-size: 9px;
   color: #ef4444;
-  margin: 2px 4px 0;
+  margin: 2px 0 0 4px;
 }
 
 /* ── Skeleton loading ── */
@@ -1763,15 +1694,7 @@ html, body, #root {
     font-size: 16px;
   }
 
-  .browser-modal-overlay {
-    padding: 0;
-  }
-
-  .browser-modal-box {
-    max-width: 100%;
-    max-height: 100%;
-    height: 100%;
-    border-radius: 0;
-    border: none;
+  .asset-grid {
+    grid-template-columns: repeat(2, 1fr);
   }
 }

@@ -8,6 +8,7 @@ import logoSrc from '../assets/logo.svg';
 
 const NAV = [
   { id: 'nav-dash',     path: '/dashboard', icon: '📊', label: 'Dashboard' },
+  { id: 'nav-assets',   path: '/assets',    icon: '📋', label: 'Assets' },
   { id: 'nav-alerts',   path: '/alerts',    icon: '🔔', label: 'Alerts' },
   { id: 'nav-settings', path: '/settings',  icon: '⚙️', label: 'Settings' },
 ];
