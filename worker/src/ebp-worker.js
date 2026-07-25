@@ -36,6 +36,16 @@ function getOrigin(request) {
   return request.headers.get('Origin') ?? '';
 }
 
+// Trade Journal is a separate browser app on its own origin, not in
+// ALLOWED_ORIGINS — /signals routes are secured by X-Journal-Secret instead
+// of an origin allowlist, so they need open CORS rather than corsHeaders().
+function journalJson(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+  });
+}
+
 // ============================================================
 // Router
 // ============================================================
@@ -1810,6 +1820,32 @@ router.get('/nse/search', async (req, env) => {
   }
 });
 
+// ── Trade Journal — Signal ID lookup/linking (Phase I) ─────────
+// Secured by X-Journal-Secret (a shared secret with the Trade Journal app),
+// not Clerk auth — these routes are never reached with req._ctx's clerkUser.
+
+router.get('/signals/:id', async (req, env) => {
+  const { params } = req._ctx;
+  const secret = req.headers.get('X-Journal-Secret');
+  if (!secret || secret !== env.JOURNAL_API_SECRET) {
+    return journalJson({ error: 'Unauthorised' }, 401);
+  }
+  const row = await env.DB.prepare('SELECT * FROM signals WHERE signal_id = ?').bind(params.id).first();
+  if (!row) return journalJson({ error: 'Signal not found' }, 404);
+  return journalJson(row, 200);
+});
+
+router.patch('/signals/:id/traded', async (req, env) => {
+  const { params } = req._ctx;
+  const secret = req.headers.get('X-Journal-Secret');
+  if (!secret || secret !== env.JOURNAL_API_SECRET) {
+    return journalJson({ error: 'Unauthorised' }, 401);
+  }
+  const result = await env.DB.prepare('UPDATE signals SET traded = 1 WHERE signal_id = ?').bind(params.id).run();
+  if (result.meta.changes === 0) return journalJson({ error: 'Signal not found' }, 404);
+  return journalJson({ ok: true }, 200);
+});
+
 // ── Invite token validation ───────────────────────────────────
 
 router.get('/invite/:token', async (req, env) => {
@@ -1826,16 +1862,28 @@ router.get('/invite/:token', async (req, env) => {
 // ============================================================
 export default {
   async fetch(request, env, ctx) {
-    const origin = getOrigin(request);
-
-    // Handle CORS preflight
-    if (request.method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: corsHeaders(origin) });
-    }
-
+    const origin   = getOrigin(request);
     const url      = new URL(request.url);
     const pathname = url.pathname.replace(/\/+$/, '') || '/';
     const method   = request.method;
+
+    // Handle CORS preflight
+    if (method === 'OPTIONS') {
+      // /signals is called cross-origin by the Trade Journal app, which isn't
+      // in ALLOWED_ORIGINS — those routes are secured by X-Journal-Secret
+      // instead, so they need open CORS rather than the strict allowlist.
+      if (pathname.startsWith('/signals')) {
+        return new Response(null, {
+          status: 204,
+          headers: {
+            'Access-Control-Allow-Origin':  '*',
+            'Access-Control-Allow-Methods': 'GET, PATCH, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, X-Journal-Secret',
+          },
+        });
+      }
+      return new Response(null, { status: 204, headers: corsHeaders(origin) });
+    }
 
     // Match route
     const match = router.match(method, pathname);

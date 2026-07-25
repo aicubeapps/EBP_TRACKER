@@ -119,7 +119,29 @@ async function cleanupExpiredChains(db) {
   await db.prepare('DELETE FROM chain_state WHERE expires_at < ?').bind(Date.now()).run();
 }
 
-function formatT3Alert(symbol, direction, htfTf, ltfTf, htfBar, ltfBar, mssBar) {
+// ── Phase I — Signal IDs (per-template global counter, A001→Z999) ──
+async function generateSignalId(db, template, symbol) {
+  const row = await db.prepare(
+    'SELECT series, count FROM signal_counters WHERE template = ?'
+  ).bind(template).first();
+
+  let { series, count } = row;
+  count += 1;
+  if (count > 999) {
+    series = String.fromCharCode(series.charCodeAt(0) + 1);
+    count = 1;
+  }
+
+  await db.prepare(
+    'UPDATE signal_counters SET series = ?, count = ? WHERE template = ?'
+  ).bind(series, count, template).run();
+
+  const normSymbol = symbol.replace('/', '').toUpperCase();
+  const countStr   = count.toString().padStart(3, '0');
+  return `${template}-${normSymbol}-${series}${countStr}`;
+}
+
+function formatT3Alert(symbol, direction, htfTf, ltfTf, htfBar, ltfBar, mssBar, signalId) {
   const dir     = direction === 'bullish' ? '🟢 Bullish' : '🔴 Bearish';
   const htfTime = new Date(htfBar.time).toUTCString().slice(5, 22);
   const ltfTime = new Date(ltfBar.time).toUTCString().slice(5, 22);
@@ -130,6 +152,7 @@ function formatT3Alert(symbol, direction, htfTf, ltfTf, htfBar, ltfBar, mssBar) 
     `Step 1 — ${htfTf} EBP: ${htfTime}`,
     `Step 2 — ${ltfTf} Sweep: ${ltfTime}`,
     `Step 3 — ${ltfTf} MSS: ${mssTime}`,
+    `🔗 Signal ID: ${signalId}`,
   ].join('\n');
 }
 
@@ -792,12 +815,23 @@ export async function handleSweepCron(tf, env, debugLog = null) {
             const mssChains = await getActiveChains(env.DB, row.user_id, symbol, 't3', mssResult.direction, 3);
             for (const chain of mssChains) {
               if (chain.ltf !== tf) continue;
+
+              const signalId = await generateSignalId(env.DB, 'T3', symbol);
+              await env.DB.prepare(`
+                INSERT INTO signals (signal_id, template_type, symbol, htf_tf, ltf_tf, direction, fired_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+              `).bind(
+                signalId, 'T3', symbol, chain.htf_tf, tf,
+                mssResult.direction, new Date().toISOString()
+              ).run();
+
               const t3Msg = formatT3Alert(
                 symbol, mssResult.direction,
                 chain.htf_tf, tf,
                 { time: chain.htf_signal_time },
                 { time: chain.ltf_sweep_time },
-                { time: mssResult.candle_time }
+                { time: mssResult.candle_time },
+                signalId
               );
               await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, t3Msg);
               await env.DB.prepare(`
