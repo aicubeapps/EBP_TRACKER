@@ -1067,9 +1067,15 @@ router.post('/user/assets', async (req, env) => {
     return json({ error: 'Asset already in your list.' }, 400, origin);
   }
 
-  const validation = await validateSymbol(symbolStr, env.TWELVE_DATA_API_KEY);
-  if (!validation.valid) {
-    return json({ error: 'Symbol not found on any data source.' }, 400, origin);
+  const assetType = body.assetType ?? 'forex';
+  if (assetType !== 'forex' && assetType !== 'crypto') {
+    // NSE ('nse') and any unrecognised type still go through Yahoo validation.
+    // Forex/crypto symbols come from the hardcoded asset browser list, so
+    // they're guaranteed valid and skip this call entirely.
+    const validation = await validateSymbol(symbolStr, env.TWELVE_DATA_API_KEY);
+    if (!validation.valid) {
+      return json({ error: 'Symbol not found on any data source.' }, 400, origin);
+    }
   }
 
   const id = crypto.randomUUID();
@@ -1078,7 +1084,7 @@ router.post('/user/assets', async (req, env) => {
     VALUES (?,?,?,?,?,?)
   `).bind(id, clerkUser.id, symbolStr,
     body.displayName ?? symbolStr,
-    body.assetType ?? 'forex', Date.now()).run();
+    assetType, Date.now()).run();
 
   return json({ id, symbol: symbolStr }, 201, origin);
 });

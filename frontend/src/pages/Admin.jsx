@@ -290,71 +290,51 @@ export default function Admin() {
           <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
             <button className="btn btn-primary" onClick={handleGenerateToken}>+ Generate Token</button>
           </div>
-          <div className="card" style={{ padding: 0 }}>
-            <div className="table-wrap">
-              <table className="alert-table">
-                <thead>
-                  <tr><th>Token</th><th>Status</th><th>Used By</th><th>Created</th></tr>
-                </thead>
-                <tbody>
-                  {tokens.length === 0 ? (
-                    <tr><td colSpan={4} style={{ textAlign: 'center', color: 'var(--muted)', padding: 24 }}>No tokens yet</td></tr>
-                  ) : tokens.map(t => (
-                    <tr key={t.token}>
-                      <td className="text-mono">{t.token}</td>
-                      <td><span className="badge">{t.used_by ? 'USED' : 'UNUSED'}</span></td>
-                      <td>{t.used_by || '—'}</td>
-                      <td className="ts-cell">{new Date(t.created_at).toLocaleDateString()}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          {tokens.length === 0 ? (
+            <div className="card" style={{ textAlign: 'center', color: 'var(--muted)', padding: 24 }}>No tokens yet</div>
+          ) : tokens.map(t => (
+            <div key={t.token} className="card">
+              <div className="card-header">
+                <span className="card-title text-mono" style={{ fontSize: 12 }}>{t.token}</span>
+                <span className="badge">{t.used_by ? 'USED' : 'UNUSED'}</span>
+              </div>
+              <div style={{ fontSize: 12, lineHeight: 1.8 }}>
+                <div><span className="text-muted">Used by:</span> {t.used_by || '—'}</div>
+                <div><span className="text-muted">Created:</span> {new Date(t.created_at).toLocaleDateString()}</div>
+              </div>
             </div>
-          </div>
+          ))}
         </div>
       )}
 
       {tab === 2 && (
         <div>
           <div className="section-heading">API Keys</div>
-          <div className="card" style={{ padding: 0 }}>
-            <div className="table-wrap">
-              <table className="alert-table">
-                <thead>
-                  <tr>
-                    <th>Label</th><th>Source</th><th>Key</th>
-                    <th>Status</th><th>Calls Today</th><th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {keys.length === 0 ? (
-                    <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--muted)', padding: 24 }}>No API keys yet</td></tr>
-                  ) : keys.map(k => (
-                    <tr key={k.id}>
-                      <td className="text-mono">{k.label}</td>
-                      <td><span className="badge badge-forex">{k.source}</span></td>
-                      <td className="text-mono">{k.key_preview}</td>
-                      <td>
-                        <span className={`badge ${k.exhausted ? 'badge-bear' : 'badge-t3'}`}>
-                          {k.exhausted ? 'Exhausted' : k.enabled ? 'Active' : 'Disabled'}
-                        </span>
-                      </td>
-                      <td className="tabular-nums">{k.calls_today}</td>
-                      <td>
-                        <button className="add-link" onClick={() => handleToggleKey(k.id, !k.enabled)}>
-                          {k.enabled ? 'Disable' : 'Enable'}
-                        </button>
-                        {' · '}
-                        <button className="add-link" style={{ color: '#ef4444' }} onClick={() => handleDeleteKey(k.id)}>
-                          Delete
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          {keys.length === 0 ? (
+            <div className="card" style={{ textAlign: 'center', color: 'var(--muted)', padding: 24 }}>No API keys yet</div>
+          ) : keys.map(k => (
+            <div key={k.id} className="card">
+              <div className="card-header">
+                <span className="card-title">{k.label}</span>
+                <span className={`badge ${k.exhausted ? 'badge-bear' : 'badge-t3'}`}>
+                  {k.exhausted ? 'Exhausted' : k.enabled ? 'Active' : 'Disabled'}
+                </span>
+              </div>
+              <div style={{ fontSize: 12, lineHeight: 1.8, marginBottom: 'var(--sp-sm)' }}>
+                <div><span className="text-muted">Source:</span> <span className="badge badge-forex">{k.source}</span></div>
+                <div><span className="text-muted">Key:</span> <span className="text-mono">{k.key_preview}</span></div>
+                <div><span className="text-muted">Calls today:</span> <span className="tabular-nums">{k.calls_today}</span></div>
+              </div>
+              <div className="divider" />
+              <button className="add-link" onClick={() => handleToggleKey(k.id, !k.enabled)}>
+                {k.enabled ? 'Disable' : 'Enable'}
+              </button>
+              {' · '}
+              <button className="add-link" style={{ color: '#ef4444' }} onClick={() => handleDeleteKey(k.id)}>
+                Delete
+              </button>
             </div>
-          </div>
+          ))}
 
           <div className="divider" />
           <div className="section-heading">Add New Key</div>
@@ -383,47 +363,34 @@ export default function Admin() {
       {tab === 3 && (
         <div>
           <div className="section-heading">User Asset Limits</div>
-          <div className="card" style={{ padding: 0 }}>
-            <div className="table-wrap">
-              <table className="alert-table">
-                <thead>
-                  <tr>
-                    <th>User</th><th>Email</th><th>Current Limit</th>
-                    <th>Assets Used</th><th>Update Limit</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {users.length === 0 ? (
-                    <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--muted)', padding: 24 }}>No users yet</td></tr>
-                  ) : users.map(u => (
-                    <tr key={u.id}>
-                      <td className="text-mono">{u.name ?? '—'}</td>
-                      <td className="text-mono">{u.email}</td>
-                      <td className="tabular-nums">{u.asset_limit ?? 5}</td>
-                      <td className="tabular-nums">{u.asset_count ?? 0}</td>
-                      <td>
-                        <div className="config-row" style={{ marginBottom: 0 }}>
-                          <input
-                            className="select-sm"
-                            type="number"
-                            min="1"
-                            max="50"
-                            style={{ width: 60 }}
-                            value={editingLimit[u.id] ?? u.asset_limit ?? 5}
-                            onChange={e => setEditingLimit(p => ({ ...p, [u.id]: e.target.value }))}
-                          />
-                          <button className="add-link"
-                            onClick={() => handleUpdateLimit(u.id, editingLimit[u.id] ?? u.asset_limit ?? 5)}>
-                            Save
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          {users.length === 0 ? (
+            <div className="card" style={{ textAlign: 'center', color: 'var(--muted)', padding: 24 }}>No users yet</div>
+          ) : users.map(u => (
+            <div key={u.id} className="card">
+              <div className="card-header">
+                <span className="card-title">{u.name ?? u.email}</span>
+                <span className="text-muted" style={{ fontSize: 11 }}>{u.asset_count ?? 0} assets used</span>
+              </div>
+              <div style={{ fontSize: 12, marginBottom: 'var(--sp-sm)' }}>
+                <span className="text-muted">Email:</span> <span className="text-mono">{u.email}</span>
+              </div>
+              <div className="config-row" style={{ marginBottom: 0 }}>
+                <input
+                  className="select-sm"
+                  type="number"
+                  min="1"
+                  max="50"
+                  style={{ width: 60 }}
+                  value={editingLimit[u.id] ?? u.asset_limit ?? 5}
+                  onChange={e => setEditingLimit(p => ({ ...p, [u.id]: e.target.value }))}
+                />
+                <button className="add-link"
+                  onClick={() => handleUpdateLimit(u.id, editingLimit[u.id] ?? u.asset_limit ?? 5)}>
+                  Save
+                </button>
+              </div>
             </div>
-          </div>
+          ))}
         </div>
       )}
 
