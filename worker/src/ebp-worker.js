@@ -1004,7 +1004,7 @@ router.get('/user/me', async (req, env) => {
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
   await getOrCreateUser(env.DB, clerkUser);
   const user = await env.DB.prepare(
-    'SELECT id, email, name, plan, asset_limit, created_at, expires_at, active, is_admin FROM users WHERE id=?'
+    'SELECT id, email, name, plan, asset_limit, created_at, expires_at, active, is_admin, user_tf_access, nse_tf_access FROM users WHERE id=?'
   ).bind(clerkUser.id).first();
   return json(user, 200, origin);
 });
@@ -1205,9 +1205,17 @@ router.post('/user/ebp-configs/:assetId', async (req, env) => {
   const { timeframe, alert_mode } = await req.json();
   if (!timeframe) return json({ error: 'timeframe required' }, 400, origin);
 
-  const userRow      = await env.DB.prepare('SELECT user_tf_access FROM users WHERE id = ?').bind(clerkUser.id).first();
-  const userTfAccess = JSON.parse(userRow?.user_tf_access || '["M5","M15","M30","1H","4H","D","W"]');
-  if (!userTfAccess.includes(timeframe)) {
+  const asset = await env.DB.prepare('SELECT asset_type FROM user_assets WHERE id = ?').bind(params.assetId).first();
+
+  let tfAccess;
+  if (asset?.asset_type === 'nse') {
+    const userRow = await env.DB.prepare('SELECT nse_tf_access FROM users WHERE id = ?').bind(clerkUser.id).first();
+    tfAccess = JSON.parse(userRow?.nse_tf_access || '["M1","M5","M15","M30","1H","D"]');
+  } else {
+    const userRow = await env.DB.prepare('SELECT user_tf_access FROM users WHERE id = ?').bind(clerkUser.id).first();
+    tfAccess = JSON.parse(userRow?.user_tf_access || '["M5","M15","M30","1H","4H","D","W"]');
+  }
+  if (!tfAccess.includes(timeframe)) {
     return json({ error: 'tf_access_denied', message: 'This timeframe is not enabled for your account' }, 403, origin);
   }
 
@@ -1235,9 +1243,17 @@ router.post('/user/sweep-configs/:assetId', async (req, env) => {
   const { timeframe, alert_mode } = await req.json();
   if (!timeframe) return json({ error: 'timeframe required' }, 400, origin);
 
-  const userRow      = await env.DB.prepare('SELECT user_tf_access FROM users WHERE id = ?').bind(clerkUser.id).first();
-  const userTfAccess = JSON.parse(userRow?.user_tf_access || '["M5","M15","M30","1H","4H","D","W"]');
-  if (!userTfAccess.includes(timeframe)) {
+  const asset = await env.DB.prepare('SELECT asset_type FROM user_assets WHERE id = ?').bind(params.assetId).first();
+
+  let tfAccess;
+  if (asset?.asset_type === 'nse') {
+    const userRow = await env.DB.prepare('SELECT nse_tf_access FROM users WHERE id = ?').bind(clerkUser.id).first();
+    tfAccess = JSON.parse(userRow?.nse_tf_access || '["M1","M5","M15","M30","1H","D"]');
+  } else {
+    const userRow = await env.DB.prepare('SELECT user_tf_access FROM users WHERE id = ?').bind(clerkUser.id).first();
+    tfAccess = JSON.parse(userRow?.user_tf_access || '["M5","M15","M30","1H","4H","D","W"]');
+  }
+  if (!tfAccess.includes(timeframe)) {
     return json({ error: 'tf_access_denied', message: 'This timeframe is not enabled for your account' }, 403, origin);
   }
 
@@ -1783,7 +1799,10 @@ router.get('/nse/search', async (req, env) => {
     const data   = await yahooRes.json();
     const quotes = data?.quotes ?? [];
     const results = quotes
-      .filter(item => item.symbol?.endsWith('.NS') || item.symbol?.endsWith('.BO') || NSE_KNOWN_INDICES.includes(item.symbol))
+      .filter(item =>
+        NSE_KNOWN_INDICES.includes(item.symbol) ||
+        (/^[A-Z0-9&-]+\.NS$/.test(item.symbol ?? '') && item.quoteType === 'EQUITY')
+      )
       .map(item => ({ symbol: item.symbol, shortName: item.shortname ?? item.longname ?? item.symbol }));
     return json(results, 200, origin);
   } catch (e) {

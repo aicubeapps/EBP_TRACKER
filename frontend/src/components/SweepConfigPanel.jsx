@@ -10,12 +10,16 @@ const ALERT_MODES = [
   { value: 'all',          label: 'All' },
 ];
 
-export default function SweepConfigPanel({ assetId, assetType, biasCache }) {
+export default function SweepConfigPanel({ assetId, assetType, allowedTfs, biasCache }) {
   const { getToken } = useAuth();
   const [configs, setConfigs] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError]     = useState(null);
 
-  const tfOptions  = assetType === 'nse' ? NSE_SWEEP_TFS : SWEEP_TFS;
+  const fullTfOptions = assetType === 'nse' ? NSE_SWEEP_TFS : SWEEP_TFS;
+  // allowedTfs is null while /user/me hasn't resolved yet — skip filtering rather
+  // than showing a false "no timeframes enabled" state.
+  const tfOptions  = allowedTfs ? fullTfOptions.filter(tf => allowedTfs.includes(tf)) : fullTfOptions;
   const biasSource = assetType === 'nse' ? NSE_BIAS_SOURCE_FRONTEND.sweep : BIAS_SOURCE_FRONTEND.sweep;
 
   const fetchConfigs = useCallback(async () => {
@@ -28,10 +32,16 @@ export default function SweepConfigPanel({ assetId, assetType, biasCache }) {
   useEffect(() => { fetchConfigs(); }, [fetchConfigs]);
 
   async function addConfig() {
-    const tf    = tfOptions.find(t => !configs.some(c => c.timeframe === t)) ?? tfOptions[0];
-    const token = await getToken();
-    const res   = await api.post(`/user/sweep-configs/${assetId}`, { timeframe: tf, alert_mode: 'aligned' }, token);
-    setConfigs(prev => [...prev, { id: res.id, timeframe: tf, alert_mode: 'aligned', enabled: 1 }]);
+    const tf = tfOptions.find(t => !configs.some(c => c.timeframe === t)) ?? tfOptions[0];
+    if (!tf) return;
+    setError(null);
+    try {
+      const token = await getToken();
+      const res   = await api.post(`/user/sweep-configs/${assetId}`, { timeframe: tf, alert_mode: 'aligned' }, token);
+      setConfigs(prev => [...prev, { id: res.id, timeframe: tf, alert_mode: 'aligned', enabled: 1 }]);
+    } catch (e) {
+      setError(e.message || 'Could not add sweep alert.');
+    }
   }
 
   async function updateConfig(id, field, value) {
@@ -53,6 +63,7 @@ export default function SweepConfigPanel({ assetId, assetType, biasCache }) {
       {configs.length === 0 && (
         <p className="text-muted mb-sm">No sweep alert timeframes configured.</p>
       )}
+      {error && <p className="mb-sm" style={{ fontSize: 12, color: 'var(--bear)' }}>{error}</p>}
       {configs.map(cfg => {
         const biasTF   = biasSource[cfg.timeframe] ?? null;
         const biasData = biasTF ? biasCache?.[biasTF] : null;
@@ -75,7 +86,11 @@ export default function SweepConfigPanel({ assetId, assetType, biasCache }) {
           </div>
         );
       })}
-      <button className="add-link" onClick={addConfig}>+ Add Sweep Alert</button>
+      {tfOptions.length > 0 ? (
+        <button className="add-link" onClick={addConfig}>+ Add Sweep Alert</button>
+      ) : (
+        <p className="text-muted" style={{ fontSize: 12 }}>No timeframes enabled for your account — contact admin.</p>
+      )}
     </div>
   );
 }

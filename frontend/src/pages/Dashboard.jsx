@@ -55,6 +55,15 @@ export default function Dashboard() {
   const forexCryptoAssets = assets.filter(a => a.asset_type === 'forex' || a.asset_type === 'crypto');
   const nseAssets         = assets.filter(a => a.asset_type === 'nse');
 
+  // null = still loading / not yet known — panels skip filtering rather than
+  // showing a false "no timeframes enabled" state before /user/me resolves.
+  const parseTfList = (raw) => {
+    if (raw == null) return null;
+    try { return JSON.parse(raw); } catch { return null; }
+  };
+  const userTfAccess    = parseTfList(user?.user_tf_access);
+  const userNseTfAccess = parseTfList(user?.nse_tf_access);
+
   return (
     <div className="shell">
       {user?.active === 0 && (
@@ -110,7 +119,7 @@ export default function Dashboard() {
           <AssetCard
             key={asset.id}
             asset={asset}
-            tier={user?.plan ?? 'free'}
+            allowedTfs={asset.asset_type === 'nse' ? userNseTfAccess : userTfAccess}
             onRemove={async (id) => { await removeAsset(id); fetchAssetCount(); }}
           />
         ))

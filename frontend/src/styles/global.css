@@ -631,15 +631,6 @@ html, body, #root {
   flex-shrink: 0;
 }
 
-.ai-template-row.locked {
-  opacity: 0.5;
-  pointer-events: none;
-}
-
-.ai-template-row.locked-visible {
-  opacity: 0.6;
-}
-
 /* ── Search bar ── */
 .search-bar {
   display: flex;

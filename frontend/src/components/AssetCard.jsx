@@ -8,7 +8,7 @@ import SweepConfigPanel from './SweepConfigPanel';
 import AIAlertsPanel from './AIAlertsPanel';
 import BiasOverridePanel from './BiasOverridePanel';
 
-export default function AssetCard({ asset, tier, onRemove }) {
+export default function AssetCard({ asset, allowedTfs, onRemove }) {
   const { getToken } = useAuth();
   const navigate     = useNavigate();
 
@@ -82,7 +82,7 @@ export default function AssetCard({ asset, tier, onRemove }) {
       {ebpEnabled && showBiasOverride && (
         <BiasOverridePanel overrides={biasOverrides} onChange={handleOverrideChange} />
       )}
-      {ebpEnabled && <EBPConfigPanel assetId={asset.id} assetType={asset.asset_type} biasCache={biasCache} />}
+      {ebpEnabled && <EBPConfigPanel assetId={asset.id} assetType={asset.asset_type} allowedTfs={allowedTfs} biasCache={biasCache} />}
 
       {/* Sweep Alerts */}
       <div className="check-row">
@@ -90,7 +90,7 @@ export default function AssetCard({ asset, tier, onRemove }) {
           checked={sweepEnabled} onChange={e => setSweepEnabled(e.target.checked)} />
         <label htmlFor={`sweep-${asset.id}`}>Sweep Alerts</label>
       </div>
-      {sweepEnabled && <SweepConfigPanel assetId={asset.id} assetType={asset.asset_type} biasCache={biasCache} />}
+      {sweepEnabled && <SweepConfigPanel assetId={asset.id} assetType={asset.asset_type} allowedTfs={allowedTfs} biasCache={biasCache} />}
 
       {/* AI Alerts */}
       <div className="check-row">
@@ -98,7 +98,7 @@ export default function AssetCard({ asset, tier, onRemove }) {
           checked={aiEnabled} onChange={e => setAiEnabled(e.target.checked)} />
         <label htmlFor={`ai-${asset.id}`}>AI Alerts</label>
       </div>
-      {aiEnabled && <AIAlertsPanel assetId={asset.id} tier={tier} />}
+      {aiEnabled && <AIAlertsPanel assetId={asset.id} />}
     </div>
   );
 }
