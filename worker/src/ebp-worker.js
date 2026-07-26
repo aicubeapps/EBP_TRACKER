@@ -1508,6 +1508,103 @@ router.delete('/user/sweep-configs/:id', async (req, env) => {
   return json({ ok: true }, 200, origin);
 });
 
+// ── NSE Indicator Configs (TDI / SMA Cloud — Phase D++) ────────
+
+router.get('/user/nse-indicator-configs/:assetId', async (req, env) => {
+  const { user: clerkUser, origin, error, params } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  const { results } = await env.DB.prepare(
+    'SELECT * FROM nse_indicator_configs WHERE asset_id=? AND user_id=? ORDER BY created_at ASC'
+  ).bind(params.assetId, clerkUser.id).all();
+  return json(results ?? [], 200, origin);
+});
+
+router.post('/user/nse-indicator-configs/:assetId', async (req, env) => {
+  const { user: clerkUser, origin, error, params } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  const { indicator, timeframe, stack_mode, day_filter } = await req.json();
+
+  if (indicator !== 'tdi' && indicator !== 'sma') {
+    return json({ error: "indicator must be 'tdi' or 'sma'" }, 400, origin);
+  }
+
+  const validTfs = indicator === 'tdi' ? ['M15', 'M30'] : ['M15', 'M5'];
+  if (!validTfs.includes(timeframe)) {
+    return json({ error: `timeframe must be one of: ${validTfs.join(', ')}` }, 400, origin);
+  }
+
+  const existing = await env.DB.prepare(
+    'SELECT id FROM nse_indicator_configs WHERE user_id=? AND asset_id=? AND indicator=? AND timeframe=?'
+  ).bind(clerkUser.id, params.assetId, indicator, timeframe).first();
+  if (existing) {
+    return json({ error: 'Config already exists for this indicator/timeframe on this asset.' }, 400, origin);
+  }
+
+  const finalStackMode = indicator === 'sma' ? (stack_mode === 'loose' ? 'loose' : 'strict') : null;
+  const finalDayFilter = indicator === 'sma' ? (day_filter === 0 ? 0 : 1) : null;
+
+  const id = crypto.randomUUID();
+  await env.DB.prepare(`
+    INSERT INTO nse_indicator_configs (id, user_id, asset_id, indicator, timeframe, stack_mode, day_filter, enabled, created_at)
+    VALUES (?,?,?,?,?,?,?,1,?)
+  `).bind(id, clerkUser.id, params.assetId, indicator, timeframe, finalStackMode, finalDayFilter, Date.now()).run();
+
+  return json({ id, indicator, timeframe, stack_mode: finalStackMode, day_filter: finalDayFilter, enabled: 1 }, 201, origin);
+});
+
+router.patch('/user/nse-indicator-configs/:id', async (req, env) => {
+  const { user: clerkUser, origin, error, params } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  const body = await req.json();
+  const sets = []; const vals = [];
+  if (body.enabled !== undefined)    { sets.push('enabled = ?');    vals.push(body.enabled ? 1 : 0); }
+  if (body.stack_mode !== undefined) { sets.push('stack_mode = ?'); vals.push(body.stack_mode === 'loose' ? 'loose' : 'strict'); }
+  if (body.day_filter !== undefined) { sets.push('day_filter = ?'); vals.push(body.day_filter ? 1 : 0); }
+  if (!sets.length) return json({ ok: true }, 200, origin);
+  vals.push(clerkUser.id, params.id);
+  await env.DB.prepare(`UPDATE nse_indicator_configs SET ${sets.join(', ')} WHERE user_id = ? AND id = ?`).bind(...vals).run();
+  return json({ ok: true }, 200, origin);
+});
+
+router.delete('/user/nse-indicator-configs/:id', async (req, env) => {
+  const { user: clerkUser, origin, error, params } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+
+  const config = await env.DB.prepare(
+    'SELECT * FROM nse_indicator_configs WHERE id = ? AND user_id = ?'
+  ).bind(params.id, clerkUser.id).first();
+
+  await env.DB.prepare('DELETE FROM nse_indicator_configs WHERE id = ? AND user_id = ?').bind(params.id, clerkUser.id).run();
+
+  if (config) {
+    if (config.indicator === 'tdi') {
+      // nse_indicator_chain is per-user (has user_id) — safe to delete unconditionally.
+      await env.DB.prepare(
+        'DELETE FROM nse_indicator_chain WHERE user_id = ? AND asset_id = ? AND timeframe = ?'
+      ).bind(clerkUser.id, config.asset_id, config.timeframe).run();
+    } else if (config.indicator === 'sma') {
+      // nse_sma_state has no user_id — it's shared symbol+TF-level state. Only
+      // clear it once no other user still has an active SMA config on this
+      // same symbol+TF, otherwise this would wipe their phase tracking too.
+      const asset = await env.DB.prepare('SELECT symbol FROM user_assets WHERE id = ?').bind(config.asset_id).first();
+      if (asset?.symbol) {
+        const stillUsed = await env.DB.prepare(`
+          SELECT COUNT(*) as cnt FROM nse_indicator_configs ic
+          JOIN user_assets ua ON ic.asset_id = ua.id
+          WHERE ua.symbol = ? AND ic.timeframe = ? AND ic.indicator = 'sma'
+        `).bind(asset.symbol, config.timeframe).first();
+        if ((stillUsed?.cnt ?? 0) === 0) {
+          await env.DB.prepare(
+            'DELETE FROM nse_sma_state WHERE symbol = ? AND timeframe = ?'
+          ).bind(asset.symbol, config.timeframe).run();
+        }
+      }
+    }
+  }
+
+  return json({ ok: true }, 200, origin);
+});
+
 // ── Bias Cache ────────────────────────────────────────────────
 
 router.get('/user/bias/:symbol', async (req, env) => {

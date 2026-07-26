@@ -14,6 +14,15 @@ const NSE_BIAS_SOURCE = {
 
 const NSE_VALID_TFS = ['M1', 'M5', 'M15', 'M30', '1H', 'D'];
 
+// asset_type is always 'nse' in this system — there's no 'nse_index' /
+// 'nse_asset' split in the schema or live data. Index-vs-equity for
+// volume-gating is derived from the symbol itself instead (same list
+// ebp-worker.js's /nse/search uses to identify index tickers).
+const NSE_KNOWN_INDICES = ['^NSEI', '^NSEBANK', '^BSESN', '^NIFTYBANK'];
+function isNseIndexSymbol(symbol) {
+  return NSE_KNOWN_INDICES.includes(symbol);
+}
+
 // ── Market hours ──────────────────────────────────────────────
 // NSE trades 9:15–15:30 IST, Mon–Fri. IST is UTC+5:30 year-round
 // (India does not observe DST), so this window is fixed, unlike
@@ -96,6 +105,7 @@ async function fetchUpstoxNse(symbol, tf, token) {
   const candles = raw.map(c => ({
     time:  new Date(c[0]).getTime(),
     open:  c[1], high: c[2], low: c[3], close: c[4],
+    volume: c[5] ?? 0,
   }));
   candles.sort((a, b) => b.time - a.time); // guarantee newest-first
   return candles;
@@ -116,7 +126,10 @@ async function fetchYahooFinanceNse(symbol, tf) {
   const timestamps = result.timestamp;
   const ohlc       = result.indicators.quote[0];
   const candles    = [];
-  for (let i = timestamps.length - 1; i >= 0 && candles.length < 10; i--) {
+  // Capped at 60 (not the original 10) — the NSE Indicators feature needs up
+  // to 60 candles (BB(34)/RSI(13)) when Yahoo is the fallback; harmless for
+  // existing EBP/Sweep/MSS callers that only ever read the first 2-3.
+  for (let i = timestamps.length - 1; i >= 0 && candles.length < 60; i--) {
     if (ohlc.close[i] == null) continue;
     candles.push({
       open:  ohlc.open[i],
@@ -124,6 +137,7 @@ async function fetchYahooFinanceNse(symbol, tf) {
       low:   ohlc.low[i],
       close: ohlc.close[i],
       time:  timestamps[i] * 1000,
+      volume: ohlc.volume?.[i] ?? 0,
     });
   }
   return candles;
@@ -149,6 +163,151 @@ async function fetchNseCandles(symbol, tf, env) {
     console.error(`[NSE] Yahoo failed ${symbol} ${tf}: ${e.message}`);
     return null;
   }
+}
+
+// ── Phase D++ — NSE Indicators — rolling 60-candle cache ────────
+// Fetches fresh candles via the existing Upstox/Yahoo fallback, merges with
+// whatever's cached (deduped by timestamp, fresh wins on collision), trims
+// to 60, writes back. Writes to nse_indicator_candle_cache — a new table,
+// distinct from nse_candle_cache (that one's fixed 3-bar layout stays as-is
+// for the already-live EBP/Sweep/MSS path).
+// Merges already-fetched candles into the cache (no fetch of its own) —
+// used by handleNseCron, which already fetched `candles` once at the top
+// of its per-symbol loop for EBP/Sweep/MSS. Calling a function that fetches
+// internally here would mean two Upstox calls per symbol+TF per run,
+// violating "one Upstox fetch per asset per TF per run regardless of
+// indicator count."
+async function mergeAndCacheNSECandles(symbol, timeframe, freshCandles, env) {
+  if (!freshCandles || freshCandles.length === 0) return null;
+
+  const cachedRow = await env.DB.prepare(
+    'SELECT candles FROM nse_indicator_candle_cache WHERE symbol = ? AND timeframe = ?'
+  ).bind(symbol, timeframe).first();
+
+  let cached = [];
+  if (cachedRow?.candles) {
+    try { cached = JSON.parse(cachedRow.candles); } catch { cached = []; }
+  }
+
+  const merged = new Map(); // time -> candle; fresh overwrites cached on collision
+  for (const c of cached) merged.set(c.time, c);
+  for (const c of freshCandles) merged.set(c.time, c);
+
+  const combined = [...merged.values()].sort((a, b) => b.time - a.time).slice(0, 60);
+
+  await env.DB.prepare(`
+    INSERT INTO nse_indicator_candle_cache (symbol, timeframe, candles, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(symbol, timeframe) DO UPDATE SET
+      candles = excluded.candles, updated_at = excluded.updated_at
+  `).bind(symbol, timeframe, JSON.stringify(combined), Date.now()).run();
+
+  return combined;
+}
+
+// Thin standalone wrapper matching the spec's literal signature — fetches
+// fresh candles itself, then merges. Not used by handleNseCron's wiring
+// (which reuses the candles it already fetched via mergeAndCacheNSECandles
+// directly); kept for any standalone/manual-test call path.
+async function fetchAndCacheNSECandles(symbol, timeframe, env) {
+  const fresh = await fetchNseCandles(symbol, timeframe, env);
+  return mergeAndCacheNSECandles(symbol, timeframe, fresh, env);
+}
+
+// 1H candles for SMA Cloud's HTF leg — small fetch, no caching (fresh each
+// run). Reuses the same Upstox-then-Yahoo fallback as everything else.
+async function fetchHTFCandles(symbol, env) {
+  const candles = await fetchNseCandles(symbol, '1H', env);
+  if (!candles) return null;
+  return candles.slice(0, 15);
+}
+
+// ── Phase D++ — NSE Indicators — shared math helpers (pure, stateless) ──
+
+// RSI — Wilder smoothing. candles: newest-first array of {close}.
+// Returns RSI values newest-first (length = candles.length - period).
+function computeRSI(candles, period = 13) {
+  const closes = [...candles].reverse().map(c => c.close); // oldest-first
+  if (closes.length < period + 1) return [];
+
+  let gains = 0, losses = 0;
+  for (let i = 1; i <= period; i++) {
+    const change = closes[i] - closes[i - 1];
+    if (change > 0) gains += change; else losses -= change;
+  }
+  let avgGain = gains / period;
+  let avgLoss = losses / period;
+
+  const rsiOldestFirst = new Array(closes.length).fill(null);
+  rsiOldestFirst[period] = avgLoss === 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss));
+
+  for (let i = period + 1; i < closes.length; i++) {
+    const change = closes[i] - closes[i - 1];
+    const gain = change > 0 ? change : 0;
+    const loss = change < 0 ? -change : 0;
+    avgGain = (avgGain * (period - 1) + gain) / period;
+    avgLoss = (avgLoss * (period - 1) + loss) / period;
+    rsiOldestFirst[i] = avgLoss === 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss));
+  }
+
+  const result = [];
+  for (let i = closes.length - 1; i >= period; i--) result.push(rsiOldestFirst[i]);
+  return result; // newest-first
+}
+
+// SMA — simple moving average. values: oldest-first. Returns array same
+// length as input (null for the first period-1 entries).
+function computeSMA(values, period) {
+  const result = new Array(values.length).fill(null);
+  let sum = 0;
+  for (let i = 0; i < values.length; i++) {
+    sum += values[i];
+    if (i >= period) sum -= values[i - period];
+    if (i >= period - 1) result[i] = sum / period;
+  }
+  return result;
+}
+
+// ATR — Wilder-smoothed average true range. candles: newest-first.
+// Returns a single current-bar ATR value (or null if insufficient data).
+function computeATR(candles, period = 14) {
+  if (!candles || candles.length < period + 1) return null;
+  const oldestFirst = [...candles].reverse();
+  const trueRanges = [];
+  for (let i = 1; i < oldestFirst.length; i++) {
+    const curr = oldestFirst[i];
+    const prev = oldestFirst[i - 1];
+    trueRanges.push(Math.max(
+      curr.high - curr.low,
+      Math.abs(curr.high - prev.close),
+      Math.abs(curr.low - prev.close)
+    ));
+  }
+  if (trueRanges.length < period) return null;
+
+  let atr = trueRanges.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < trueRanges.length; i++) {
+    atr = (atr * (period - 1) + trueRanges[i]) / period;
+  }
+  return atr;
+}
+
+// Bollinger Bands on an arbitrary series (used here on the RSI series).
+// values: oldest-first. Returns { upper, middle, lower } arrays, same
+// length as input, index-aligned (null before period-1).
+function computeBB(values, period = 34, stdDevMult = 1.6185) {
+  const middle = computeSMA(values, period);
+  const upper  = new Array(values.length).fill(null);
+  const lower  = new Array(values.length).fill(null);
+  for (let i = period - 1; i < values.length; i++) {
+    const slice    = values.slice(i - period + 1, i + 1);
+    const mean     = middle[i];
+    const variance = slice.reduce((sum, v) => sum + (v - mean) ** 2, 0) / period;
+    const stdDev   = Math.sqrt(variance);
+    upper[i] = mean + stdDev * stdDevMult;
+    lower[i] = mean - stdDev * stdDevMult;
+  }
+  return { upper, middle, lower };
 }
 
 // ── TTrades bias engine — copied verbatim from worker/src/ebp-worker.js ──
@@ -345,6 +504,590 @@ function detectMSS(swingState, currentCandle) {
   return null;
 }
 
+// ── Phase D++ — NSE Indicator alert delivery (shared by TDI + SMA) ──
+// Unlike EBP/Sweep/MSS, nse_indicator_configs has no alert_mode column —
+// every enabled config fires directly on its own internal conditions, no
+// HTF-bias-alignment gate. Still respects nse_tf_access (admin-controlled)
+// and requires a verified Telegram chat_id, same as every other NSE alert.
+async function deliverNseIndicatorAlert(env, { userId, symbol, timeframe, direction, candleTime, alertType, message }) {
+  const userRow = await env.DB.prepare('SELECT nse_tf_access FROM users WHERE id = ?').bind(userId).first();
+  const tfAccess = JSON.parse(userRow?.nse_tf_access || '["M1","M5","M15","M30","1H","D"]');
+  if (!tfAccess.includes(timeframe)) return;
+
+  const tg = await env.DB.prepare(
+    'SELECT chat_id FROM user_telegram WHERE user_id = ? AND verified = 1'
+  ).bind(userId).first();
+  if (!tg?.chat_id) return;
+
+  await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, message);
+
+  await env.DB.prepare(`
+    INSERT INTO alert_history
+    (id, user_id, symbol, timeframe, direction, trend_bias, candle_time, fired_at, alert_type)
+    VALUES (?,?,?,?,?,?,?,?,?)
+  `).bind(
+    crypto.randomUUID(), userId, symbol, timeframe, direction, null, candleTime, Date.now(), alertType
+  ).run();
+}
+
+// ── Phase D++ — TDI (Traders Dynamic Index) ─────────────────────
+
+// Divergence check with swing_state fallback. direction: 'bullish' checks
+// for a bullish (higher-low) divergence against a bearish run; 'bearish'
+// checks the mirror. Primary reference is the ongoing swing_state run's
+// extreme; if that's unavailable, falls back to a 20-candle lookback
+// extreme close as a proxy swing reference (spec's wording mixes
+// run_extreme/confirmed_swing_low terminology here — this is the most
+// internally-consistent reading: use the live run's extreme when present,
+// else approximate with the lookback).
+function checkTdiDivergence(direction, candles, rsiSeries, swingState) {
+  const priceKey    = direction === 'bullish' ? 'low' : 'high';
+  const runDirNeeded = direction === 'bullish' ? 'bearish' : 'bullish';
+
+  let refIdx = -1;
+  let refPrice = null;
+
+  if (swingState?.run_direction === runDirNeeded && swingState.run_extreme != null && swingState.extreme_time != null) {
+    refIdx = candles.findIndex(c => c.time === swingState.extreme_time);
+    refPrice = swingState.run_extreme;
+  }
+
+  if (refIdx < 0 || refIdx >= rsiSeries.length) {
+    const lookback = candles.slice(0, Math.min(20, candles.length));
+    let bestIdx = -1, bestClose = null;
+    for (let i = 0; i < lookback.length; i++) {
+      const c = lookback[i].close;
+      const better = direction === 'bullish' ? (bestClose === null || c < bestClose) : (bestClose === null || c > bestClose);
+      if (better) { bestClose = c; bestIdx = i; }
+    }
+    if (bestIdx < 0 || bestIdx >= rsiSeries.length) return false;
+    refIdx   = bestIdx;
+    refPrice = lookback[bestIdx][priceKey];
+  }
+
+  const refRsi  = rsiSeries[refIdx];
+  const currRsi = rsiSeries[0];
+  const currPrice = candles[0][priceKey];
+  if (refRsi == null || currRsi == null || refPrice == null) return false;
+
+  return direction === 'bullish'
+    ? (currRsi > refRsi && currPrice <= refPrice)
+    : (currRsi < refRsi && currPrice >= refPrice);
+}
+
+// Condition 4 — MSS confirmed (price beyond the confirmed swing level) +
+// volume gate (equity only; skipped for index symbols).
+function checkTdiCondition4(direction, candles, swingState, isIndex) {
+  if (!swingState) return false;
+  const priceOk = direction === 'bullish'
+    ? (swingState.confirmed_swing_high != null && candles[0].close > swingState.confirmed_swing_high)
+    : (swingState.confirmed_swing_low  != null && candles[0].close < swingState.confirmed_swing_low);
+  if (!priceOk) return false;
+  if (isIndex) return true;
+
+  if (candles.length < 20) return false;
+  const volSeries = candles.slice(0, 20).map(c => c.volume ?? 0);
+  const avgVol = volSeries.reduce((a, b) => a + b, 0) / volSeries.length;
+  const currVol = candles[0].volume ?? 0;
+  return avgVol > 0 && currVol > avgVol * 1.5;
+}
+
+function buildTdiSmaContextLine(smaState, tdiDirection) {
+  if (!smaState) return null; // omitted entirely — no nse_sma_state row for this asset
+  if (smaState.phase === 'distribution') {
+    const dirLabel = smaState.direction === 'bullish' ? 'Bullish markup' : 'Bearish distribution';
+    const aligned  = smaState.direction === tdiDirection;
+    return `📊 SMA Context: ${dirLabel} ${aligned ? '— aligned ✅' : 'active ⚠️'}`;
+  }
+  return `📊 SMA Context: Accumulation phase`;
+}
+
+function formatTdiAlert({ symbol, timeframe, direction, candleTime, mssLevel, volumeRatio, smaContextLine, isIndex }) {
+  const emoji     = direction === 'bullish' ? '🟢' : '🔴';
+  const label     = direction === 'bullish' ? 'BUY' : 'SELL';
+  const bandLabel = direction === 'bullish' ? 'RSI exhaustion at lower band' : 'RSI exhaustion at upper band';
+  const divLabel  = direction === 'bullish' ? 'Divergence: Price LL, RSI HL confirmed' : 'Divergence: Price HH, RSI LH confirmed';
+  const momLabel  = direction === 'bullish' ? 'Momentum: Red crossed Yellow ↑' : 'Momentum: Red crossed Yellow ↓';
+  const mssLabel  = direction === 'bullish' ? 'Swing high reclaimed' : 'Swing low broken';
+
+  const lines = [
+    `${emoji} <b>${label} — ${symbol}</b>`,
+    `⏱ Timeframe: ${timeframe}`,
+    `🕐 Candle: ${fmtIST(candleTime)} IST`,
+    `━━━━━━━━━━━━━━`,
+    `TDI: ${bandLabel}`,
+    divLabel,
+    momLabel,
+    `MSS: ${mssLabel}: ${mssLevel?.toFixed(2)}`,
+  ];
+  if (!isIndex && volumeRatio != null) lines.push(`📦 Volume: ${volumeRatio.toFixed(1)}× average`);
+  if (smaContextLine) lines.push(smaContextLine);
+  lines.push(`━━━━━━━━━━━━━━`, `EBP Tracker`);
+  return lines.join('\n');
+}
+
+// Main TDI entry point — called once per (user, asset, timeframe) with
+// already-fetched candles (newest-first, from nse_indicator_candle_cache).
+// updateSwingState() must already have run for this symbol/timeframe this
+// cron cycle (enforced by the caller in handleNseCron), since this reads
+// swing_state directly rather than taking it as a parameter.
+async function runTDIForAsset(symbol, timeframe, userId, assetId, candles, env) {
+  if (!candles || candles.length < 48) return; // need enough history for RSI(13) + BB(34)
+
+  const isIndex = isNseIndexSymbol(symbol);
+
+  const rsiSeries = computeRSI(candles, 13); // newest-first, aligned with candles[i]
+  if (rsiSeries.length < 35) return; // BB(34) needs 34 RSI values plus 1 for "prev"
+
+  const rsiOldestFirst    = [...rsiSeries].reverse();
+  const redOldestFirst    = computeSMA(rsiOldestFirst, 2);
+  const yellowOldestFirst = computeSMA(rsiOldestFirst, 7);
+  const bb                = computeBB(rsiOldestFirst, 34, 1.6185);
+
+  const n = rsiOldestFirst.length;
+  const toNewestIdx = (k) => n - 1 - k; // k=0 => newest, aligned with candles[k]
+
+  const redNow     = redOldestFirst[toNewestIdx(0)];
+  const redPrev    = redOldestFirst[toNewestIdx(1)];
+  const yellowNow  = yellowOldestFirst[toNewestIdx(0)];
+  const yellowPrev = yellowOldestFirst[toNewestIdx(1)];
+  const bbUpperNow = bb.upper[toNewestIdx(0)];
+  const bbLowerNow = bb.lower[toNewestIdx(0)];
+
+  if ([redNow, redPrev, yellowNow, yellowPrev, bbUpperNow, bbLowerNow].some(v => v == null)) return;
+
+  const swingState = await env.DB.prepare(
+    'SELECT * FROM swing_state WHERE symbol = ? AND timeframe = ?'
+  ).bind(symbol, timeframe).first();
+
+  const cond1Bull = redNow <= bbLowerNow;
+  const cond1Bear = redNow >= bbUpperNow;
+  const cond3Bull = redPrev <= yellowPrev && redNow > yellowNow;
+  const cond3Bear = redPrev >= yellowPrev && redNow < yellowNow;
+  const cond2Bull = checkTdiDivergence('bullish', candles, rsiSeries, swingState);
+  const cond2Bear = checkTdiDivergence('bearish', candles, rsiSeries, swingState);
+
+  const setupBull = cond1Bull && cond2Bull && cond3Bull;
+  const setupBear = cond1Bear && cond2Bear && cond3Bear;
+
+  const existingChain = await env.DB.prepare(
+    'SELECT * FROM nse_indicator_chain WHERE user_id = ? AND asset_id = ? AND timeframe = ?'
+  ).bind(userId, assetId, timeframe).first();
+
+  const tfMinutes = { M15: 15, M30: 30 }[timeframe] ?? 15;
+  const expiryMs  = tfMinutes * 60 * 1000 * 4; // 4 candles
+  const now       = Date.now();
+
+  // New setup (re)fires — create or overwrite the chain row, resetting
+  // expiry, per spec: "overwrite the existing row (reset expiry)".
+  if (setupBull || setupBear) {
+    const direction = setupBull ? 'bullish' : 'bearish';
+    const chainId = existingChain?.id ?? crypto.randomUUID();
+    await env.DB.prepare(`
+      INSERT INTO nse_indicator_chain (id, user_id, asset_id, symbol, timeframe, direction, state, created_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        direction = excluded.direction, state = 1,
+        created_at = excluded.created_at, expires_at = excluded.expires_at
+    `).bind(chainId, userId, assetId, symbol, timeframe, direction, now, now + expiryMs).run();
+    return;
+  }
+
+  if (!existingChain) return; // State 0 — nothing pending
+
+  if (existingChain.expires_at <= now) {
+    await env.DB.prepare('DELETE FROM nse_indicator_chain WHERE id = ?').bind(existingChain.id).run();
+    return;
+  }
+
+  // State 1 — check condition 4 (MSS + volume)
+  const cond4 = checkTdiCondition4(existingChain.direction, candles, swingState, isIndex);
+  if (!cond4) return;
+
+  await env.DB.prepare('DELETE FROM nse_indicator_chain WHERE id = ?').bind(existingChain.id).run();
+
+  const direction = existingChain.direction;
+  const mssLevel  = direction === 'bullish' ? swingState.confirmed_swing_high : swingState.confirmed_swing_low;
+
+  let volumeRatio = null;
+  if (!isIndex && candles.length >= 20) {
+    const volSeries = candles.slice(0, 20).map(c => c.volume ?? 0);
+    const avgVol = volSeries.reduce((a, b) => a + b, 0) / volSeries.length;
+    volumeRatio = avgVol > 0 ? (candles[0].volume ?? 0) / avgVol : null;
+  }
+
+  const smaState = await env.DB.prepare(
+    'SELECT phase, direction FROM nse_sma_state WHERE symbol = ? AND timeframe = ?'
+  ).bind(symbol, timeframe).first();
+  const smaContextLine = buildTdiSmaContextLine(smaState, direction);
+
+  const message = formatTdiAlert({
+    symbol, timeframe, direction, candleTime: candles[0].time,
+    mssLevel, volumeRatio, smaContextLine, isIndex,
+  });
+
+  await deliverNseIndicatorAlert(env, {
+    userId, symbol, timeframe, direction,
+    candleTime: candles[0].time, alertType: 'tdi', message,
+  });
+}
+
+// ── Phase D++ — SMA Cloud ────────────────────────────────────────
+
+// Aligns HTF (1H) SMA values onto the LTF candle timeline — for each LTF
+// candle, use the SMA9 value of the most recent 1H bar at or before that
+// candle's time (a step function, since many M15/M5 bars share one 1H
+// bar). ltfCandles/htfCandles newest-first; htfSmaOldestFirst aligned with
+// [...htfCandles].reverse(). Returns array newest-first, aligned with
+// ltfCandles[i].
+function alignHtfSmaToLtf(ltfCandles, htfCandles, htfSmaOldestFirst) {
+  const htfOldestFirst = [...htfCandles].reverse();
+  return ltfCandles.map(lc => {
+    let idx = -1;
+    for (let i = 0; i < htfOldestFirst.length; i++) {
+      if (htfOldestFirst[i].time <= lc.time) idx = i; else break;
+    }
+    return idx >= 0 ? htfSmaOldestFirst[idx] : null;
+  });
+}
+
+function didSmaCrossover(i, smaLtf, smaHtf) {
+  if (i + 1 >= smaLtf.length) return false;
+  const a = smaLtf[i], b = smaHtf[i], c = smaLtf[i + 1], d = smaHtf[i + 1];
+  if (a == null || b == null || c == null || d == null) return false;
+  return (a > b) !== (c > d);
+}
+
+function countSmaCrossovers(window, smaLtf, smaHtf) {
+  let count = 0;
+  for (let i = 0; i < window; i++) if (didSmaCrossover(i, smaLtf, smaHtf)) count++;
+  return count;
+}
+
+// Which side of BOTH MAs a candle closed on. null = ambiguous (inside cloud
+// or one MA missing) — used both for the 3-candle "armed" check and the
+// 5-candle price_consistency count.
+function smaCandleSide(candles, smaLtf, smaHtf, i) {
+  if (smaLtf[i] == null || smaHtf[i] == null) return null;
+  const c = candles[i].close;
+  if (c > smaLtf[i] && c > smaHtf[i]) return 'bullish';
+  if (c < smaLtf[i] && c < smaHtf[i]) return 'bearish';
+  return null;
+}
+
+function smaPriceConsistency(window, direction, candles, smaLtf, smaHtf) {
+  let count = 0;
+  for (let i = 0; i < window; i++) {
+    if (smaCandleSide(candles, smaLtf, smaHtf, i) === direction) count++;
+  }
+  return count;
+}
+
+function checkSmaStack(direction, mode, close, smaLtf, smaHtf) {
+  if (mode === 'strict') {
+    return direction === 'bullish' ? (close > smaLtf && smaLtf > smaHtf) : (close < smaLtf && smaLtf < smaHtf);
+  }
+  return direction === 'bullish' ? (close > smaLtf && close > smaHtf) : (close < smaLtf && close < smaHtf);
+}
+
+// Day-of-week filter (IST). Mon/Tue/Thu always allowed; Wed allowed but the
+// caller must additionally require crossover_count_8 === 0; Fri only before
+// 12:00 IST. Sat/Sun blocked (market's closed anyway — cron won't even be
+// running, but this stays safe regardless).
+function checkSmaDayFilter() {
+  const istDay  = new Date().toLocaleDateString('en-US', { timeZone: 'Asia/Kolkata', weekday: 'long' });
+  const istHour = parseInt(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata', hour: 'numeric', hour12: false }), 10);
+  if (istDay === 'Saturday' || istDay === 'Sunday') return false;
+  if (istDay === 'Friday') return istHour < 12;
+  return true;
+}
+
+function checkSmaCooldown(timeframe, smaState) {
+  if (timeframe === 'M15') {
+    const nowIstDate = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }); // 'YYYY-MM-DD'
+    return !smaState?.last_signal_date || smaState.last_signal_date < nowIstDate;
+  }
+  // M5 — 12-candle (1 hour) cooldown
+  if (!smaState?.last_signal_time) return true;
+  return (Date.now() - smaState.last_signal_time) > 60 * 60 * 1000;
+}
+
+async function getDailyBiasForSma(symbol, env) {
+  const cached = await env.DB.prepare(
+    "SELECT bias FROM bias_cache WHERE symbol = ? AND timeframe = 'D'"
+  ).bind(symbol).first();
+  if (cached?.bias) return cached.bias;
+
+  const dailyCandles = await fetchNseCandles(symbol, 'D', env);
+  if (!dailyCandles || dailyCandles.length < 2) return null;
+  const biasResult = calcTTradesBias({ bar1: dailyCandles[0], bar2: dailyCandles[1] });
+  await writeBiasCache(env.DB, symbol, 'D', { ...biasResult, bar1Time: dailyCandles[0].time });
+  return biasResult.bias;
+}
+
+// Phase state machine — pure transition function. prev: prior nse_sma_state
+// row (or null). m: computed metrics for this run. Returns the new
+// phase/direction/consecutive_widening plus edge-transition flags used to
+// gate Type 1 and the exhaustion notification.
+function advanceSmaPhase(prev, m) {
+  const prevPhase = prev?.phase ?? 'accumulation';
+  let phase = prevPhase;
+  let direction = prev?.direction ?? null;
+  let consecutiveWidening = prev?.consecutive_widening ?? 0;
+  let justEnteredDistribution = false;
+  let justExhausted = false;
+
+  const separationWidening  = m.separationNow > m.separation5Ago;
+  const separationNarrowing = m.separationNow < m.separation5Ago;
+  const armedCandidate = (m.crossoverCount5 === 0 && separationWidening) ? m.candidateDirection3 : null;
+
+  if (prevPhase === 'accumulation') {
+    if (armedCandidate) {
+      phase = 'transition'; direction = armedCandidate; consecutiveWidening = 1;
+    } else {
+      phase = 'accumulation'; direction = null; consecutiveWidening = 0;
+    }
+  } else if (prevPhase === 'transition') {
+    const stillArmed = armedCandidate === direction;
+    if (stillArmed) {
+      consecutiveWidening += 1;
+      if (consecutiveWidening >= 2) { phase = 'distribution'; justEnteredDistribution = true; }
+    } else if (armedCandidate) {
+      phase = 'transition'; direction = armedCandidate; consecutiveWidening = 1;
+    } else {
+      phase = 'accumulation'; direction = null; consecutiveWidening = 0;
+    }
+  } else if (prevPhase === 'distribution') {
+    const exhaustionCond = separationNarrowing && m.crossoverCount5 >= 1 && m.priceConsistency5 <= 3;
+    if (exhaustionCond) {
+      phase = 'accumulation'; justExhausted = true;
+    } else {
+      phase = 'distribution';
+    }
+  }
+
+  return { phase, direction, consecutiveWidening, justEnteredDistribution, justExhausted };
+}
+
+function formatSmaType1Alert({ symbol, timeframe, direction, candleTime, velocityLabel, close, smaLtf, smaHtf, htfBias, volumeRatio, isIndex }) {
+  const emoji       = direction === 'bullish' ? '🟢' : '🔴';
+  const label       = direction === 'bullish' ? 'BUY' : 'SELL';
+  const stackLabel  = direction === 'bullish' ? 'Bullish markup' : 'Bearish distribution';
+  const velocityIcon = velocityLabel === 'Sharp' ? '⚡' : '📉';
+  const biasLabel   = htfBias === 'bullish' ? 'Bullish' : htfBias === 'bearish' ? 'Bearish' : 'Neutral';
+
+  const lines = [
+    `${emoji} <b>${label} — ${symbol}</b>`,
+    `⏱ Timeframe: ${timeframe}`,
+    `🕐 Candle: ${fmtIST(candleTime)} IST`,
+    `━━━━━━━━━━━━━━`,
+    `SMA Stack: ${stackLabel} — ${velocityLabel} ${velocityIcon}`,
+    `Close: ${close?.toFixed(2)}`,
+    `SMA 9 (${timeframe}): ${smaLtf?.toFixed(2)}`,
+    `SMA 9 (1H): ${smaHtf?.toFixed(2)}`,
+    `Cloud gap: widening`,
+    `HTF Bias: ${biasLabel} (Daily) ✅`,
+  ];
+  if (!isIndex && volumeRatio != null) lines.push(`📦 Volume: ${volumeRatio.toFixed(1)}× average`);
+  lines.push(`━━━━━━━━━━━━━━`, `EBP Tracker`);
+  return lines.join('\n');
+}
+
+function formatSmaType2Alert({ symbol, timeframe, direction, candleTime, rejectLevel, htfBias }) {
+  const emoji      = direction === 'bullish' ? '🟢' : '🔴';
+  const label      = direction === 'bullish' ? 'BUY' : 'SELL';
+  const cloudSide  = direction === 'bullish' ? 'cloud top' : 'cloud bottom';
+  const closureLbl = direction === 'bullish' ? 'Bullish' : 'Bearish';
+  const biasLabel  = htfBias === 'bullish' ? 'Bullish' : htfBias === 'bearish' ? 'Bearish' : 'Neutral';
+
+  return [
+    `${emoji} <b>${label} — ${symbol}</b>`,
+    `⏱ Timeframe: ${timeframe}`,
+    `🕐 Candle: ${fmtIST(candleTime)} IST`,
+    `━━━━━━━━━━━━━━`,
+    `SMA Re-entry: Cloud rejection confirmed`,
+    `Rejected from: ${rejectLevel?.toFixed(2)} (${cloudSide})`,
+    `Closure: ${closureLbl} ✅`,
+    `HTF Bias: ${biasLabel} (Daily) ✅`,
+    `━━━━━━━━━━━━━━`,
+    `EBP Tracker`,
+  ].join('\n');
+}
+
+function formatSmaExhaustionAlert({ symbol, timeframe, candleTime }) {
+  return [
+    `⚠️ <b>${symbol} — SMA Trend Exhausting</b>`,
+    `⏱ Timeframe: ${timeframe}`,
+    `🕐 Candle: ${fmtIST(candleTime)} IST`,
+    `━━━━━━━━━━━━━━`,
+    `SMAs converging — distribution phase ending`,
+    `Consider tightening stops or exiting position`,
+    `━━━━━━━━━━━━━━`,
+    `EBP Tracker`,
+  ].join('\n');
+}
+
+// Main SMA Cloud entry point — called once per (user, asset, timeframe)
+// with already-fetched native-TF candles and 1H HTF candles (both
+// newest-first). Reads/writes nse_sma_state every run regardless of
+// whether a signal fires.
+async function runSMAForAsset(symbol, timeframe, userId, assetId, candles, htfCandles, stackMode, dayFilter, env) {
+  if (!candles || candles.length < 25 || !htfCandles || htfCandles.length < 10) return;
+
+  const isIndex = isNseIndexSymbol(symbol);
+  const mode = stackMode === 'loose' ? 'loose' : 'strict';
+
+  const closesLtfOldestFirst = [...candles].reverse().map(c => c.close);
+  const sma9LtfOldestFirst   = computeSMA(closesLtfOldestFirst, 9);
+  const sma9LtfNewestFirst   = [...sma9LtfOldestFirst].reverse(); // aligned with candles[i]
+
+  const closesHtfOldestFirst = [...htfCandles].reverse().map(c => c.close);
+  const sma9HtfOldestFirst   = computeSMA(closesHtfOldestFirst, 9);
+  const sma9HtfNewestFirst   = alignHtfSmaToLtf(candles, htfCandles, sma9HtfOldestFirst);
+
+  const atr14 = computeATR(candles, 14);
+  if (sma9LtfNewestFirst[0] == null || sma9HtfNewestFirst[0] == null || atr14 == null) return;
+  if (sma9LtfNewestFirst.length < 21 || sma9HtfNewestFirst.length < 21) return; // need 20-candle crossover window + 1
+
+  const crossoverCount20 = countSmaCrossovers(20, sma9LtfNewestFirst, sma9HtfNewestFirst);
+  const crossoverCount10 = countSmaCrossovers(10, sma9LtfNewestFirst, sma9HtfNewestFirst);
+  const crossoverCount8  = countSmaCrossovers(8,  sma9LtfNewestFirst, sma9HtfNewestFirst);
+  const crossoverCount5  = countSmaCrossovers(5,  sma9LtfNewestFirst, sma9HtfNewestFirst);
+
+  const separationNow  = Math.abs(sma9LtfNewestFirst[0] - sma9HtfNewestFirst[0]);
+  const separation5Ago = (sma9LtfNewestFirst[5] != null && sma9HtfNewestFirst[5] != null)
+    ? Math.abs(sma9LtfNewestFirst[5] - sma9HtfNewestFirst[5]) : separationNow;
+  const separationVelocity = (separationNow - separation5Ago) / 5;
+  const velocityLabel = separationVelocity > (atr14 * 0.03) ? 'Sharp' : 'Gradual';
+
+  const cloudTop    = Math.max(sma9LtfNewestFirst[0], sma9HtfNewestFirst[0]);
+  const cloudBottom = Math.min(sma9LtfNewestFirst[0], sma9HtfNewestFirst[0]);
+
+  const side0 = smaCandleSide(candles, sma9LtfNewestFirst, sma9HtfNewestFirst, 0);
+  const side1 = smaCandleSide(candles, sma9LtfNewestFirst, sma9HtfNewestFirst, 1);
+  const side2 = smaCandleSide(candles, sma9LtfNewestFirst, sma9HtfNewestFirst, 2);
+  const candidateDirection3 = (side0 && side0 === side1 && side1 === side2) ? side0 : null;
+
+  const priorState = await env.DB.prepare(
+    'SELECT * FROM nse_sma_state WHERE symbol = ? AND timeframe = ?'
+  ).bind(symbol, timeframe).first();
+
+  const advance = advanceSmaPhase(priorState, {
+    crossoverCount5, separationNow, separation5Ago, candidateDirection3,
+    priceConsistency5: candidateDirection3 ? smaPriceConsistency(5, candidateDirection3, candles, sma9LtfNewestFirst, sma9HtfNewestFirst)
+      : (priorState?.direction ? smaPriceConsistency(5, priorState.direction, candles, sma9LtfNewestFirst, sma9HtfNewestFirst) : 0),
+  });
+
+  const nowIst = new Date().toISOString();
+  await env.DB.prepare(`
+    INSERT INTO nse_sma_state (
+      symbol, timeframe, direction, phase, stack_active, consecutive_widening,
+      separation, velocity_label, atr14, cloud_top, cloud_bottom,
+      stack_formed_date, last_signal_date, last_signal_time, updated_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(symbol, timeframe) DO UPDATE SET
+      direction = excluded.direction, phase = excluded.phase,
+      stack_active = excluded.stack_active, consecutive_widening = excluded.consecutive_widening,
+      separation = excluded.separation, velocity_label = excluded.velocity_label,
+      atr14 = excluded.atr14, cloud_top = excluded.cloud_top, cloud_bottom = excluded.cloud_bottom,
+      stack_formed_date = excluded.stack_formed_date, updated_at = excluded.updated_at
+  `).bind(
+    symbol, timeframe, advance.direction, advance.phase,
+    advance.phase === 'distribution' ? 1 : 0, advance.consecutiveWidening,
+    separationNow, velocityLabel, atr14, cloudTop, cloudBottom,
+    advance.justEnteredDistribution ? new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }) : (priorState?.stack_formed_date ?? null),
+    priorState?.last_signal_date ?? null, priorState?.last_signal_time ?? null,
+    Date.now()
+  ).run();
+
+  // ── Exhaustion notification ──
+  if (advance.justExhausted) {
+    const message = formatSmaExhaustionAlert({ symbol, timeframe, candleTime: candles[0].time });
+    await deliverNseIndicatorAlert(env, {
+      userId, symbol, timeframe, direction: priorState?.direction ?? null,
+      candleTime: candles[0].time, alertType: 'sma_exhaustion', message,
+    });
+    return; // exhaustion and a fresh Type1/Type2 can't both fire the same run
+  }
+
+  const dayOk = dayFilter === 1
+    ? (checkSmaDayFilter() && (new Date().toLocaleDateString('en-US', { timeZone: 'Asia/Kolkata', weekday: 'long' }) !== 'Wednesday' || crossoverCount8 === 0))
+    : true;
+  if (!dayOk) return;
+
+  // ── Type 1 — trend initiation (fires exactly on the transition edge) ──
+  if (advance.justEnteredDistribution) {
+    const direction = advance.direction;
+    const close = candles[0].close;
+    const beyondCloud = direction === 'bullish' ? close > cloudTop : close < cloudBottom;
+    const stackOk = checkSmaStack(direction, mode, close, sma9LtfNewestFirst[0], sma9HtfNewestFirst[0]);
+
+    if (beyondCloud && stackOk) {
+      const dailyBias = await getDailyBiasForSma(symbol, env);
+      if (dailyBias === direction) {
+        let volumeRatio = null;
+        if (!isIndex) {
+          if (candles.length < 20) return;
+          const volSeries = candles.slice(0, 20).map(c => c.volume ?? 0);
+          const avgVol = volSeries.reduce((a, b) => a + b, 0) / volSeries.length;
+          volumeRatio = avgVol > 0 ? (candles[0].volume ?? 0) / avgVol : null;
+          if (!(avgVol > 0 && (candles[0].volume ?? 0) > avgVol * 1.5)) return; // volume gate not met
+        }
+
+        const message = formatSmaType1Alert({
+          symbol, timeframe, direction, candleTime: candles[0].time, velocityLabel,
+          close, smaLtf: sma9LtfNewestFirst[0], smaHtf: sma9HtfNewestFirst[0],
+          htfBias: dailyBias, volumeRatio, isIndex,
+        });
+        await deliverNseIndicatorAlert(env, {
+          userId, symbol, timeframe, direction,
+          candleTime: candles[0].time, alertType: 'sma_type1', message,
+        });
+        await env.DB.prepare(`
+          UPDATE nse_sma_state SET last_signal_date = ?, last_signal_time = ? WHERE symbol = ? AND timeframe = ?
+        `).bind(
+          new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }), Date.now(), symbol, timeframe
+        ).run();
+      }
+    }
+    return; // Type 1 and Type 2 don't both fire on the same run
+  }
+
+  // ── Type 2 — cloud rejection re-entry (subsequent sessions in distribution) ──
+  if (advance.phase === 'distribution' && priorState?.phase === 'distribution') {
+    const direction = advance.direction;
+    if (!direction) return;
+    if (!checkSmaCooldown(timeframe, priorState)) return;
+
+    const bar0 = candles[0], bar1 = candles[1];
+    if (!bar1) return;
+
+    const entered  = direction === 'bearish' ? bar0.high >= cloudBottom : bar0.low <= cloudTop;
+    const rejected = direction === 'bearish' ? bar0.close < cloudBottom : bar0.close > cloudTop;
+    if (!entered || !rejected) return;
+
+    const prevBodyHigh = Math.max(bar1.open, bar1.close);
+    const prevBodyLow  = Math.min(bar1.open, bar1.close);
+    const closureOk = direction === 'bearish' ? bar0.close < prevBodyHigh : bar0.close > prevBodyLow;
+    if (!closureOk) return;
+
+    const dailyBias = await getDailyBiasForSma(symbol, env);
+    if (dailyBias !== direction) return;
+
+    const rejectLevel = direction === 'bearish' ? cloudBottom : cloudTop;
+    const message = formatSmaType2Alert({ symbol, timeframe, direction, candleTime: bar0.time, rejectLevel, htfBias: dailyBias });
+    await deliverNseIndicatorAlert(env, {
+      userId, symbol, timeframe, direction,
+      candleTime: bar0.time, alertType: 'sma_type2', message,
+    });
+    await env.DB.prepare(`
+      UPDATE nse_sma_state SET last_signal_date = ?, last_signal_time = ? WHERE symbol = ? AND timeframe = ?
+    `).bind(
+      new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }), Date.now(), symbol, timeframe
+    ).run();
+  }
+}
+
 // ── NSE candle cache ──────────────────────────────────────────
 async function updateNseCandleCache(db, symbol, tf, candles) {
   const [b0, b1, b2] = candles;
@@ -534,14 +1277,31 @@ export async function handleNseCron(env, tf) {
     AND u.active=1
   `).bind(tf).all();
 
-  const symbolMap = new Map(); // symbol -> { ebp: [rows], sweep: [rows] }
+  // Phase D++ — TDI / SMA Cloud configs (same two-query-pattern reasoning
+  // as ebp/sweep above — no UNION, joins user_telegram at fire time instead).
+  const { results: indicatorRows } = await env.DB.prepare(`
+    SELECT ic.id as config_id, ic.indicator, ic.stack_mode, ic.day_filter, ic.enabled,
+           ua.id as asset_id, ua.symbol,
+           u.id as user_id
+    FROM nse_indicator_configs ic
+    JOIN user_assets ua ON ic.asset_id = ua.id
+    JOIN users u ON ic.user_id = u.id
+    WHERE ua.asset_type='nse' AND ic.timeframe=? AND ic.enabled=1
+    AND u.active=1
+  `).bind(tf).all();
+
+  const symbolMap = new Map(); // symbol -> { ebp: [rows], sweep: [rows], indicators: [rows] }
   for (const row of (ebpRows ?? [])) {
-    if (!symbolMap.has(row.symbol)) symbolMap.set(row.symbol, { ebp: [], sweep: [] });
+    if (!symbolMap.has(row.symbol)) symbolMap.set(row.symbol, { ebp: [], sweep: [], indicators: [] });
     symbolMap.get(row.symbol).ebp.push(row);
   }
   for (const row of (sweepRows ?? [])) {
-    if (!symbolMap.has(row.symbol)) symbolMap.set(row.symbol, { ebp: [], sweep: [] });
+    if (!symbolMap.has(row.symbol)) symbolMap.set(row.symbol, { ebp: [], sweep: [], indicators: [] });
     symbolMap.get(row.symbol).sweep.push(row);
+  }
+  for (const row of (indicatorRows ?? [])) {
+    if (!symbolMap.has(row.symbol)) symbolMap.set(row.symbol, { ebp: [], sweep: [], indicators: [] });
+    symbolMap.get(row.symbol).indicators.push(row);
   }
 
   if (symbolMap.size === 0) {
@@ -550,7 +1310,7 @@ export async function handleNseCron(env, tf) {
 
   const biasTF = NSE_BIAS_SOURCE.ebp[tf] ?? null; // identical map for ebp/sweep per spec
 
-  for (const [symbol, { ebp: ebpUserRows, sweep: sweepUserRows }] of symbolMap) {
+  for (const [symbol, { ebp: ebpUserRows, sweep: sweepUserRows, indicators: indicatorConfigRows }] of symbolMap) {
     try {
       const candles = await fetchNseCandles(symbol, tf, env);
       if (!candles || candles.length < 2) continue;
@@ -658,6 +1418,36 @@ export async function handleNseCron(env, tf) {
             symbol, tf, alertType: 'sweep', direction: sweepResult.direction,
             effectiveBias: htfBias, candleTime: sweepResult.candleTime, message,
           });
+        }
+      }
+
+      // ── Phase D++ — TDI / SMA Cloud indicators ──
+      // updateSwingState() already ran above (before this block) — required
+      // since TDI reads swing_state directly. Reuses `candles` (already
+      // fetched above) via mergeAndCacheNSECandles rather than fetching
+      // again — one Upstox call per symbol+TF per run regardless of how
+      // many indicators/users are configured on this asset.
+      if (indicatorConfigRows.length > 0) {
+        const indicatorCandles = await mergeAndCacheNSECandles(symbol, tf, candles, env);
+        if (indicatorCandles && indicatorCandles.length > 0) {
+          let htfCandlesForSma = null; // fetched at most once per symbol+TF run
+          for (const cfg of indicatorConfigRows) {
+            try {
+              if (cfg.indicator === 'tdi') {
+                await runTDIForAsset(symbol, tf, cfg.user_id, cfg.asset_id, indicatorCandles, env);
+              } else if (cfg.indicator === 'sma') {
+                if (htfCandlesForSma === null) htfCandlesForSma = await fetchHTFCandles(symbol, env);
+                if (htfCandlesForSma) {
+                  await runSMAForAsset(
+                    symbol, tf, cfg.user_id, cfg.asset_id, indicatorCandles, htfCandlesForSma,
+                    cfg.stack_mode, cfg.day_filter, env
+                  );
+                }
+              }
+            } catch (err) {
+              console.error(`[NSE-IND] ${cfg.indicator} error ${symbol} ${tf} user=${cfg.user_id}: ${err.message}`);
+            }
+          }
         }
       }
 

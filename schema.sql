@@ -270,6 +270,69 @@ CREATE TABLE IF NOT EXISTS nse_candle_cache (
   PRIMARY KEY (symbol, timeframe)
 );
 
+-- ── Phase D++ — NSE Indicators (TDI + SMA Cloud) ───────────────
+-- Separate 60-candle JSON-blob cache, distinct from nse_candle_cache above
+-- (that table's fixed 3-bar-per-row layout is already live under
+-- EBP/Sweep/MSS and stays untouched — this is a new table, not a migration
+-- of it, to avoid any risk to what's already deployed).
+CREATE TABLE IF NOT EXISTS nse_indicator_candle_cache (
+  symbol      TEXT NOT NULL,
+  timeframe   TEXT NOT NULL,
+  candles     TEXT NOT NULL,  -- JSON array of up to 60 OHLCV objects, newest first
+  updated_at  INTEGER NOT NULL,
+  PRIMARY KEY (symbol, timeframe)
+);
+
+-- Per-user per-asset per-indicator config. id/asset_id are TEXT (UUID) to
+-- match user_assets.id and every other config table's convention — the
+-- spec draft used INTEGER, which doesn't match this schema anywhere else.
+CREATE TABLE IF NOT EXISTS nse_indicator_configs (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL,
+  asset_id    TEXT NOT NULL,
+  indicator   TEXT NOT NULL,      -- 'tdi' | 'sma'
+  timeframe   TEXT NOT NULL,      -- 'M15' | 'M30' for tdi; 'M15' | 'M5' for sma
+  stack_mode  TEXT DEFAULT NULL,  -- 'strict' | 'loose' — sma only
+  day_filter  INTEGER DEFAULT NULL, -- 1 | 0 — sma only
+  enabled     INTEGER DEFAULT 1,
+  created_at  INTEGER NOT NULL
+);
+
+-- TDI pending-chain state (State 1 — exhaustion + momentum confirmed,
+-- awaiting MSS). One row per active chain per user/asset/TF.
+CREATE TABLE IF NOT EXISTS nse_indicator_chain (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL,
+  asset_id    TEXT NOT NULL,
+  symbol      TEXT NOT NULL,
+  timeframe   TEXT NOT NULL,
+  direction   TEXT NOT NULL,   -- 'bullish' | 'bearish'
+  state       INTEGER DEFAULT 1,
+  created_at  INTEGER NOT NULL,
+  expires_at  INTEGER NOT NULL  -- created_at + (4 × TF minutes in ms)
+);
+
+-- SMA Cloud phase state — one row per (symbol, timeframe), read/written
+-- every cron run regardless of whether a signal fires.
+CREATE TABLE IF NOT EXISTS nse_sma_state (
+  symbol                TEXT NOT NULL,
+  timeframe             TEXT NOT NULL,
+  direction             TEXT,          -- 'bullish' | 'bearish' | null
+  phase                 TEXT,          -- 'accumulation' | 'transition' | 'distribution' | 'exhaustion' | null
+  stack_active          INTEGER DEFAULT 0,
+  consecutive_widening  INTEGER DEFAULT 0,
+  separation            REAL,
+  velocity_label        TEXT,          -- 'Sharp' | 'Gradual'
+  atr14                 REAL,
+  cloud_top             REAL,
+  cloud_bottom          REAL,
+  stack_formed_date     TEXT,          -- IST date 'YYYY-MM-DD'
+  last_signal_date      TEXT,          -- IST date — M15 session gate
+  last_signal_time      INTEGER,       -- Unix ms — M5 cooldown
+  updated_at            INTEGER NOT NULL,
+  PRIMARY KEY (symbol, timeframe)
+);
+
 -- ── Phase I (retrofit) / Phase D — Signal IDs ─────────────────
 -- signals is append-only from Workers; Trade Journal only PATCHes `traded`.
 -- signal_counters holds one row per template ('t3','t4','NSE',...) — series
