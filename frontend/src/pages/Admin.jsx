@@ -6,7 +6,6 @@ import PriceFeedPanel from '../components/PriceFeedPanel';
 const TABS = ['Users', 'Invite Tokens', 'API Keys', 'User Limits', 'Price Feed'];
 const ALL_TFS      = ['M5', 'M15', 'M30', '1H', '4H', 'D', 'W'];
 const ALL_NSE_TFS  = ['M1', 'M5', 'M15', 'M30', '1H', 'D'];
-const SLOT_OPTIONS = [5, 7, 9, 11, 13];
 
 export default function Admin() {
   const { getToken }                    = useAuth();
@@ -214,9 +213,6 @@ export default function Admin() {
             const assets      = userAssets[u.id] ?? [];
             const tfAccess    = userTfAccess[u.id] ?? ALL_TFS;
             const nseTfAccess = userNseTfAccess[u.id] ?? ALL_NSE_TFS;
-            const slotOptions = SLOT_OPTIONS.includes(u.asset_limit)
-              ? SLOT_OPTIONS
-              : [...SLOT_OPTIONS, u.asset_limit].sort((a, b) => a - b);
 
             return (
               <div key={u.id} className="card">
@@ -278,14 +274,10 @@ export default function Admin() {
                     {/* Section B — slot limit control */}
                     <div className="section-heading">Slot Limit</div>
                     <div className="config-row">
-                      <select
-                        className="select-sm"
-                        value={u.asset_limit ?? 5}
-                        onChange={e => handleUpdateLimit(u.id, e.target.value)}
-                      >
-                        {slotOptions.map(n => <option key={n} value={n}>{n}</option>)}
-                      </select>
-                      <span className="text-muted" style={{ fontSize: 11 }}>slots</span>
+                      <span className="text-muted" style={{ fontSize: 11 }}>{u.asset_limit ?? 5} slots</span>
+                      <button className="add-link" onClick={() => handleUpdateLimit(u.id, (u.asset_limit ?? 5) + 3)}>
+                        +3 Slots
+                      </button>
                     </div>
 
                     <div className="divider" />

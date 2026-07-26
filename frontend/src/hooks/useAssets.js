@@ -33,12 +33,6 @@ export function useAssets() {
     fetchAssets();
   }, [fetchAssets]);
 
-  useEffect(() => {
-    if (!isSignedIn) return;
-    const interval = setInterval(fetchAssets, 60_000);
-    return () => clearInterval(interval);
-  }, [isSignedIn, fetchAssets]);
-
   const addAsset = async (symbol, displayName, assetType) => {
     const token = await getToken();
     await api.post('/user/assets', { symbol, displayName, assetType }, token);

@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS users (
   email          TEXT NOT NULL,
   name           TEXT,
   plan           TEXT DEFAULT 'free',
-  asset_limit    INTEGER DEFAULT 3,
+  asset_limit    INTEGER DEFAULT 5,
   created_at     INTEGER NOT NULL,
   expires_at     INTEGER NOT NULL,
   active         INTEGER DEFAULT 1,

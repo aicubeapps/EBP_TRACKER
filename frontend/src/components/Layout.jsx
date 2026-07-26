@@ -1,10 +1,16 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { useClerk } from '@clerk/clerk-react';
+import { useClerk, useAuth } from '@clerk/clerk-react';
 import { useUser } from '../hooks/useUser';
 import { daysRemaining, capitalise } from '../lib/utils';
 import ExpiryBanner from './ExpiryBanner';
+import api from '../lib/api';
 import logoSrc from '../assets/logo.svg';
+
+function fmtTZ(ts, tz, locale) {
+  if (!ts) return null;
+  return new Date(ts).toLocaleTimeString(locale, { timeZone: tz, hour: '2-digit', minute: '2-digit' });
+}
 
 const NAV = [
   { id: 'nav-dash',     path: '/dashboard', icon: '📊', label: 'Dashboard' },
@@ -18,7 +24,24 @@ export default function Layout({ children }) {
   const location = useLocation();
   const { user }  = useUser();
   const { signOut } = useClerk();
+  const { getToken } = useAuth();
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [lastApiCall, setLastApiCall]   = useState(null);
+
+  const fetchApiStatus = useCallback(async () => {
+    try {
+      const token = await getToken();
+      const data  = await api.get('/health/datasources', token);
+      const calls = Object.values(data.sources ?? {}).map(s => s.lastCall).filter(Boolean);
+      if (calls.length > 0) setLastApiCall(Math.max(...calls));
+    } catch {}
+  }, [getToken]);
+
+  useEffect(() => {
+    fetchApiStatus();
+    const iv = setInterval(fetchApiStatus, 60_000);
+    return () => clearInterval(iv);
+  }, [fetchApiStatus]);
 
   const nav = [...NAV];
   if (user?.is_admin === 1) {
@@ -36,6 +59,12 @@ export default function Layout({ children }) {
           <h1>FOREX ALERT MANAGER</h1>
           <p>REAL-TIME SIGNAL TRACKER</p>
         </div>
+        {lastApiCall && (
+          <span className="text-mono text-muted" style={{ fontSize: 11 }}>
+            Last call: {fmtTZ(lastApiCall, 'America/New_York', 'en-US')} NY
+            {' · '}{fmtTZ(lastApiCall, 'Asia/Kolkata', 'en-IN')} IST
+          </span>
+        )}
         <div className="topbar-user" onClick={() => setDropdownOpen(o => !o)}>
           <span className="topbar-user-name">{user?.name ?? ''}</span>
           <div className="user-avatar">{initials}</div>

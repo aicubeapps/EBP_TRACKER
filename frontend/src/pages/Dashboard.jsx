@@ -7,11 +7,6 @@ import ApiErrorAlert from '../components/ApiErrorAlert';
 import AssetCard from '../components/AssetCard';
 import api from '../lib/api';
 
-function fmtTZ(ts, tz, locale) {
-  if (!ts) return null;
-  return new Date(ts).toLocaleTimeString(locale, { timeZone: tz, hour: '2-digit', minute: '2-digit' });
-}
-
 export default function Dashboard() {
   const navigate      = useNavigate();
   const { getToken }  = useAuth();
@@ -22,7 +17,6 @@ export default function Dashboard() {
     forex_crypto_count: 0, forex_crypto_limit: 5, forex_crypto_remaining: 5,
     nse_count: 0, nse_limit: 'unlimited',
   });
-  const [lastApiCall, setLastApiCall]   = useState(null);
   const [upstoxConfigured, setUpstoxConfigured] = useState(true); // assume configured until checked, avoids a flash of the delay badge
 
   const fetchAssetCount = useCallback(async () => {
@@ -33,22 +27,7 @@ export default function Dashboard() {
     } catch {}
   }, [getToken]);
 
-  const fetchApiStatus = useCallback(async () => {
-    try {
-      const token = await getToken();
-      const data  = await api.get('/health/datasources', token);
-      const calls = Object.values(data.sources ?? {}).map(s => s.lastCall).filter(Boolean);
-      if (calls.length > 0) setLastApiCall(Math.max(...calls));
-    } catch {}
-  }, [getToken]);
-
   useEffect(() => { fetchAssetCount(); }, [fetchAssetCount, assets]);
-
-  useEffect(() => {
-    fetchApiStatus();
-    const iv = setInterval(fetchApiStatus, 60_000);
-    return () => clearInterval(iv);
-  }, [fetchApiStatus]);
 
   useEffect(() => {
     // Public route — no token needed, works for non-admin users too.
@@ -93,12 +72,6 @@ export default function Dashboard() {
           {assetCount.forex_crypto_count} / {assetCount.forex_crypto_limit} assets used
           {assetCount.forex_crypto_remaining === 0 && ' — limit reached'}
         </span>
-        {lastApiCall && (
-          <span className="text-mono text-muted" style={{ fontSize: 11 }}>
-            Last call: {fmtTZ(lastApiCall, 'America/New_York', 'en-US')} NY
-            {' · '}{fmtTZ(lastApiCall, 'Asia/Kolkata', 'en-IN')} IST
-          </span>
-        )}
       </div>
 
       {loading ? (

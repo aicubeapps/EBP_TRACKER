@@ -467,33 +467,6 @@ Closed inside: ${closedInsideLevel}
 <i>EBP Tracker</i>`;
 }
 
-function formatCombinedAlert({ symbol, htfTF, ltfTF, direction, htfCandleTime, ltfCandleTime, trendBias, trendAligned, htfSwept, htfClosed, ltfSwept, ltfClosed }) {
-  const emoji    = direction === 'bullish' ? '🟢' : '🔴';
-  const bias     = direction === 'bullish' ? 'BULLISH' : 'BEARISH';
-  const alignMark = trendAligned ? '✅' : '⚠️ No Trend Filter';
-  const elapsed  = ltfCandleTime && htfCandleTime
-    ? Math.round((ltfCandleTime - htfCandleTime) / 60000) : null;
-  const htfSweptLabel = direction === 'bullish' ? 'Low swept' : 'High swept';
-  const ltfSweptLabel = direction === 'bullish' ? 'Low swept' : 'High swept';
-  return `⚡ <b>COMBINED SIGNAL — ${symbol}</b>
-━━━━━━━━━━━━━━
-${emoji} <b>${bias} CONFLUENCE</b>
-━━━━━━━━━━━━━━
-HTF → <b>${htfTF} ${direction === 'bullish' ? 'Bullish' : 'Bearish'} EBP</b>
-🕐 ${fmtNY(htfCandleTime)} NY
-📍 ${htfSweptLabel}: ${htfSwept}
-📈 Closed ${direction === 'bullish' ? 'above body' : 'below body'}: ${htfClosed}
-
-LTF → <b>${ltfTF} ${direction === 'bullish' ? 'Bullish' : 'Bearish'} Sweep</b>
-🕐 ${fmtNY(ltfCandleTime)} NY
-📍 ${ltfSweptLabel}: ${ltfSwept}
-📈 Closed inside: ${ltfClosed}
-${elapsed !== null ? `\n⏱ Confluence: ${elapsed} min` : ''}
-📊 Trend: ${trendBias} ${alignMark}
-━━━━━━━━━━━━━━
-<i>EBP Tracker</i>`;
-}
-
 // ── Sweep Detection (inlined from sweep.js) ──────────────────
 
 export function detectSweep(candles) {
