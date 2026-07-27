@@ -143,6 +143,28 @@ const BIAS_SOURCE = {
   template: { 'W': null, 'D': 'W', '4H': 'D', '1H': '4H' },
 };
 
+// HTF bias display label, keyed by the ACTUAL bias timeframe used for a
+// given alert (not the signal's own tf) — necessary since per-user
+// htf_override means different users on the same symbol+tf can have a
+// different HTF bias source.
+function getHTFBiasLabel(biasTF) {
+  const map = { '4H': '4H HTF bias', 'D': '1D HTF bias', 'W': '1W HTF bias', '1H': '1H HTF bias' };
+  return map[biasTF] ?? `${biasTF} HTF bias`;
+}
+
+// User-configurable HTF bias pairing. M15/M30/D/W stay fixed to
+// BIAS_SOURCE's default; only 1H and 4H can be overridden, and only to one
+// of two allowed alternates.
+const VALID_HTF_OVERRIDES = {
+  '1H': ['4H', 'D'],
+  '4H': ['D', 'W'],
+};
+
+function resolveHTF(signalType, tf, htfOverride) {
+  if (htfOverride) return htfOverride;
+  return BIAS_SOURCE[signalType][tf] ?? null;
+}
+
 function getEffectiveBias(biasTF, biasCache, biasOverrides) {
   if (!biasTF) return 'neutral';
   const override = biasOverrides?.[biasTF];
@@ -502,11 +524,6 @@ async function sendTelegramMessage(botToken, chatId, text) {
   return data;
 }
 
-function getHTFLabel(tf) {
-  const map = { 'M15': '4H', '1H': 'Daily', '4H': 'Weekly', 'D': 'Weekly', 'W': 'Raw' };
-  return map[tf] ?? 'HTF';
-}
-
 function fmtNY(ts) {
   return new Date(ts).toLocaleString('en-US', {
     timeZone: 'America/New_York',
@@ -541,7 +558,7 @@ function deriveSession(firedAtISO) {
   return 'Off-hours';
 }
 
-function formatEBPAlert({ symbol, tf, direction, candleTime, trendBias, trendAligned, sweptLevel, closedLevel, signalId }) {
+function formatEBPAlert({ symbol, tf, direction, candleTime, trendBias, trendAligned, sweptLevel, closedLevel, signalId, biasTF }) {
   const emoji     = direction === 'bullish' ? '🟢' : '🔴';
   const label     = direction === 'bullish' ? 'BULLISH EBP' : 'BEARISH EBP';
   const alignMark = trendAligned ? '✅' : '⚠️ No Trend Filter';
@@ -550,7 +567,7 @@ function formatEBPAlert({ symbol, tf, direction, candleTime, trendBias, trendAli
   return `${emoji} <b>${label} — ${symbol}</b>
 ⏱ Timeframe: ${tf}
 🕐 Candle: ${fmtNY(candleTime)} NY
-📊 Trend: ${trendBias} (${getHTFLabel(tf)} bias) ${alignMark}
+📊 Trend: ${trendBias} (${getHTFBiasLabel(biasTF)}) ${alignMark}
 ━━━━━━━━━━━━━━
 ${swept}: ${sweptLevel}
 ${closed}: ${closedLevel}
@@ -767,7 +784,7 @@ function formatMSSAlert(symbol, tf, mss, htfBias, htfLabelStr) {
   return `${emoji} <b>${label} — ${symbol}</b>
 ⏱ Timeframe: ${tf}
 🕐 Candle: ${fmtNY(mss.candle_time)} NY
-📊 Trend: ${htfBias} (${htfLabelStr} bias) ${aligned ? '✅' : '⚠️'}
+📊 Trend: ${htfBias} (${htfLabelStr}) ${aligned ? '✅' : '⚠️'}
 ━━━━━━━━━━━━━━
 ${swingLabel}: ${mss.level?.toFixed(5)}
 ━━━━━━━━━━━━━━
@@ -861,7 +878,7 @@ async function handleEBPCron(tf, env, debugLog = null) {
   log(`EBP trigger → TF: ${tf}`);
 
   const { results: filtered } = await env.DB.prepare(`
-    SELECT ec.id as config_id, ec.alert_mode,
+    SELECT ec.id as config_id, ec.alert_mode, ec.htf_override,
            ua.id as asset_id, ua.symbol, ua.bias_overrides,
            u.id as user_id, u.user_tf_access
     FROM user_ebp_configs ec
@@ -883,7 +900,7 @@ async function handleEBPCron(tf, env, debugLog = null) {
 
   log(`Processing ${symbolMap.size} symbol(s) on ${tf}`);
 
-  const biasTF = BIAS_SOURCE.ebp[tf] ?? null;
+  const defaultBiasTF = BIAS_SOURCE.ebp[tf] ?? null;
 
   for (const [symbol, userRows] of symbolMap) {
     try {
@@ -893,16 +910,26 @@ async function handleEBPCron(tf, env, debugLog = null) {
         continue;
       }
 
-      let htfBias = 'neutral';
-      if (biasTF) {
-        const htfCandles = await fetchCandles(symbol, biasTF, env.DB, env, 10);
+      // Different users on this symbol+tf may have different htf_override
+      // values, so bias must be computed per distinct HTF actually in use,
+      // not once per symbol. resolveHTF() falls back to the BIAS_SOURCE
+      // default when a row has no override, so this set always includes it.
+      const neededHtfs = new Set(userRows.map(row => resolveHTF('ebp', tf, row.htf_override)).filter(Boolean));
+      const biasByTF = new Map();
+      for (const htf of neededHtfs) {
+        const htfCandles = await fetchCandles(symbol, htf, env.DB, env, 10);
+        let bias = 'neutral';
         if (htfCandles?.length >= 2) {
           const biasResult = calcTTradesBias({ bar1: htfCandles[0], bar2: htfCandles[1] });
           biasResult.bar1Time = htfCandles[0].time;
-          htfBias = biasResult.bias;
-          await writeBiasCache(env.DB, symbol, biasTF, biasResult);
+          bias = biasResult.bias;
+          await writeBiasCache(env.DB, symbol, htf, biasResult);
         }
+        biasByTF.set(htf, bias);
       }
+      // Symbol-level (not per-user) bias, used only for the signals table
+      // record below — that table has no per-user concept.
+      const htfBias = defaultBiasTF ? (biasByTF.get(defaultBiasTF) ?? 'neutral') : 'neutral';
 
       await updateCandleCache(env.DB, symbol, tf, candles);
 
@@ -914,14 +941,15 @@ async function handleEBPCron(tf, env, debugLog = null) {
         // Phase 1.5 + 2 — Swing state + MSS
         const mssResult = await updateSwingState(env.DB, symbol, tf, oldestFirst);
         if (mssResult) {
-          const htfLabelStr = getHTFLabel(tf);
           for (const row of userRows) {
             const userTfAccess = JSON.parse(row.user_tf_access || '["M5","M15","M30","1H","4H","D","W"]');
             if (!userTfAccess.includes(tf)) continue;
 
+            const userBiasTF    = resolveHTF('ebp', tf, row.htf_override);
+            const userHtfBias   = userBiasTF ? (biasByTF.get(userBiasTF) ?? 'neutral') : 'neutral';
             const alertMode     = row.alert_mode ?? 'aligned';
             const biasOverrides = JSON.parse(row.bias_overrides || '{}');
-            const effectiveBias = getEffectiveBias(biasTF, { [biasTF]: { bias: htfBias } }, biasOverrides);
+            const effectiveBias = getEffectiveBias(userBiasTF, { [userBiasTF]: { bias: userHtfBias } }, biasOverrides);
             const shouldAlert   = alertMode === 'all' || mssResult.direction === effectiveBias || effectiveBias === 'neutral';
             if (!shouldAlert) continue;
 
@@ -930,7 +958,7 @@ async function handleEBPCron(tf, env, debugLog = null) {
             ).bind(row.user_id).first();
             if (!tg?.chat_id) continue;
 
-            const msg = formatMSSAlert(symbol, tf, mssResult, htfBias, htfLabelStr);
+            const msg = formatMSSAlert(symbol, tf, mssResult, userHtfBias, getHTFBiasLabel(userBiasTF));
             await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, msg);
 
             await env.DB.prepare(
@@ -939,7 +967,7 @@ async function handleEBPCron(tf, env, debugLog = null) {
                VALUES (?,?,?,?,?,?,?,?,'mss')`
             ).bind(
               crypto.randomUUID(), row.user_id, symbol, tf,
-              mssResult.direction, htfBias, mssResult.candle_time, Date.now()
+              mssResult.direction, userHtfBias, mssResult.candle_time, Date.now()
             ).run();
           }
         }
@@ -982,9 +1010,11 @@ async function handleEBPCron(tf, env, debugLog = null) {
         const userTfAccess = JSON.parse(row.user_tf_access || '["M5","M15","M30","1H","4H","D","W"]');
         if (!userTfAccess.includes(tf)) continue;
 
+        const userBiasTF    = resolveHTF('ebp', tf, row.htf_override);
+        const userHtfBias   = userBiasTF ? (biasByTF.get(userBiasTF) ?? 'neutral') : 'neutral';
         const alertMode     = row.alert_mode ?? 'aligned';
         const biasOverrides = JSON.parse(row.bias_overrides || '{}');
-        const effectiveBias = getEffectiveBias(biasTF, { [biasTF]: { bias: htfBias } }, biasOverrides);
+        const effectiveBias = getEffectiveBias(userBiasTF, { [userBiasTF]: { bias: userHtfBias } }, biasOverrides);
         const trendAligned  = ebp.direction === effectiveBias;
         if (alertMode === 'aligned' && !trendAligned) continue;
 
@@ -1002,6 +1032,7 @@ async function handleEBPCron(tf, env, debugLog = null) {
           sweptLevel:  ebp.sweptLevel?.toFixed(5),
           closedLevel: ebp.closedLevel?.toFixed(5),
           signalId:    ebpSignalId,
+          biasTF:      userBiasTF,
         });
 
         await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, msg);
@@ -1470,10 +1501,35 @@ router.patch('/user/ebp-configs/:id', async (req, env) => {
   const { user: clerkUser, origin, error, params } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
   const body = await req.json();
+
+  let effectiveTf = body.timeframe;
+  if (effectiveTf === undefined && body.htf_override !== undefined) {
+    const existing = await env.DB.prepare(
+      'SELECT timeframe FROM user_ebp_configs WHERE id = ? AND user_id = ?'
+    ).bind(params.id, clerkUser.id).first();
+    effectiveTf = existing?.timeframe;
+  }
+
   const sets = []; const vals = [];
-  if (body.timeframe !== undefined)  { sets.push('timeframe = ?');  vals.push(body.timeframe); }
+  if (body.timeframe !== undefined) {
+    sets.push('timeframe = ?'); vals.push(body.timeframe);
+    // TF change resets htf_override to null (falls back to BIAS_SOURCE
+    // default) unless this same request also sets a new override.
+    if (body.htf_override === undefined) { sets.push('htf_override = ?'); vals.push(null); }
+  }
   if (body.alert_mode !== undefined) { sets.push('alert_mode = ?'); vals.push(body.alert_mode); }
   if (body.enabled !== undefined)    { sets.push('enabled = ?');    vals.push(body.enabled ? 1 : 0); }
+  if (body.htf_override !== undefined) {
+    if (body.htf_override === null) {
+      sets.push('htf_override = ?'); vals.push(null);
+    } else {
+      const allowed = VALID_HTF_OVERRIDES[effectiveTf];
+      if (!allowed || !allowed.includes(body.htf_override)) {
+        return json({ error: `htf_override not valid for timeframe ${effectiveTf}` }, 400, origin);
+      }
+      sets.push('htf_override = ?'); vals.push(body.htf_override);
+    }
+  }
   if (!sets.length) return json({ ok: true }, 200, origin);
   vals.push(clerkUser.id, params.id);
   await env.DB.prepare(`UPDATE user_ebp_configs SET ${sets.join(', ')} WHERE user_id = ? AND id = ?`).bind(...vals).run();
@@ -1491,10 +1547,35 @@ router.patch('/user/sweep-configs/:id', async (req, env) => {
   const { user: clerkUser, origin, error, params } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
   const body = await req.json();
+
+  let effectiveTf = body.timeframe;
+  if (effectiveTf === undefined && body.htf_override !== undefined) {
+    const existing = await env.DB.prepare(
+      'SELECT timeframe FROM user_sweep_configs WHERE id = ? AND user_id = ?'
+    ).bind(params.id, clerkUser.id).first();
+    effectiveTf = existing?.timeframe;
+  }
+
   const sets = []; const vals = [];
-  if (body.timeframe !== undefined)  { sets.push('timeframe = ?');  vals.push(body.timeframe); }
+  if (body.timeframe !== undefined) {
+    sets.push('timeframe = ?'); vals.push(body.timeframe);
+    // TF change resets htf_override to null (falls back to BIAS_SOURCE
+    // default) unless this same request also sets a new override.
+    if (body.htf_override === undefined) { sets.push('htf_override = ?'); vals.push(null); }
+  }
   if (body.alert_mode !== undefined) { sets.push('alert_mode = ?'); vals.push(body.alert_mode); }
   if (body.enabled !== undefined)    { sets.push('enabled = ?');    vals.push(body.enabled ? 1 : 0); }
+  if (body.htf_override !== undefined) {
+    if (body.htf_override === null) {
+      sets.push('htf_override = ?'); vals.push(null);
+    } else {
+      const allowed = VALID_HTF_OVERRIDES[effectiveTf];
+      if (!allowed || !allowed.includes(body.htf_override)) {
+        return json({ error: `htf_override not valid for timeframe ${effectiveTf}` }, 400, origin);
+      }
+      sets.push('htf_override = ?'); vals.push(body.htf_override);
+    }
+  }
   if (!sets.length) return json({ ok: true }, 200, origin);
   vals.push(clerkUser.id, params.id);
   await env.DB.prepare(`UPDATE user_sweep_configs SET ${sets.join(', ')} WHERE user_id = ? AND id = ?`).bind(...vals).run();

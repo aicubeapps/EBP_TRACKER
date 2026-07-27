@@ -58,6 +58,28 @@ const BIAS_SOURCE = {
   template: { 'W': null, 'D': 'W', '4H': 'D', '1H': '4H' },
 };
 
+// HTF bias display label, keyed by the ACTUAL bias timeframe used for a
+// given alert (not the signal's own tf) — necessary since per-user
+// htf_override means different users on the same symbol+tf can have a
+// different HTF bias source.
+function getHTFBiasLabel(biasTF) {
+  const map = { '4H': '4H HTF bias', 'D': '1D HTF bias', 'W': '1W HTF bias', '1H': '1H HTF bias' };
+  return map[biasTF] ?? `${biasTF} HTF bias`;
+}
+
+// User-configurable HTF bias pairing. M15/M30/D/W stay fixed to
+// BIAS_SOURCE's default; only 1H and 4H can be overridden, and only to one
+// of two allowed alternates.
+const VALID_HTF_OVERRIDES = {
+  '1H': ['4H', 'D'],
+  '4H': ['D', 'W'],
+};
+
+function resolveHTF(signalType, tf, htfOverride) {
+  if (htfOverride) return htfOverride;
+  return BIAS_SOURCE[signalType][tf] ?? null;
+}
+
 function getEffectiveBias(biasTF, biasCache, biasOverrides) {
   if (!biasTF) return 'neutral';
   const override = biasOverrides?.[biasTF];
@@ -446,12 +468,7 @@ function deriveSession(firedAtISO) {
   return 'Off-hours';
 }
 
-function getHTFLabel(tf) {
-  const map = { 'M5': '1H', 'M15': '1H', 'M30': '4H', '1H': 'Daily', '4H': 'Weekly', 'D': 'Weekly', 'W': 'Raw' };
-  return map[tf] ?? 'HTF';
-}
-
-function formatSweepAlert({ symbol, tf, direction, candleTime, trendBias, trendAligned, sweptLevel, closedInsideLevel, trendMode }) {
+function formatSweepAlert({ symbol, tf, direction, candleTime, trendBias, trendAligned, sweptLevel, closedInsideLevel, trendMode, biasTF }) {
   const emoji     = direction === 'bullish' ? '🟢' : '🔴';
   const label     = direction === 'bullish' ? 'BULLISH SWEEP' : 'BEARISH SWEEP';
   const alignMark = trendAligned ? '✅' : trendMode === 'price_action' ? '📊 Price Action' : '⚠️ No Trend Filter';
@@ -459,7 +476,7 @@ function formatSweepAlert({ symbol, tf, direction, candleTime, trendBias, trendA
   return `${emoji} <b>${label} — ${symbol}</b>
 ⏱ Timeframe: ${tf}
 🕐 Candle: ${fmtNY(candleTime)} NY
-📊 Trend: ${trendBias} (${getHTFLabel(tf)} bias) ${alignMark}
+📊 Trend: ${trendBias} (${getHTFBiasLabel(biasTF)}) ${alignMark}
 ━━━━━━━━━━━━━━
 ${swept}: ${sweptLevel}
 Closed inside: ${closedInsideLevel}
@@ -621,7 +638,7 @@ function formatMSSAlert(symbol, tf, mss, htfBias, htfLabelStr) {
   return `${emoji} <b>${label} — ${symbol}</b>
 ⏱ Timeframe: ${tf}
 🕐 Candle: ${fmtNY(mss.candle_time)} NY
-📊 Trend: ${htfBias} (${htfLabelStr} bias) ${aligned ? '✅' : '⚠️'}
+📊 Trend: ${htfBias} (${htfLabelStr}) ${aligned ? '✅' : '⚠️'}
 ━━━━━━━━━━━━━━
 ${swingLabel}: ${mss.level?.toFixed(5)}
 ━━━━━━━━━━━━━━
@@ -724,7 +741,7 @@ export async function handleSweepCron(tf, env, debugLog = null) {
   }
 
   const { results: filtered } = await env.DB.prepare(`
-    SELECT sc.id as config_id, sc.alert_mode,
+    SELECT sc.id as config_id, sc.alert_mode, sc.htf_override,
            ua.id as asset_id, ua.symbol, ua.bias_overrides,
            u.id as user_id, u.active as user_active, u.user_tf_access
     FROM user_sweep_configs sc
@@ -747,7 +764,7 @@ export async function handleSweepCron(tf, env, debugLog = null) {
     symbolMap.get(row.symbol).push(row);
   }
 
-  const biasTF = BIAS_SOURCE.sweep[tf] ?? null;
+  const defaultBiasTF = BIAS_SOURCE.sweep[tf] ?? null;
 
   for (const [symbol, userRows] of symbolMap) {
     try {
@@ -758,17 +775,28 @@ export async function handleSweepCron(tf, env, debugLog = null) {
         continue;
       }
 
-      let htfBias = 'neutral';
-      if (biasTF) {
-        const htfCandles = await fetchCandles(symbol, biasTF, env.DB, env, debugLog, 10);
-        log(`[${symbol}] htf candles fetched: ${htfCandles?.length ?? 'null'}`);
+      // Different users on this symbol+tf may have different htf_override
+      // values, so bias must be computed per distinct HTF actually in use,
+      // not once per symbol. resolveHTF() falls back to the BIAS_SOURCE
+      // default when a row has no override, so this set always includes it.
+      const neededHtfs = new Set(userRows.map(row => resolveHTF('sweep', tf, row.htf_override)).filter(Boolean));
+      const biasByTF = new Map();
+      for (const htf of neededHtfs) {
+        const htfCandles = await fetchCandles(symbol, htf, env.DB, env, debugLog, 10);
+        log(`[${symbol}] htf(${htf}) candles fetched: ${htfCandles?.length ?? 'null'}`);
+        let bias = 'neutral';
         if (htfCandles?.length >= 2) {
           const biasResult = calcTTradesBias({ bar1: htfCandles[0], bar2: htfCandles[1] });
           biasResult.bar1Time = htfCandles[0].time;
-          htfBias = biasResult.bias;
-          await writeBiasCache(env.DB, symbol, biasTF, biasResult);
+          bias = biasResult.bias;
+          await writeBiasCache(env.DB, symbol, htf, biasResult);
         }
+        biasByTF.set(htf, bias);
       }
+      // Symbol-level (not per-user) bias, used only for the T3 signals
+      // table record below and the log line — that table has no per-user
+      // concept.
+      const htfBias = defaultBiasTF ? (biasByTF.get(defaultBiasTF) ?? 'neutral') : 'neutral';
 
       await updateSweepCandleCache(env.DB, symbol, tf, candles);
 
@@ -781,14 +809,15 @@ export async function handleSweepCron(tf, env, debugLog = null) {
         const mssResult = await updateSwingState(env.DB, symbol, tf, oldestFirst);
         log(`[${symbol}] MSS result: ${mssResult ? mssResult.direction : 'none'}`);
         if (mssResult) {
-          const htfLabelStr = getHTFLabel(tf);
           for (const row of userRows) {
             const userTfAccess = JSON.parse(row.user_tf_access || '["M5","M15","M30","1H","4H","D","W"]');
             if (!userTfAccess.includes(tf)) continue;
 
+            const userBiasTF    = resolveHTF('sweep', tf, row.htf_override);
+            const userHtfBias   = userBiasTF ? (biasByTF.get(userBiasTF) ?? 'neutral') : 'neutral';
             const alertMode     = row.alert_mode ?? 'aligned';
             const biasOverrides = JSON.parse(row.bias_overrides || '{}');
-            const effectiveBias = getEffectiveBias(biasTF, { [biasTF]: { bias: htfBias } }, biasOverrides);
+            const effectiveBias = getEffectiveBias(userBiasTF, { [userBiasTF]: { bias: userHtfBias } }, biasOverrides);
             const shouldAlert   = alertMode === 'all' || alertMode === 'price_action' ||
                                   mssResult.direction === effectiveBias || effectiveBias === 'neutral';
             if (!shouldAlert) continue;
@@ -798,7 +827,7 @@ export async function handleSweepCron(tf, env, debugLog = null) {
             ).bind(row.user_id).first();
             if (!tg?.chat_id) continue;
 
-            const msg = formatMSSAlert(symbol, tf, mssResult, effectiveBias, htfLabelStr);
+            const msg = formatMSSAlert(symbol, tf, mssResult, effectiveBias, getHTFBiasLabel(userBiasTF));
             await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, msg);
 
             await env.DB.prepare(
@@ -876,9 +905,11 @@ export async function handleSweepCron(tf, env, debugLog = null) {
         const userTfAccess = JSON.parse(row.user_tf_access || '["M5","M15","M30","1H","4H","D","W"]');
         if (!userTfAccess.includes(tf)) continue;
 
+        const userBiasTF    = resolveHTF('sweep', tf, row.htf_override);
+        const userHtfBias   = userBiasTF ? (biasByTF.get(userBiasTF) ?? 'neutral') : 'neutral';
         const alertMode     = row.alert_mode ?? 'aligned';
         const biasOverrides = JSON.parse(row.bias_overrides || '{}');
-        const effectiveBias = getEffectiveBias(biasTF, { [biasTF]: { bias: htfBias } }, biasOverrides);
+        const effectiveBias = getEffectiveBias(userBiasTF, { [userBiasTF]: { bias: userHtfBias } }, biasOverrides);
         const trendAligned  = sweep.direction === effectiveBias;
 
         const shouldAlert =
@@ -909,6 +940,7 @@ export async function handleSweepCron(tf, env, debugLog = null) {
           sweptLevel:        sweep.sweptLevel?.toFixed(5),
           closedInsideLevel: sweep.closedInsideLevel?.toFixed(5),
           trendMode:         alertMode,
+          biasTF:            userBiasTF,
         });
 
         await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, sweepMsg);

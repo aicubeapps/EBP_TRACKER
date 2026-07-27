@@ -32,7 +32,10 @@ export default {
 
       let body = {};
       try { body = await request.json(); } catch {}
-      const tf = body.tf;
+      // Query-param fallback — lets the endpoint be tested manually without
+      // wrestling with a POST body, and is resilient if a cron trigger's
+      // configured body isn't actually reaching this Worker for any reason.
+      const tf = body?.tf ?? url.searchParams.get('tf');
       if (!tf) {
         return new Response(JSON.stringify({ error: 'tf required' }), { status: 400 });
       }

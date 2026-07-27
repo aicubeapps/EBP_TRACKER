@@ -186,13 +186,14 @@ CREATE INDEX IF NOT EXISTS idx_chain_state_lookup ON chain_state(user_id, symbol
 
 -- Per-asset EBP alert configs (replaces user_assets.timeframes)
 CREATE TABLE IF NOT EXISTS user_ebp_configs (
-  id          TEXT PRIMARY KEY,
-  user_id     TEXT NOT NULL,
-  asset_id    TEXT NOT NULL,
-  timeframe   TEXT NOT NULL,
-  alert_mode  TEXT DEFAULT 'aligned',
-  enabled     INTEGER DEFAULT 1,
-  created_at  INTEGER NOT NULL,
+  id           TEXT PRIMARY KEY,
+  user_id      TEXT NOT NULL,
+  asset_id     TEXT NOT NULL,
+  timeframe    TEXT NOT NULL,
+  alert_mode   TEXT DEFAULT 'aligned',
+  enabled      INTEGER DEFAULT 1,
+  created_at   INTEGER NOT NULL,
+  htf_override TEXT DEFAULT NULL, -- '1H'->4H/D, '4H'->D/W; null = BIAS_SOURCE default
   FOREIGN KEY (user_id) REFERENCES users(id),
   FOREIGN KEY (asset_id) REFERENCES user_assets(id)
 );
@@ -200,13 +201,14 @@ CREATE INDEX IF NOT EXISTS idx_ebp_configs_lookup ON user_ebp_configs(user_id, a
 
 -- Per-asset Sweep alert configs (replaces user_assets.sweep_timeframes)
 CREATE TABLE IF NOT EXISTS user_sweep_configs (
-  id          TEXT PRIMARY KEY,
-  user_id     TEXT NOT NULL,
-  asset_id    TEXT NOT NULL,
-  timeframe   TEXT NOT NULL,
-  alert_mode  TEXT DEFAULT 'aligned',
-  enabled     INTEGER DEFAULT 1,
-  created_at  INTEGER NOT NULL,
+  id           TEXT PRIMARY KEY,
+  user_id      TEXT NOT NULL,
+  asset_id     TEXT NOT NULL,
+  timeframe    TEXT NOT NULL,
+  alert_mode   TEXT DEFAULT 'aligned',
+  enabled      INTEGER DEFAULT 1,
+  created_at   INTEGER NOT NULL,
+  htf_override TEXT DEFAULT NULL, -- '1H'->4H/D, '4H'->D/W; null = BIAS_SOURCE default
   FOREIGN KEY (user_id) REFERENCES users(id),
   FOREIGN KEY (asset_id) REFERENCES user_assets(id)
 );
