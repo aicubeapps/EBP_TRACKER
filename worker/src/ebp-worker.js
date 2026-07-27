@@ -143,6 +143,30 @@ const BIAS_SOURCE = {
   template: { 'W': null, 'D': 'W', '4H': 'D', '1H': '4H' },
 };
 
+const INTERVAL_MS = {
+  'M5':  5  * 60 * 1000,
+  'M15': 15 * 60 * 1000,
+  'M30': 30 * 60 * 1000,
+  '1H':  60 * 60 * 1000,
+  '4H':  4  * 60 * 60 * 1000,
+  'D':   24 * 60 * 60 * 1000,
+  'W':   7  * 24 * 60 * 60 * 1000,
+};
+
+// Twelve Data and Yahoo both include the currently-forming candle as the
+// most recent element — confirmed empirically (live 1H fetch mid-candle
+// returned it as index 0/last-pushed). Filtering it out here, once, means
+// every downstream consumer (detectEBP, detectSweep, updateSwingState,
+// bias calc) only ever sees fully closed candles.
+function getClosedCandles(candles, intervalMs) {
+  if (!intervalMs) return candles; // unknown tf — don't silently drop everything
+  const now = Date.now();
+  return candles.filter(c => {
+    const openMs = typeof c.time === 'number' ? c.time : new Date(c.time).getTime();
+    return openMs + intervalMs <= now;
+  });
+}
+
 // HTF bias display label, keyed by the ACTUAL bias timeframe used for a
 // given alert (not the signal's own tf) — necessary since per-user
 // htf_override means different users on the same symbol+tf can have a
@@ -435,12 +459,14 @@ async function fetchCandles(symbol, tf, db, env, count = 10) {
   symbol = normaliseSymbol(symbol);
 
   // 1. Twelve Data — primary (3-key rotation)
-  const twelveCandles = await fetchTwelveDataWithRotation(symbol, tf, db, env, count);
+  const twelveCandlesRaw = await fetchTwelveDataWithRotation(symbol, tf, db, env, count);
+  const twelveCandles = twelveCandlesRaw ? getClosedCandles(twelveCandlesRaw, INTERVAL_MS[tf]) : null;
   if (twelveCandles && twelveCandles.length >= 3) return twelveCandles;
 
   // 2. Yahoo Finance — final fallback (unlimited, no key)
   try {
-    const yahooCandles = await fetchYahooFinance(symbol, tf, count);
+    const yahooCandlesRaw = await fetchYahooFinance(symbol, tf, count);
+    const yahooCandles = getClosedCandles(yahooCandlesRaw, INTERVAL_MS[tf]);
     if (yahooCandles && yahooCandles.length >= 3) {
       await logApiCall(db, 'yahoo', symbol, tf);
       return yahooCandles;

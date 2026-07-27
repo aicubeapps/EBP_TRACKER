@@ -14,6 +14,32 @@ const NSE_BIAS_SOURCE = {
 
 const NSE_VALID_TFS = ['M1', 'M5', 'M15', 'M30', '1H', 'D'];
 
+const INTERVAL_MS = {
+  'M1':  1  * 60 * 1000,
+  'M5':  5  * 60 * 1000,
+  'M15': 15 * 60 * 1000,
+  'M30': 30 * 60 * 1000,
+  '1H':  60 * 60 * 1000,
+  'D':   24 * 60 * 60 * 1000,
+};
+
+// Twelve Data and Yahoo both include the currently-forming candle as the
+// most recent element — confirmed empirically against the EBP Worker's
+// data sources (same providers). Filtering it out here, once, means every
+// downstream consumer (detectEBP, detectSweep, updateSwingState, TDI, SMA
+// Cloud) only ever sees fully closed candles. Applied to the Upstox path
+// too, defensively — harmless even if Upstox's historical-candle endpoint
+// already excludes the live bar, since every already-closed candle passes
+// the filter trivially.
+function getClosedCandles(candles, intervalMs) {
+  if (!intervalMs) return candles; // unknown tf — don't silently drop everything
+  const now = Date.now();
+  return candles.filter(c => {
+    const openMs = typeof c.time === 'number' ? c.time : new Date(c.time).getTime();
+    return openMs + intervalMs <= now;
+  });
+}
+
 // asset_type is always 'nse' in this system — there's no 'nse_index' /
 // 'nse_asset' split in the schema or live data. Index-vs-equity for
 // volume-gating is derived from the symbol itself instead (same list
@@ -150,7 +176,8 @@ async function fetchNseCandles(symbol, tf, env) {
 
   if (upstoxKey) {
     try {
-      const candles = await fetchUpstoxNse(symbol, tf, upstoxKey.key_value);
+      const raw = await fetchUpstoxNse(symbol, tf, upstoxKey.key_value);
+      const candles = raw ? getClosedCandles(raw, INTERVAL_MS[tf]) : null;
       if (candles && candles.length >= 3) return candles;
     } catch (e) {
       console.warn(`[NSE] Upstox failed ${symbol} ${tf}, falling back to Yahoo: ${e.message}`);
@@ -158,7 +185,8 @@ async function fetchNseCandles(symbol, tf, env) {
   }
 
   try {
-    return await fetchYahooFinanceNse(symbol, tf);
+    const raw = await fetchYahooFinanceNse(symbol, tf);
+    return getClosedCandles(raw, INTERVAL_MS[tf]);
   } catch (e) {
     console.error(`[NSE] Yahoo failed ${symbol} ${tf}: ${e.message}`);
     return null;
