@@ -289,15 +289,26 @@ CREATE TABLE IF NOT EXISTS nse_indicator_candle_cache (
 -- match user_assets.id and every other config table's convention — the
 -- spec draft used INTEGER, which doesn't match this schema anywhere else.
 CREATE TABLE IF NOT EXISTS nse_indicator_configs (
-  id          TEXT PRIMARY KEY,
-  user_id     TEXT NOT NULL,
-  asset_id    TEXT NOT NULL,
-  indicator   TEXT NOT NULL,      -- 'tdi' | 'sma'
-  timeframe   TEXT NOT NULL,      -- 'M15' | 'M30' for tdi; 'M15' | 'M5' for sma
-  stack_mode  TEXT DEFAULT NULL,  -- 'strict' | 'loose' — sma only
-  day_filter  INTEGER DEFAULT NULL, -- 1 | 0 — sma only
-  enabled     INTEGER DEFAULT 1,
-  created_at  INTEGER NOT NULL
+  id            TEXT PRIMARY KEY,
+  user_id       TEXT NOT NULL,
+  asset_id      TEXT NOT NULL,
+  indicator     TEXT NOT NULL,      -- 'tdi' | 'sma'
+  timeframe     TEXT NOT NULL,      -- 'M15' | 'M30' for tdi; 'M15' | 'M5' for sma
+  stack_mode    TEXT DEFAULT NULL,  -- 'strict' | 'loose' — sma only
+  day_filter    INTEGER DEFAULT NULL, -- 1 | 0 — sma only, unused since the SMA Cloud corrective patch (column kept, code no longer reads it)
+  enabled       INTEGER DEFAULT 1,
+  created_at    INTEGER NOT NULL,
+  bias_mode     TEXT DEFAULT 'ttrades',  -- 'ttrades' | 'htf_sma' — sma only
+  htf_timeframe TEXT DEFAULT '1H'        -- 'M30' | '1H' — sma only, HTF bias reference leg
+);
+
+-- Per-user indicator settings not tied to a specific asset config.
+-- sma_forex_hours: scaffolding for the forex SMA Cloud working-hours gate
+-- (Session 2) — not yet read by any Worker as of the NSE SMA corrective patch.
+CREATE TABLE IF NOT EXISTS user_indicator_settings (
+  user_id         TEXT PRIMARY KEY,
+  sma_forex_hours TEXT DEFAULT 'session',
+  updated_at      INTEGER NOT NULL
 );
 
 -- TDI pending-chain state (State 1 — exhaustion + momentum confirmed,

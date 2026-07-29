@@ -1739,7 +1739,7 @@ router.get('/user/nse-indicator-configs/:assetId', async (req, env) => {
 router.post('/user/nse-indicator-configs/:assetId', async (req, env) => {
   const { user: clerkUser, origin, error, params } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const { indicator, timeframe, stack_mode, day_filter } = await req.json();
+  const { indicator, timeframe, stack_mode, day_filter, bias_mode, htf_timeframe } = await req.json();
 
   if (indicator !== 'tdi' && indicator !== 'sma') {
     return json({ error: "indicator must be 'tdi' or 'sma'" }, 400, origin);
@@ -1750,6 +1750,13 @@ router.post('/user/nse-indicator-configs/:assetId', async (req, env) => {
     return json({ error: `timeframe must be one of: ${validTfs.join(', ')}` }, 400, origin);
   }
 
+  if (indicator === 'sma' && bias_mode !== undefined && !['ttrades', 'htf_sma'].includes(bias_mode)) {
+    return json({ error: "bias_mode must be 'ttrades' or 'htf_sma'" }, 400, origin);
+  }
+  if (indicator === 'sma' && htf_timeframe !== undefined && !['M30', '1H'].includes(htf_timeframe)) {
+    return json({ error: "htf_timeframe must be 'M30' or '1H'" }, 400, origin);
+  }
+
   const existing = await env.DB.prepare(
     'SELECT id FROM nse_indicator_configs WHERE user_id=? AND asset_id=? AND indicator=? AND timeframe=?'
   ).bind(clerkUser.id, params.assetId, indicator, timeframe).first();
@@ -1757,26 +1764,41 @@ router.post('/user/nse-indicator-configs/:assetId', async (req, env) => {
     return json({ error: 'Config already exists for this indicator/timeframe on this asset.' }, 400, origin);
   }
 
-  const finalStackMode = indicator === 'sma' ? (stack_mode === 'loose' ? 'loose' : 'strict') : null;
-  const finalDayFilter = indicator === 'sma' ? (day_filter === 0 ? 0 : 1) : null;
+  const finalStackMode    = indicator === 'sma' ? (stack_mode === 'loose' ? 'loose' : 'strict') : null;
+  const finalDayFilter    = indicator === 'sma' ? (day_filter === 0 ? 0 : 1) : null;
+  const finalBiasMode     = indicator === 'sma' ? (bias_mode === 'htf_sma' ? 'htf_sma' : 'ttrades') : null;
+  const finalHtfTimeframe = indicator === 'sma' ? (htf_timeframe === 'M30' ? 'M30' : '1H') : null;
 
   const id = crypto.randomUUID();
   await env.DB.prepare(`
-    INSERT INTO nse_indicator_configs (id, user_id, asset_id, indicator, timeframe, stack_mode, day_filter, enabled, created_at)
-    VALUES (?,?,?,?,?,?,?,1,?)
-  `).bind(id, clerkUser.id, params.assetId, indicator, timeframe, finalStackMode, finalDayFilter, Date.now()).run();
+    INSERT INTO nse_indicator_configs (id, user_id, asset_id, indicator, timeframe, stack_mode, day_filter, enabled, created_at, bias_mode, htf_timeframe)
+    VALUES (?,?,?,?,?,?,?,1,?,?,?)
+  `).bind(id, clerkUser.id, params.assetId, indicator, timeframe, finalStackMode, finalDayFilter, Date.now(), finalBiasMode, finalHtfTimeframe).run();
 
-  return json({ id, indicator, timeframe, stack_mode: finalStackMode, day_filter: finalDayFilter, enabled: 1 }, 201, origin);
+  return json({
+    id, indicator, timeframe, stack_mode: finalStackMode, day_filter: finalDayFilter,
+    bias_mode: finalBiasMode, htf_timeframe: finalHtfTimeframe, enabled: 1,
+  }, 201, origin);
 });
 
 router.patch('/user/nse-indicator-configs/:id', async (req, env) => {
   const { user: clerkUser, origin, error, params } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
   const body = await req.json();
+
+  if (body.bias_mode !== undefined && !['ttrades', 'htf_sma'].includes(body.bias_mode)) {
+    return json({ error: "bias_mode must be 'ttrades' or 'htf_sma'" }, 400, origin);
+  }
+  if (body.htf_timeframe !== undefined && !['M30', '1H'].includes(body.htf_timeframe)) {
+    return json({ error: "htf_timeframe must be 'M30' or '1H'" }, 400, origin);
+  }
+
   const sets = []; const vals = [];
-  if (body.enabled !== undefined)    { sets.push('enabled = ?');    vals.push(body.enabled ? 1 : 0); }
-  if (body.stack_mode !== undefined) { sets.push('stack_mode = ?'); vals.push(body.stack_mode === 'loose' ? 'loose' : 'strict'); }
-  if (body.day_filter !== undefined) { sets.push('day_filter = ?'); vals.push(body.day_filter ? 1 : 0); }
+  if (body.enabled !== undefined)       { sets.push('enabled = ?');       vals.push(body.enabled ? 1 : 0); }
+  if (body.stack_mode !== undefined)    { sets.push('stack_mode = ?');    vals.push(body.stack_mode === 'loose' ? 'loose' : 'strict'); }
+  if (body.day_filter !== undefined)    { sets.push('day_filter = ?');    vals.push(body.day_filter ? 1 : 0); }
+  if (body.bias_mode !== undefined)     { sets.push('bias_mode = ?');     vals.push(body.bias_mode); }
+  if (body.htf_timeframe !== undefined) { sets.push('htf_timeframe = ?'); vals.push(body.htf_timeframe); }
   if (!sets.length) return json({ ok: true }, 200, origin);
   vals.push(clerkUser.id, params.id);
   await env.DB.prepare(`UPDATE nse_indicator_configs SET ${sets.join(', ')} WHERE user_id = ? AND id = ?`).bind(...vals).run();

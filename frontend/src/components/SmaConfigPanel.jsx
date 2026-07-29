@@ -3,6 +3,7 @@ import { useAuth } from '@clerk/clerk-react';
 import api from '../lib/api';
 
 const SMA_TFS = ['M15', 'M5'];
+const HTF_TFS = ['M30', '1H'];
 
 export default function SmaConfigPanel({ assetId }) {
   const { getToken } = useAuth();
@@ -10,9 +11,10 @@ export default function SmaConfigPanel({ assetId }) {
   const [loading, setLoading]         = useState(true);
   const [error, setError]             = useState(null);
   const [showAddForm, setShowAddForm] = useState(false);
-  const [pendingTf, setPendingTf]         = useState(SMA_TFS[0]);
-  const [pendingStack, setPendingStack]   = useState('strict');
-  const [pendingDayFilter, setPendingDayFilter] = useState(1);
+  const [pendingTf, setPendingTf]           = useState(SMA_TFS[0]);
+  const [pendingStack, setPendingStack]     = useState('strict');
+  const [pendingHtfTf, setPendingHtfTf]     = useState('1H');
+  const [pendingBiasMode, setPendingBiasMode] = useState('ttrades');
 
   const fetchConfigs = useCallback(async () => {
     const token = await getToken();
@@ -30,11 +32,12 @@ export default function SmaConfigPanel({ assetId }) {
     try {
       const token = await getToken();
       const res   = await api.post(`/user/nse-indicator-configs/${assetId}`, {
-        indicator: 'sma', timeframe: pendingTf, stack_mode: pendingStack, day_filter: pendingDayFilter,
+        indicator: 'sma', timeframe: pendingTf, stack_mode: pendingStack,
+        bias_mode: pendingBiasMode, htf_timeframe: pendingHtfTf,
       }, token);
       setConfigs(prev => [...prev, {
         id: res.id, indicator: 'sma', timeframe: pendingTf,
-        stack_mode: pendingStack, day_filter: pendingDayFilter, enabled: 1,
+        stack_mode: pendingStack, bias_mode: pendingBiasMode, htf_timeframe: pendingHtfTf, enabled: 1,
       }]);
       setShowAddForm(false);
     } catch (e) {
@@ -65,15 +68,19 @@ export default function SmaConfigPanel({ assetId }) {
       {configs.map(cfg => (
         <div key={cfg.id} className="config-row">
           <span className="text-mono" style={{ fontSize: 12 }}>{cfg.timeframe}</span>
+          <select className="select-sm" value={cfg.htf_timeframe ?? '1H'}
+            onChange={e => updateConfig(cfg.id, 'htf_timeframe', e.target.value)}>
+            {HTF_TFS.map(tf => <option key={tf} value={tf}>HTF: {tf}</option>)}
+          </select>
           <select className="select-sm" value={cfg.stack_mode ?? 'strict'}
             onChange={e => updateConfig(cfg.id, 'stack_mode', e.target.value)}>
             <option value="strict">Strict</option>
             <option value="loose">Loose</option>
           </select>
-          <select className="select-sm" value={cfg.day_filter ?? 1}
-            onChange={e => updateConfig(cfg.id, 'day_filter', Number(e.target.value))}>
-            <option value={1}>Day filter: On</option>
-            <option value={0}>Day filter: Off</option>
+          <select className="select-sm" value={cfg.bias_mode ?? 'ttrades'}
+            onChange={e => updateConfig(cfg.id, 'bias_mode', e.target.value)}>
+            <option value="ttrades">TTrades</option>
+            <option value="htf_sma">HTF SMA</option>
           </select>
           <select className="select-sm" value={cfg.enabled ? '1' : '0'}
             onChange={e => updateConfig(cfg.id, 'enabled', e.target.value === '1' ? 1 : 0)}>
@@ -89,13 +96,16 @@ export default function SmaConfigPanel({ assetId }) {
             <select className="select-sm" value={pendingTf} onChange={e => setPendingTf(e.target.value)}>
               {availableTfs.map(tf => <option key={tf} value={tf}>{tf}</option>)}
             </select>
+            <select className="select-sm" value={pendingHtfTf} onChange={e => setPendingHtfTf(e.target.value)}>
+              {HTF_TFS.map(tf => <option key={tf} value={tf}>HTF: {tf}</option>)}
+            </select>
             <select className="select-sm" value={pendingStack} onChange={e => setPendingStack(e.target.value)}>
               <option value="strict">Strict</option>
               <option value="loose">Loose</option>
             </select>
-            <select className="select-sm" value={pendingDayFilter} onChange={e => setPendingDayFilter(Number(e.target.value))}>
-              <option value={1}>Day filter: On</option>
-              <option value={0}>Day filter: Off</option>
+            <select className="select-sm" value={pendingBiasMode} onChange={e => setPendingBiasMode(e.target.value)}>
+              <option value="ttrades">TTrades</option>
+              <option value="htf_sma">HTF SMA</option>
             </select>
             <button className="add-link" onClick={addConfig}>Add</button>
           </div>
