@@ -47,40 +47,17 @@ function calcTTradesBias({ bar1, bar2 }) {
 }
 
 function getHTFForSweepTF(tf) {
-  const map = { 'M5': '1H', 'M15': '1H', 'M30': '4H', '1H': 'D', '4H': 'W' };
+  const map = { 'M15': '1H', 'M30': '4H', '1H': 'D', '4H': 'W' };
   return map[tf] ?? null;
 }
 
 // ── Phase 3 — Bias Source Map ─────────────────────────────────
 const BIAS_SOURCE = {
   ebp:      { 'M15': '4H', '1H': 'D', '4H': 'W', 'D': 'W', 'W': null },
-  sweep:    { 'M5': '1H', 'M15': '1H', 'M30': '4H', '1H': 'D', '4H': 'W' },
+  sweep:    { 'M15': '1H', 'M30': '4H', '1H': 'D', '4H': 'W' },
   template: { 'W': null, 'D': 'W', '4H': 'D', '1H': '4H' },
 };
 
-const INTERVAL_MS = {
-  'M5':  5  * 60 * 1000,
-  'M15': 15 * 60 * 1000,
-  'M30': 30 * 60 * 1000,
-  '1H':  60 * 60 * 1000,
-  '4H':  4  * 60 * 60 * 1000,
-  'D':   24 * 60 * 60 * 1000,
-  'W':   7  * 24 * 60 * 60 * 1000,
-};
-
-// Twelve Data and Yahoo both include the currently-forming candle as the
-// most recent element — confirmed empirically (live 1H fetch mid-candle
-// returned it as index 0/last-pushed). Filtering it out here, once, means
-// every downstream consumer (detectSweep, updateSwingState, bias calc)
-// only ever sees fully closed candles.
-function getClosedCandles(candles, intervalMs) {
-  if (!intervalMs) return candles; // unknown tf — don't silently drop everything
-  const now = Date.now();
-  return candles.filter(c => {
-    const openMs = typeof c.time === 'number' ? c.time : new Date(c.time).getTime();
-    return openMs + intervalMs <= now;
-  });
-}
 
 // HTF bias display label, keyed by the ACTUAL bias timeframe used for a
 // given alert (not the signal's own tf) — necessary since per-user
@@ -202,261 +179,73 @@ function formatT3Alert(symbol, direction, htfTf, ltfTf, htfBar, ltfBar, mssBar, 
   ].join('\n');
 }
 
-function tfToTwelveInterval(tf) {
-  const map = {
-    'M5': '5min', 'M15': '15min', 'M30': '30min',
-    '1H': '1h', '4H': '4h', 'D': '1day', 'W': '1week',
-  };
-  return map[tf] ?? '1h';
-}
+// ── Candle Cache reads (inlined — no cross-package imports) ──
+// Watchdog Worker is the sole Twelve Data / Yahoo caller and the sole
+// writer of candle_cache / daily_candle_cache / weekly_candle_cache.
+// Sweep Worker only reads, same pattern as EBP Worker.
 
-// ── Data Feed (inlined from packages/core/datafeed.js) ───────
+// M15/M30/1H/4H — read the JSON blob Watchdog writes per fetch cycle.
+// Stale cache (Watchdog missed a cycle, all TD keys + Yahoo failed, etc.)
+// is treated as no data rather than risking detection on old bars.
+export async function getCandlesFromCache(symbol, tf, env) {
+  const row = await env.DB.prepare(
+    'SELECT candles_json, fetched_at FROM candle_cache WHERE symbol = ? AND tf = ?'
+  ).bind(symbol, tf).first();
 
-function toYahooSymbol(symbol) {
-  const overrides = {
-    'XAU/USD': 'GC=F', 'XAG/USD': 'SI=F',
-    'WTI/USD': 'CL=F', 'BRENT/USD': 'BZ=F',
-    'SPX': '^GSPC', 'DJI': '^DJI', 'NDX': '^NDX',
-    'NIFTY': '^NSEI', 'SENSEX': '^BSESN',
-  };
-  if (overrides[symbol]) return overrides[symbol];
-  if (symbol.includes('/')) {
-    const [base, quote] = symbol.split('/');
-    return `${base}${quote}=X`;
+  if (!row) return null;
+
+  const intervalMs = { M15: 15 * 60 * 1000, M30: 30 * 60 * 1000, '1H': 60 * 60 * 1000, '4H': 4 * 60 * 60 * 1000 };
+  const age = Date.now() - new Date(row.fetched_at).getTime();
+  if (age > 2 * intervalMs[tf]) {
+    console.warn(`Stale cache for ${symbol} ${tf}: ${age}ms old`);
+    return null;
   }
-  return symbol;
+
+  return JSON.parse(row.candles_json);
 }
 
-function toYahooInterval(tf) {
-  const map = {
-    'M5': '5m', 'M15': '15m', 'M30': '30m',
-    '1H': '1h', '4H': '1h', 'D': '1d', 'W': '1wk',
-  };
-  return map[tf] ?? '1h';
-}
-
-async function fetchYahooFinance(symbol, tf, outputSize = 3) {
-  const yahooSymbol = toYahooSymbol(symbol);
-  const interval    = toYahooInterval(tf);
-  const rangeMap    = {
-    'M5': '1d', 'M15': '5d', 'M30': '5d',
-    '1H': '5d', '4H': '60d', 'D': '1mo', 'W': '3mo',
-  };
-  const range = rangeMap[tf] ?? '5d';
-  const url   = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=${interval}&range=${range}`;
-  const res   = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-  const data  = await res.json();
-  const result = data?.chart?.result?.[0];
-  if (!result) throw new Error(`Yahoo: no data for ${symbol}`);
-  const timestamps = result.timestamp;
-  const ohlc       = result.indicators.quote[0];
-  const candles    = [];
-  for (let i = timestamps.length - 1; i >= 0 && candles.length < outputSize; i--) {
-    if (ohlc.close[i] == null) continue;
-    candles.push({
-      open:  ohlc.open[i],  high:  ohlc.high[i],
-      low:   ohlc.low[i],   close: ohlc.close[i],
-      time:  timestamps[i] * 1000,
-    });
-  }
-  return candles;
-}
-
-async function logApiCall(db, source, symbol, timeframe, success = 1) {
-  try {
-    await db.prepare(
-      'INSERT INTO api_call_log (id, source, symbol, timeframe, called_at, success) VALUES (?, ?, ?, ?, ?, ?)'
-    ).bind(crypto.randomUUID(), source, symbol, timeframe, Date.now(), success).run();
-  } catch {}
-}
-
-// ── Twelve Data key rotation ──────────────────────────────
-// Keys live in D1 (api_keys, source='twelvedata') rather than being a fixed
-// env-var list, so rotation works dynamically regardless of how many keys
-// are configured. A key that comes back exhausted (daily credit cap) is
-// marked and skipped until the next UTC midnight instead of failing the
-// whole fetch. Falls through to Yahoo only once every key is exhausted.
-
-function nextMidnightUTC() {
-  const now = new Date();
-  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0, 0);
-}
-
-async function resetExhaustedKeys(db) {
-  const now = Date.now();
-  await db.prepare(
-    `UPDATE api_key_state
-     SET exhausted=0, calls_today=0, exhausted_at=NULL, reset_at=?
-     WHERE exhausted=1 AND reset_at < ?`
-  ).bind(nextMidnightUTC(), now).run();
-}
-
-async function ensureKeyStateRow(db, keyName) {
-  await db.prepare(
-    `INSERT OR IGNORE INTO api_key_state (key_name, exhausted, calls_today, reset_at) VALUES (?, 0, 0, 0)`
-  ).bind(keyName).run();
-}
-
-async function getActiveTwelveDataKey(db) {
-  await resetExhaustedKeys(db);
-
-  const { results } = await db.prepare(`
-    SELECT ak.id, ak.key_value, ak.label,
-           COALESCE(aks.exhausted, 0) as exhausted,
-           COALESCE(aks.calls_today, 0) as calls_today
-    FROM api_keys ak
-    LEFT JOIN api_key_state aks ON ak.id = aks.key_name
-    WHERE ak.source='twelvedata' AND ak.enabled=1
-    ORDER BY ak.label ASC
-  `).all();
-
-  for (const row of (results ?? [])) {
-    if (row.exhausted === 0) {
-      return { keyName: row.id, apiKey: row.key_value, label: row.label };
-    }
-  }
-  return null; // all keys exhausted (or none configured) — fall through to Yahoo
-}
-
-async function markKeyExhausted(db, keyName) {
-  const now = Date.now();
-  await db.prepare(
-    `UPDATE api_key_state SET exhausted=1, exhausted_at=?, reset_at=? WHERE key_name=?`
-  ).bind(now, nextMidnightUTC(), keyName).run();
-  console.warn(`[ROTATION] ${keyName} exhausted — rotating to next key`);
-}
-
-async function incrementKeyCallCount(db, keyName) {
-  await db.prepare(
-    `UPDATE api_key_state SET calls_today=calls_today+1 WHERE key_name=?`
-  ).bind(keyName).run();
-}
-
-function isTwelveDataExhausted(data) {
-  if (data?.code === 429) return true;
-  if (data?.status === 'error' && data?.message?.toLowerCase().includes('run out')) return true;
-  if (data?.status === 'error' && data?.message?.toLowerCase().includes('api credits')) return true;
-  return false;
-}
-
-// Twelve Data's `datetime` field is NY-local wall-clock text (the URL
-// requests timezone=America/New_York) — e.g. "2026-07-28 23:00:00", or
-// "2026-07-28" for daily/weekly bars. `new Date(str).getTime()` mislabels
-// those digits as UTC (confirmed against production candle_cache: a
-// TD-sourced 1H bar was stored 4 hours early), so convert via the actual
-// NY UTC offset (EDT/EST) instead.
-function nyLocalStringToUTCms(str) {
-  const iso     = str.includes(' ') ? str.replace(' ', 'T') : `${str}T00:00:00`;
-  const naiveMs = Date.parse(`${iso}Z`); // digits taken as if they were UTC
+// daily_candle_cache / weekly_candle_cache store OHLC + a calendar date
+// string, not a candle-open timestamp — reconstruct bar.time from the
+// trading-day boundary (17:00 NY the prior calendar day), same approach
+// as EBP Worker's cache readers.
+function nyDateAtHourToUTCms(dateStr, hour) {
+  const naiveMs = Date.parse(`${dateStr}T${String(hour).padStart(2, '0')}:00:00Z`);
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
     timeZoneName: 'shortOffset'
   }).formatToParts(new Date(naiveMs));
-  const offsetStr    = parts.find(p => p.type === 'timeZoneName').value;
-  const offsetHours  = parseInt(offsetStr.replace('GMT', ''));
+  const offsetStr   = parts.find(p => p.type === 'timeZoneName').value;
+  const offsetHours = parseInt(offsetStr.replace('GMT', ''));
   return naiveMs - offsetHours * 3600 * 1000;
 }
 
-async function fetchTwelveDataWithRotation(symbol, tf, db, env, _log = null, count = 10) {
-  const interval = tfToTwelveInterval(tf);
-
-  const maxAttempts = 5; // safety cap — more than the realistic key count
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const active = await getActiveTwelveDataKey(db);
-    if (!active) break; // all keys exhausted (or none configured)
-
-    await ensureKeyStateRow(db, active.keyName);
-
-    const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=${interval}&outputsize=${count}&order=DESC&timezone=America/New_York&apikey=${active.apiKey}`;
-
-    try {
-      const res = await fetch(url);
-      if (!res.ok) {
-        if (_log) _log.push(`[WARN] Twelve Data HTTP ${res.status} for ${symbol} ${tf} on ${active.label}`);
-        return null;
-      }
-
-      const data = await res.json();
-
-      if (isTwelveDataExhausted(data)) {
-        await markKeyExhausted(db, active.keyName);
-        if (_log) _log.push(`[WARN] ${active.label} exhausted — rotating`);
-        continue; // try next key
-      }
-
-      if (data.status === 'error' || !data.values || data.values.length < 3) {
-        if (_log) _log.push(`[WARN] Twelve Data no data for ${symbol} ${tf} on ${active.label}: ${data.message ?? 'unknown'}`);
-        return null; // symbol error — don't rotate, just fail
-      }
-
-      await incrementKeyCallCount(db, active.keyName);
-      await logApiCall(db, active.keyName, symbol, tf, 1);
-
-      return data.values.map(v => ({
-        open:  parseFloat(v.open),
-        high:  parseFloat(v.high),
-        low:   parseFloat(v.low),
-        close: parseFloat(v.close),
-        time:  nyLocalStringToUTCms(v.datetime),
-      }));
-
-    } catch (e) {
-      if (_log) _log.push(`[ERROR] Twelve Data fetch error ${symbol} ${tf} on ${active.label}: ${e.message}`);
-      return null;
-    }
-  }
-
-  return null; // all keys exhausted or failed
+function addDaysToDateStr(dateStr, days) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return dt.toISOString().slice(0, 10);
 }
 
-// Bare 6-char pairs (GBPUSD, XAUUSD, ...) fall through every data source
-// unchanged — toYahooSymbol() only translates slash-delimited symbols.
-// Normalise to BASE/QUOTE so those lookups actually resolve.
-function normaliseSymbol(symbol) {
-  if (!symbol) return symbol;
-  if (symbol.includes('/')) return symbol; // already slash format
-
-  const FOREX_BASES  = ['EUR', 'GBP', 'USD', 'AUD', 'NZD', 'CAD', 'CHF', 'JPY', 'XAU', 'XAG', 'BTC', 'ETH', 'SOL'];
-  const FOREX_QUOTES = ['USD', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD'];
-
-  const upper = symbol.toUpperCase();
-
-  for (const base of FOREX_BASES) {
-    for (const quote of FOREX_QUOTES) {
-      if (upper === base + quote && base !== quote) {
-        return `${base}/${quote}`;
-      }
-    }
-  }
-
-  return symbol; // NSE stocks / indices etc. — passthrough
+// 1H sweep configs need 'D' HTF bias, 4H configs need 'W' — both come from
+// Watchdog's synthesised tables, not candle_cache.
+async function getDailyCandlesFromCache(symbol, env) {
+  const { results } = await env.DB.prepare(
+    'SELECT date_ny, open, high, low, close FROM daily_candle_cache WHERE symbol = ? ORDER BY date_ny DESC LIMIT 5'
+  ).bind(symbol).all();
+  return (results ?? []).map(r => ({
+    open: r.open, high: r.high, low: r.low, close: r.close,
+    time: nyDateAtHourToUTCms(addDaysToDateStr(r.date_ny, -1), 17),
+  }));
 }
 
-async function fetchCandles(symbol, tf, db, env, _log = null, count = 10) {
-  symbol = normaliseSymbol(symbol);
-
-  // 1. Twelve Data — primary (3-key rotation)
-  const twelveCandlesRaw = await fetchTwelveDataWithRotation(symbol, tf, db, env, _log, count);
-  const twelveCandles = twelveCandlesRaw ? getClosedCandles(twelveCandlesRaw, INTERVAL_MS[tf]) : null;
-  if (twelveCandles && twelveCandles.length >= 3) return twelveCandles;
-  if (_log) _log.push(`[WARN] Twelve Data failed ${symbol} ${tf} — trying Yahoo`);
-
-  // 2. Yahoo Finance — final fallback (unlimited, no key)
-  try {
-    const cRaw = await fetchYahooFinance(symbol, tf, count);
-    const c = getClosedCandles(cRaw, INTERVAL_MS[tf]);
-    if (c && c.length >= 3) {
-      await logApiCall(db, 'yahoo', symbol, tf);
-      return c;
-    }
-  } catch (e) {
-    if (_log) _log.push(`[WARN] Yahoo failed ${symbol} ${tf}: ${e.message}`);
-  }
-
-  const msg = `All sources failed ${symbol} ${tf}`;
-  console.error(msg);
-  if (_log) _log.push(`[ERROR] ${msg}`);
-  return null;
+async function getWeeklyCandlesFromCache(symbol, env) {
+  const { results } = await env.DB.prepare(
+    'SELECT week_start_ny, week_end_ny, open, high, low, close FROM weekly_candle_cache WHERE symbol = ? ORDER BY week_start_ny DESC LIMIT 5'
+  ).bind(symbol).all();
+  return (results ?? []).map(r => ({
+    open: r.open, high: r.high, low: r.low, close: r.close,
+    time: nyDateAtHourToUTCms(addDaysToDateStr(r.week_start_ny, -1), 17),
+  }));
 }
 
 // ── Telegram (inlined from packages/core/telegram.js) ────────
@@ -545,25 +334,6 @@ export function detectSweep(candles) {
     prevHigh:          bar1.high,
     prevLow:           bar1.low,
   };
-}
-
-async function updateSweepCandleCache(db, symbol, tf, candles) {
-  const [b0, b1, b2] = candles;
-  await db.prepare(`
-    INSERT OR REPLACE INTO sweep_candle_cache
-    (symbol, timeframe,
-     bar_0_open, bar_0_high, bar_0_low, bar_0_close,
-     bar_1_open, bar_1_high, bar_1_low, bar_1_close,
-     bar_2_open, bar_2_high, bar_2_low, bar_2_close,
-     bar_0_time, bar_1_time, updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-  `).bind(
-    symbol, tf,
-    b0?.open??null, b0?.high??null, b0?.low??null, b0?.close??null,
-    b1?.open??null, b1?.high??null, b1?.low??null, b1?.close??null,
-    b2?.open??null, b2?.high??null, b2?.low??null, b2?.close??null,
-    b0?.time??null, b1?.time??null, Date.now()
-  ).run();
 }
 
 // ── Swing State + MSS Engine (Phase 1.5 + 2, inlined) ────────
@@ -774,14 +544,15 @@ export async function handleSweepCron(tf, env, debugLog = null) {
   const log = (msg) => { console.log(msg); if (debugLog) debugLog.push(msg); };
   log(`Sweep trigger → TF: ${tf}`);
 
-  if (tf === 'M5') {
+  // M5 sweep support has been dropped (Watchdog migration) — M15 is now the
+  // smallest tick, so the periodic cleanup that used to piggyback on M5 runs
+  // here instead. Key-state / api_call_log cleanup is gone too — Sweep
+  // Worker no longer touches Twelve Data keys or api_call_log at all;
+  // that's Watchdog's exclusive concern now.
+  if (tf === 'M15') {
     await cleanupExpiredFVGs(env.DB);
     await cleanupExpiredChains(env.DB);
-    await resetExhaustedKeys(env.DB); // in case midnight UTC has passed
-    await env.DB.prepare(
-      `DELETE FROM api_call_log WHERE called_at < ?`
-    ).bind(Date.now() - (2 * 24 * 60 * 60 * 1000)).run();
-    log('Cleaned up expired FVGs, chains, key state, and API call log');
+    log('Cleaned up expired FVGs and chains');
   }
 
   const { results: filtered } = await env.DB.prepare(`
@@ -812,10 +583,10 @@ export async function handleSweepCron(tf, env, debugLog = null) {
 
   for (const [symbol, userRows] of symbolMap) {
     try {
-      const candles = await fetchCandles(symbol, tf, env.DB, env, debugLog, 10);
+      const candles = await getCandlesFromCache(symbol, tf, env);
       log(`[${symbol}] candles fetched: ${candles?.length ?? 'null'}`);
       if (!candles || candles.length < 2) {
-        log(`[${symbol}] SKIP: insufficient candles`);
+        log(`[${symbol}] SKIP: insufficient candles in cache`);
         continue;
       }
 
@@ -826,7 +597,14 @@ export async function handleSweepCron(tf, env, debugLog = null) {
       const neededHtfs = new Set(userRows.map(row => resolveHTF('sweep', tf, row.htf_override)).filter(Boolean));
       const biasByTF = new Map();
       for (const htf of neededHtfs) {
-        const htfCandles = await fetchCandles(symbol, htf, env.DB, env, debugLog, 10);
+        let htfCandles;
+        if (htf === 'D') {
+          htfCandles = await getDailyCandlesFromCache(symbol, env);
+        } else if (htf === 'W') {
+          htfCandles = await getWeeklyCandlesFromCache(symbol, env);
+        } else {
+          htfCandles = await getCandlesFromCache(symbol, htf, env);
+        }
         log(`[${symbol}] htf(${htf}) candles fetched: ${htfCandles?.length ?? 'null'}`);
         let bias = 'neutral';
         if (htfCandles?.length >= 2) {
@@ -841,8 +619,6 @@ export async function handleSweepCron(tf, env, debugLog = null) {
       // table record below and the log line — that table has no per-user
       // concept.
       const htfBias = defaultBiasTF ? (biasByTF.get(defaultBiasTF) ?? 'neutral') : 'neutral';
-
-      await updateSweepCandleCache(env.DB, symbol, tf, candles);
 
       // FVG Phase 1 + Swing/MSS Phase 1.5+2 — candles are newest-first; need oldest-first
       if (candles.length >= 3) {

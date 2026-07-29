@@ -11,7 +11,7 @@
 //   GET  /sweep/history   — authenticated, recent sweep alerts
 // ============================================================
 
-import { handleSweepCron, detectSweep } from './sweep-cron.js';
+import { handleSweepCron, detectSweep, getCandlesFromCache } from './sweep-cron.js';
 
 // ── CORS ─────────────────────────────────────────────────────
 
@@ -118,7 +118,7 @@ async function handleFetch(request, env) {
     try { body = await request.json(); } catch {}
 
     const tf       = body.tf ?? 'M15';
-    const validTFs = ['M5', 'M15', 'M30', '1H', '4H'];
+    const validTFs = ['M15', 'M30', '1H', '4H'];
 
     if (!validTFs.includes(tf)) {
       return json({ error: `Invalid TF: ${tf}. Must be one of ${validTFs.join(', ')}` }, 400, origin);
@@ -174,25 +174,11 @@ async function handleFetch(request, env) {
       const status = {};
 
       for (const tf of tfs) {
-        const cache = await env.DB.prepare(
-          'SELECT * FROM sweep_candle_cache WHERE symbol = ? AND timeframe = ?'
-        ).bind(asset.symbol, tf).first();
+        const candles = await getCandlesFromCache(asset.symbol, tf, env);
 
-        if (cache) {
-          const candles = [
-            {
-              open:  cache.bar_0_open,  high: cache.bar_0_high,
-              low:   cache.bar_0_low,   close: cache.bar_0_close,
-              time:  cache.bar_0_time,
-            },
-            {
-              open:  cache.bar_1_open,  high: cache.bar_1_high,
-              low:   cache.bar_1_low,   close: cache.bar_1_close,
-              time:  cache.bar_1_time,
-            },
-          ];
-          const sweep  = detectSweep(candles);
-          status[tf]   = sweep ? sweep.direction : 'none';
+        if (candles && candles.length >= 2) {
+          const sweep = detectSweep(candles);
+          status[tf]  = sweep ? sweep.direction : 'none';
         } else {
           status[tf] = 'none';
         }
