@@ -45,7 +45,8 @@ export default function Layout({ children }) {
 
   const nav = [...NAV];
   if (user?.is_admin === 1) {
-    nav.push({ id: 'nav-admin', path: '/admin', icon: '🛡️', label: 'Admin' });
+    nav.push({ id: 'nav-market', path: '/market', icon: '📡', label: 'Market' });
+    nav.push({ id: 'nav-admin',  path: '/admin',  icon: '🛡️', label: 'Admin' });
   }
 
   const initials = user?.name

@@ -1720,3 +1720,44 @@ html, body, #root {
     grid-template-columns: repeat(2, 1fr);
   }
 }
+
+/* ── Market Breadth ─────────────────────────────────────────────── */
+
+.breadth-heatmap {
+  border-collapse: collapse;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  width: 100%;
+}
+
+.breadth-heatmap th,
+.breadth-heatmap td {
+  padding: 4px 6px;
+  text-align: center;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.breadth-heatmap thead th {
+  background: var(--surface);
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+}
+
+.breadth-heatmap tbody th {
+  background: var(--surface);
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  color: var(--ink);
+  text-align: left;
+  padding-left: 8px;
+}
+
+#nav-market.active {
+  background: rgba(6, 182, 212, 0.12);
+  border-left-color: #06b6d4;
+  color: #06b6d4;
+}

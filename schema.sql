@@ -376,3 +376,31 @@ CREATE TABLE IF NOT EXISTS signal_counters (
 -- Seed (migration 008): INSERT OR IGNORE INTO signal_counters (template, series, count) VALUES ('EBP-4H', 'A', 0);
 -- Seed (migration 008): INSERT OR IGNORE INTO signal_counters (template, series, count) VALUES ('EBP-1D', 'A', 0);
 -- Seed (migration 008): INSERT OR IGNORE INTO signal_counters (template, series, count) VALUES ('EBP-1W', 'A', 0);
+
+-- ── Market Breadth ────────────────────────────────────────────────
+-- Migration: npx wrangler d1 execute ebp-tracker-db --remote --command="CREATE TABLE IF NOT EXISTS market_breadth_cache ..."
+-- (run each CREATE TABLE statement below separately, or re-run the full schema file)
+-- Hourly snapshot of 28-pair cross strength scores and heatmap.
+CREATE TABLE IF NOT EXISTS market_breadth_cache (
+  tf           TEXT NOT NULL,
+  computed_at  INTEGER NOT NULL,
+  heatmap      TEXT NOT NULL,
+  strength     TEXT NOT NULL,
+  PRIMARY KEY (tf)
+);
+
+-- Intraday strength snapshots for the line chart (one row per TF per hour).
+CREATE TABLE IF NOT EXISTS market_breadth_intraday (
+  tf           TEXT NOT NULL,
+  snapshot_at  INTEGER NOT NULL,
+  strength     TEXT NOT NULL,
+  PRIMARY KEY (tf, snapshot_at)
+);
+
+-- Correlation matrix snapshot per TF (Pearson on 10-candle strength series).
+CREATE TABLE IF NOT EXISTS market_breadth_correlation (
+  tf           TEXT NOT NULL,
+  computed_at  INTEGER NOT NULL,
+  matrix       TEXT NOT NULL,
+  PRIMARY KEY (tf)
+);

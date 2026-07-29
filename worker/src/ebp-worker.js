@@ -1969,6 +1969,124 @@ router.post('/user/telegram/test', async (req, env) => {
   return json({ success: true }, 200, origin);
 });
 
+// ── Market Breadth ────────────────────────────────────────────────
+
+const BREADTH_CURRENCIES = ['EUR', 'GBP', 'USD', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD'];
+
+// 28 cross-pairs covering all C(8,2) combinations.
+// Each entry: [pair, base, quote] using market-convention pair name.
+// pct = (close−open)/open*100; positive pct → base appreciated vs quote.
+const MAJOR_PAIRS = [
+  ['EUR/USD', 'EUR', 'USD'], ['GBP/USD', 'GBP', 'USD'], ['USD/JPY', 'USD', 'JPY'],
+  ['USD/CHF', 'USD', 'CHF'], ['USD/CAD', 'USD', 'CAD'], ['AUD/USD', 'AUD', 'USD'],
+  ['NZD/USD', 'NZD', 'USD'], ['EUR/GBP', 'EUR', 'GBP'], ['EUR/JPY', 'EUR', 'JPY'],
+  ['EUR/CHF', 'EUR', 'CHF'], ['EUR/CAD', 'EUR', 'CAD'], ['EUR/AUD', 'EUR', 'AUD'],
+  ['EUR/NZD', 'EUR', 'NZD'], ['GBP/JPY', 'GBP', 'JPY'], ['GBP/CHF', 'GBP', 'CHF'],
+  ['GBP/CAD', 'GBP', 'CAD'], ['GBP/AUD', 'GBP', 'AUD'], ['GBP/NZD', 'GBP', 'NZD'],
+  ['CHF/JPY', 'CHF', 'JPY'], ['CAD/JPY', 'CAD', 'JPY'], ['AUD/JPY', 'AUD', 'JPY'],
+  ['NZD/JPY', 'NZD', 'JPY'], ['AUD/CAD', 'AUD', 'CAD'], ['AUD/CHF', 'AUD', 'CHF'],
+  ['AUD/NZD', 'AUD', 'NZD'], ['NZD/CAD', 'NZD', 'CAD'], ['NZD/CHF', 'NZD', 'CHF'],
+  ['CAD/CHF', 'CAD', 'CHF'],
+];
+
+function pearsonCorr(a, b) {
+  const n = Math.min(a.length, b.length);
+  if (n < 2) return 0;
+  const meanA = a.slice(0, n).reduce((s, x) => s + x, 0) / n;
+  const meanB = b.slice(0, n).reduce((s, x) => s + x, 0) / n;
+  let num = 0, da = 0, db = 0;
+  for (let i = 0; i < n; i++) {
+    const dA = a[i] - meanA, dB = b[i] - meanB;
+    num += dA * dB; da += dA * dA; db += dB * dB;
+  }
+  const denom = Math.sqrt(da * db);
+  return denom === 0 ? 0 : num / denom;
+}
+
+async function handleMarketBreadthCron(env, debugLog = []) {
+  const BREADTH_TF = '1H';
+  const now = Date.now();
+
+  // Fetch 10 candles per pair for strength history and correlation.
+  const pairData = {};
+  for (const [pair, base, quote] of MAJOR_PAIRS) {
+    const candles = await fetchCandles(pair, BREADTH_TF, env.DB, env, 10);
+    if (candles && candles.length >= 1) {
+      pairData[pair] = { candles, base, quote };
+    } else {
+      debugLog.push(`skip ${pair}: no candles`);
+    }
+  }
+
+  // Build heatmap and strength from the most recent closed candle.
+  const heatmap = {};
+  for (const c of BREADTH_CURRENCIES) heatmap[c] = {};
+
+  for (const [pair, { candles, base, quote }] of Object.entries(pairData)) {
+    const c   = candles[0];
+    const pct = c.open !== 0 ? ((c.close - c.open) / c.open) * 100 : 0;
+    heatmap[base][quote] = parseFloat(pct.toFixed(4));
+    heatmap[quote][base] = parseFloat((-pct).toFixed(4));
+  }
+
+  const strength = {};
+  for (const ccy of BREADTH_CURRENCIES) {
+    const vals = Object.values(heatmap[ccy]).filter(v => !isNaN(v));
+    strength[ccy] = vals.length > 0
+      ? parseFloat((vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(4))
+      : 0;
+  }
+
+  // Write snapshot cache.
+  await env.DB.prepare(
+    'INSERT OR REPLACE INTO market_breadth_cache (tf, computed_at, heatmap, strength) VALUES (?,?,?,?)'
+  ).bind(BREADTH_TF, now, JSON.stringify(heatmap), JSON.stringify(strength)).run();
+
+  // Append intraday snapshot, prune rows older than 48 hours.
+  await env.DB.prepare(
+    'INSERT OR REPLACE INTO market_breadth_intraday (tf, snapshot_at, strength) VALUES (?,?,?)'
+  ).bind(BREADTH_TF, now, JSON.stringify(strength)).run();
+  await env.DB.prepare(
+    'DELETE FROM market_breadth_intraday WHERE tf = ? AND snapshot_at < ?'
+  ).bind(BREADTH_TF, now - 48 * 60 * 60 * 1000).run();
+
+  // Build per-candle strength series for correlation (up to 10 points).
+  const seriesLen = Math.min(10, ...Object.values(pairData).map(d => d.candles.length));
+  const returnSeries = {};
+  for (const ccy of BREADTH_CURRENCIES) returnSeries[ccy] = [];
+
+  for (let i = 0; i < seriesLen; i++) {
+    const snap = {};
+    for (const ccy of BREADTH_CURRENCIES) snap[ccy] = {};
+    for (const [pair, { candles, base, quote }] of Object.entries(pairData)) {
+      if (i >= candles.length) continue;
+      const c   = candles[i];
+      const pct = c.open !== 0 ? ((c.close - c.open) / c.open) * 100 : 0;
+      snap[base][quote] = pct;
+      snap[quote][base] = -pct;
+    }
+    for (const ccy of BREADTH_CURRENCIES) {
+      const vals = Object.values(snap[ccy]).filter(v => !isNaN(v));
+      returnSeries[ccy].push(vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : 0);
+    }
+  }
+
+  const matrix = {};
+  for (const a of BREADTH_CURRENCIES) {
+    matrix[a] = {};
+    for (const b of BREADTH_CURRENCIES) {
+      matrix[a][b] = a === b ? 1 : parseFloat(pearsonCorr(returnSeries[a], returnSeries[b]).toFixed(3));
+    }
+  }
+
+  await env.DB.prepare(
+    'INSERT OR REPLACE INTO market_breadth_correlation (tf, computed_at, matrix) VALUES (?,?,?)'
+  ).bind(BREADTH_TF, now, JSON.stringify(matrix)).run();
+
+  debugLog.push(`breadth ok: ${Object.keys(pairData).length}/28 pairs`);
+  return { pairs_fetched: Object.keys(pairData).length };
+}
+
 // EBP cron trigger — public route, secured by X-Cron-Secret (cron-job.org)
 router.post('/cron/ebp', async (req, env) => {
   const origin = getOrigin(req);
@@ -1984,12 +2102,50 @@ router.post('/cron/ebp', async (req, env) => {
 
   try {
     const debugLog = [];
-    const result = await handleEBPCron(tf, env, debugLog);
+    let result;
+    if (tf === 'BREADTH') {
+      result = await handleMarketBreadthCron(env, debugLog);
+    } else {
+      result = await handleEBPCron(tf, env, debugLog);
+    }
     return json({ ok: true, tf, fired_at: new Date().toISOString(), debug: debugLog, ...result }, 200, origin);
   } catch (err) {
     console.error(`EBP cron trigger error TF=${tf}:`, err.message);
     return json({ error: err.message }, 500, origin);
   }
+});
+
+// Market breadth snapshot — admin only
+router.get('/market/breadth', async (req, env) => {
+  const { user: clerkUser, origin, error } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
+
+  const cache = await env.DB.prepare(
+    'SELECT * FROM market_breadth_cache WHERE tf = ?'
+  ).bind('1H').first();
+
+  if (!cache) {
+    return json({ error: 'No breadth data yet — trigger POST /cron/ebp with {"tf":"BREADTH"} first' }, 404, origin);
+  }
+
+  const corr = await env.DB.prepare(
+    'SELECT matrix FROM market_breadth_correlation WHERE tf = ?'
+  ).bind('1H').first();
+
+  const cutoff = Date.now() - 48 * 60 * 60 * 1000;
+  const { results: intraday } = await env.DB.prepare(
+    'SELECT snapshot_at, strength FROM market_breadth_intraday WHERE tf = ? AND snapshot_at >= ? ORDER BY snapshot_at ASC'
+  ).bind('1H', cutoff).all();
+
+  return json({
+    currencies:  BREADTH_CURRENCIES,
+    heatmap:     JSON.parse(cache.heatmap),
+    strength:    JSON.parse(cache.strength),
+    computed_at: cache.computed_at,
+    intraday:    (intraday ?? []).map(r => ({ t: r.snapshot_at, strength: JSON.parse(r.strength) })),
+    correlation: corr ? JSON.parse(corr.matrix) : null,
+  }, 200, origin);
 });
 
 // Telegram bot webhook — public route, no Clerk auth
