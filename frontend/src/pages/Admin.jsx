@@ -412,52 +412,99 @@ export default function Admin() {
 
           <div className="divider" />
           <div className="section-heading">API Keys</div>
-          {keys.filter(k => k.source !== 'upstox').length === 0 ? (
-            <div className="card" style={{ textAlign: 'center', color: 'var(--muted)', padding: 24 }}>No API keys yet</div>
-          ) : keys.filter(k => k.source !== 'upstox').map(k => (
-            <div key={k.id} className="card">
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 'var(--sp-md)' }}>
+            {/* Card 1 — every key regardless of active status */}
+            <div className="card">
               <div className="card-header">
-                <span className="card-title">{k.label}</span>
-                <span className={`badge ${k.exhausted ? 'badge-bear' : 'badge-t3'}`}>
-                  {k.exhausted ? 'Exhausted' : k.enabled ? 'Active' : 'Disabled'}
-                </span>
+                <span className="card-title">Available API Keys</span>
               </div>
-              <div style={{ fontSize: 12, lineHeight: 1.8, marginBottom: 'var(--sp-sm)' }}>
-                <div><span className="text-muted">Source:</span> <span className="badge badge-forex">{k.source}</span></div>
-                <div><span className="text-muted">Key:</span> <span className="text-mono">{k.key_preview}</span></div>
-                <div><span className="text-muted">Calls today:</span> <span className="tabular-nums">{k.calls_today}</span></div>
-              </div>
-              <div className="divider" />
-              <button className="add-link" onClick={() => handleToggleKey(k.id, !k.enabled)}>
-                {k.enabled ? 'Disable' : 'Enable'}
-              </button>
-              {' · '}
-              <button className="add-link" style={{ color: '#ef4444' }} onClick={() => handleDeleteKey(k.id)}>
-                Delete
-              </button>
-            </div>
-          ))}
+              {keys.filter(k => k.source !== 'upstox').length === 0 ? (
+                <div style={{ textAlign: 'center', color: 'var(--muted)', padding: 24 }}>No API keys yet</div>
+              ) : keys.filter(k => k.source !== 'upstox').map((k, i) => (
+                <div key={k.id}>
+                  {i > 0 && <div className="divider" />}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span className="card-title" style={{ fontSize: 13 }}>{k.label}</span>
+                    <span className={`badge ${k.enabled ? 'badge-t3' : 'badge-bear'}`}>
+                      {k.enabled ? 'Active' : 'Inactive'}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 12, marginTop: 4, marginBottom: 6 }}>
+                    <span className="text-muted">Key:</span> <span className="text-mono">{k.key_preview}</span>
+                  </div>
+                  <button className="add-link" onClick={() => handleToggleKey(k.id, !k.enabled)}>
+                    {k.enabled ? 'Disable' : 'Enable'}
+                  </button>
+                  {' · '}
+                  <button className="add-link" style={{ color: '#ef4444' }} onClick={() => handleDeleteKey(k.id)}>
+                    Delete
+                  </button>
+                </div>
+              ))}
 
-          <div className="divider" />
-          <div className="section-heading">Add New Key</div>
-          <div className="config-row">
-            <select className="select-sm" value={newKey.source}
-              onChange={e => setNewKey(p => ({ ...p, source: e.target.value }))}>
-              <option value="twelvedata">Twelve Data</option>
-              <option value="yahoo">Yahoo</option>
-            </select>
-            <input className="search-input" style={{ maxWidth: 200 }}
-              placeholder="Label e.g. Key 4"
-              value={newKey.label}
-              onChange={e => setNewKey(p => ({ ...p, label: e.target.value }))} />
-            <input className="search-input" style={{ maxWidth: 300 }}
-              placeholder="API key value"
-              type="password"
-              value={newKey.key_value}
-              onChange={e => setNewKey(p => ({ ...p, key_value: e.target.value }))} />
-            <button className="search-btn" onClick={handleAddKey} disabled={addingKey || !newKey.key_value || !newKey.label}>
-              {addingKey ? '…' : 'Add'}
-            </button>
+              <div className="divider" />
+              <div className="section-heading">Add New Key</div>
+              <div className="config-row">
+                <select className="select-sm" value={newKey.source}
+                  onChange={e => setNewKey(p => ({ ...p, source: e.target.value }))}>
+                  <option value="twelvedata">Twelve Data</option>
+                  <option value="yahoo">Yahoo</option>
+                </select>
+                <input className="search-input" style={{ maxWidth: 200 }}
+                  placeholder="Label e.g. Key 4"
+                  value={newKey.label}
+                  onChange={e => setNewKey(p => ({ ...p, label: e.target.value }))} />
+                <input className="search-input" style={{ maxWidth: 300 }}
+                  placeholder="API key value"
+                  type="password"
+                  value={newKey.key_value}
+                  onChange={e => setNewKey(p => ({ ...p, key_value: e.target.value }))} />
+                <button className="search-btn" onClick={handleAddKey} disabled={addingKey || !newKey.key_value || !newKey.label}>
+                  {addingKey ? '…' : 'Add'}
+                </button>
+              </div>
+            </div>
+
+            {/* Card 2 — usage for active keys only */}
+            <div className="card">
+              <div className="card-header">
+                <span className="card-title">Active API Keys</span>
+              </div>
+              {(() => {
+                const activeKeys = keys.filter(k => k.source !== 'upstox' && k.enabled);
+                if (activeKeys.length === 0) {
+                  return <div style={{ textAlign: 'center', color: 'var(--muted)', padding: 24 }}>No active API keys configured</div>;
+                }
+                return activeKeys.map((k, i) => {
+                  const pct = k.credits_pct ?? 0;
+                  const barClass = (k.exhausted || pct >= 85) ? 'danger' : pct >= 60 ? 'warning' : 'ok';
+                  return (
+                    <div key={k.id}>
+                      {i > 0 && <div className="divider" />}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span className="card-title" style={{ fontSize: 13 }}>{k.label}</span>
+                        {k.exhausted ? <span className="badge badge-bear">EXHAUSTED</span> : null}
+                      </div>
+                      <div style={{ fontSize: 12, marginTop: 4 }}>
+                        <span className="text-muted">Key:</span> <span className="text-mono">{k.key_preview}</span>
+                      </div>
+                      <div className="progress-bar-wrap">
+                        <div className="progress-bar-bg">
+                          <div className={`progress-bar-fill ${barClass}`} style={{ width: `${Math.min(pct, 100)}%` }} />
+                        </div>
+                        <div className="progress-bar-label">
+                          {k.calls_today} / {k.daily_limit ?? 800} today ({pct}%)
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 12, marginTop: 6 }}>
+                        <span className="text-muted">Resets at:</span>{' '}
+                        {k.resets_at_utc ? new Date(k.resets_at_utc).toLocaleString() : '—'}
+                      </div>
+                    </div>
+                  );
+                });
+              })()}
+            </div>
           </div>
         </div>
       )}

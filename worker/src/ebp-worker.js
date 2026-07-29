@@ -2001,12 +2001,27 @@ router.get('/admin/api-keys', async (req, env) => {
     SELECT ak.id, ak.source, ak.label, ak.enabled, ak.added_at,
            COALESCE(aks.exhausted, 0) as exhausted,
            COALESCE(aks.calls_today, 0) as calls_today,
-           '****' || substr(ak.key_value, -4) as key_preview
+           '***' || substr(ak.key_value, -4) as key_preview
     FROM api_keys ak
     LEFT JOIN api_key_state aks ON ak.id = aks.key_name
     ORDER BY ak.source, ak.label ASC
   `).all();
-  return json(results ?? [], 200, origin);
+
+  const DAILY_LIMIT = 800;
+  const resetsAtUtc = new Date(Date.UTC(
+    new Date().getUTCFullYear(),
+    new Date().getUTCMonth(),
+    new Date().getUTCDate() + 1
+  )).toISOString();
+
+  const enriched = (results ?? []).map(k => ({
+    ...k,
+    daily_limit:   DAILY_LIMIT,
+    credits_pct:   Math.round((k.calls_today / DAILY_LIMIT) * 100),
+    resets_at_utc: resetsAtUtc,
+  }));
+
+  return json(enriched, 200, origin);
 });
 
 router.post('/admin/api-keys', async (req, env) => {

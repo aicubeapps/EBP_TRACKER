@@ -104,13 +104,37 @@ function nextMidnightUTC() {
   return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0, 0);
 }
 
+// Resets calls_today (and exhausted state) once per real UTC day for EVERY
+// key, not just ones that were marked exhausted — a key that never trips a
+// 429 still needs its daily counter cleared, otherwise it accumulates
+// forever. Relies on reset_at always holding a real future midnight once a
+// key has been through markKeyExhausted at least once; a fresh/never-
+// exhausted key sits at reset_at=0 and self-corrects the first time this
+// runs post-deploy.
 async function resetExhaustedKeys(db) {
   const now = Date.now();
   await db.prepare(
     `UPDATE api_key_state
      SET exhausted=0, calls_today=0, exhausted_at=NULL, reset_at=?
-     WHERE exhausted=1 AND reset_at < ?`
+     WHERE reset_at < ?`
   ).bind(nextMidnightUTC(), now).run();
+}
+
+// api_call_log cleanup — used to run on Sweep Worker's M5 tick; that tick
+// (and Sweep Worker's ownership of api_call_log entirely) is gone as of the
+// Watchdog migration, so this is its new home.
+//
+// called_at is stored as Date.now() (unix ms, INTEGER column) — not a SQL
+// datetime string. datetime('now','-2 days') returns TEXT, and SQLite's
+// type-affinity sort order is NULL < INTEGER/REAL < TEXT, so comparing an
+// INTEGER column against that TEXT value would make every row match
+// unconditionally (wiping the whole table every run) rather than filtering
+// by age. Bind a plain ms threshold instead, same pattern the old Sweep
+// Worker cleanup used.
+async function cleanupApiCallLog(db) {
+  await db.prepare(
+    `DELETE FROM api_call_log WHERE called_at < ?`
+  ).bind(Date.now() - 2 * 24 * 60 * 60 * 1000).run();
 }
 
 async function ensureKeyStateRow(db, keyName) {
@@ -289,6 +313,14 @@ async function fetchCandlesBatch(symbols, tf, env) {
       if (keyExhausted) {
         await markKeyExhausted(env.DB, active.keyName);
         continue; // rotate to next key, retry the whole batch
+      }
+
+      // Proactive exhaustion — Twelve Data reports remaining daily credits
+      // in a response header; mark the key exhausted the moment it hits 0
+      // instead of waiting for the next call to come back 429.
+      const creditsLeft = res.headers.get('api-credits-left');
+      if (creditsLeft !== null && parseInt(creditsLeft, 10) === 0) {
+        await markKeyExhausted(env.DB, active.keyName);
       }
 
       await incrementKeyCallCount(env.DB, active.keyName);
@@ -536,6 +568,8 @@ async function runWatchdog(event, env) {
     if (now.getUTCDay() === 5) {
       await attemptWeeklySynthesis(allSymbols, env);
     }
+
+    await cleanupApiCallLog(env.DB);
   }
 
   if (minute % 30 === 0) {
