@@ -339,6 +339,24 @@ function isTwelveDataExhausted(data) {
   return false;
 }
 
+// Twelve Data's `datetime` field is NY-local wall-clock text (the URL
+// requests timezone=America/New_York) — e.g. "2026-07-28 23:00:00", or
+// "2026-07-28" for daily/weekly bars. `new Date(str).getTime()` mislabels
+// those digits as UTC (confirmed against production candle_cache: a
+// TD-sourced 1H bar was stored 4 hours early), so convert via the actual
+// NY UTC offset (EDT/EST) instead.
+function nyLocalStringToUTCms(str) {
+  const iso     = str.includes(' ') ? str.replace(' ', 'T') : `${str}T00:00:00`;
+  const naiveMs = Date.parse(`${iso}Z`); // digits taken as if they were UTC
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    timeZoneName: 'shortOffset'
+  }).formatToParts(new Date(naiveMs));
+  const offsetStr    = parts.find(p => p.type === 'timeZoneName').value;
+  const offsetHours  = parseInt(offsetStr.replace('GMT', ''));
+  return naiveMs - offsetHours * 3600 * 1000;
+}
+
 async function fetchTwelveDataWithRotation(symbol, tf, db, env, _log = null, count = 10) {
   const interval = tfToTwelveInterval(tf);
 
@@ -379,7 +397,7 @@ async function fetchTwelveDataWithRotation(symbol, tf, db, env, _log = null, cou
         high:  parseFloat(v.high),
         low:   parseFloat(v.low),
         close: parseFloat(v.close),
-        time:  new Date(v.datetime).getTime(),
+        time:  nyLocalStringToUTCms(v.datetime),
       }));
 
     } catch (e) {

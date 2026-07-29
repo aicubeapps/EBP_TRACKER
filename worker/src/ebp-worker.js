@@ -397,6 +397,24 @@ async function incrementKeyCallCount(db, keyName) {
   ).bind(keyName).run();
 }
 
+// Twelve Data's `datetime` field is NY-local wall-clock text (the URL
+// requests timezone=America/New_York) — e.g. "2026-07-28 23:00:00", or
+// "2026-07-28" for daily/weekly bars. `new Date(str).getTime()` mislabels
+// those digits as UTC (confirmed against production candle_cache: a
+// TD-sourced 1H bar was stored 4 hours early), so convert via the actual
+// NY UTC offset (EDT/EST) instead.
+function nyLocalStringToUTCms(str) {
+  const iso     = str.includes(' ') ? str.replace(' ', 'T') : `${str}T00:00:00`;
+  const naiveMs = Date.parse(`${iso}Z`); // digits taken as if they were UTC
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    timeZoneName: 'shortOffset'
+  }).formatToParts(new Date(naiveMs));
+  const offsetStr    = parts.find(p => p.type === 'timeZoneName').value;
+  const offsetHours  = parseInt(offsetStr.replace('GMT', ''));
+  return naiveMs - offsetHours * 3600 * 1000;
+}
+
 function isTwelveDataExhausted(data) {
   if (data?.code === 429) return true;
   if (data?.status === 'error' && data?.message?.toLowerCase().includes('run out')) return true;
@@ -443,7 +461,7 @@ async function fetchTwelveDataWithRotation(symbol, tf, db, env, count = 10) {
         high:  parseFloat(v.high),
         low:   parseFloat(v.low),
         close: parseFloat(v.close),
-        time:  new Date(v.datetime).getTime(),
+        time:  nyLocalStringToUTCms(v.datetime),
       }));
 
     } catch (e) {
@@ -839,7 +857,7 @@ async function updateCandleCache(db, symbol, tf, candles) {
   ).run();
 }
 
-// ── Phase I — EBP Signal IDs (4H/1D/1W only, separate counters from T3/NSE) ──
+// ── Phase I — EBP Signal IDs (M15/1H/4H/1D — not W, separate counters from T3/NSE) ──
 async function generateEbpSignalId(tf, symbol, env) {
   const counterKey = `EBP-${tf}`; // EBP-4H, EBP-1D, EBP-1W
   const row = await env.DB.prepare(
@@ -882,6 +900,70 @@ function getEbpExpiresAt(tf) {
     now.getUTCMonth() + 1,
     1
   )).toISOString();
+}
+
+// ============================================================
+// Daily candle synthesis — Twelve Data / Yahoo's `D` interval is midnight
+// UTC aligned, but forex daily candles actually open at 5 PM NY (21:00 UTC
+// in EDT, 22:00 UTC in EST). Synthesise the correct daily bar from closed
+// 1H candles instead of trusting the provider's D interval.
+// ============================================================
+function getNYUTCBoundaryHour(nowMs) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    timeZoneName: 'shortOffset'
+  }).formatToParts(new Date(nowMs));
+  const offsetStr = parts.find(p => p.type === 'timeZoneName').value;
+  const offset = parseInt(offsetStr.replace('GMT', ''));
+  const boundary = 17 - offset; // 5 PM NY in UTC: EDT(-4)→21, EST(-5)→22
+  return (boundary === 21 || boundary === 22) ? boundary : 21; // fallback to EDT
+}
+
+function synthesiseDailyCandle(hourlyCandles, boundaryHour) {
+  // hourlyCandles: closed 1H candles (any order); boundaryHour: UTC hour of
+  // 5 PM NY open (21 or 22). Returns { bar0, bar1 } — most recent two
+  // completed forex days, newest first — or nulls when data is insufficient.
+  function getDayIndex(candleMs) {
+    const adjusted = new Date(candleMs - boundaryHour * 3600 * 1000);
+    return adjusted.toISOString().slice(0, 10); // YYYY-MM-DD
+  }
+
+  const groups = {};
+  for (const c of hourlyCandles) {
+    const openMs = typeof c.time === 'number' ? c.time : new Date(c.time).getTime();
+    const day = getDayIndex(openMs);
+    if (!groups[day]) groups[day] = [];
+    groups[day].push({ ...c, openMs });
+  }
+
+  const days = Object.keys(groups).sort().reverse(); // most recent first
+  if (days.length < 2) return { bar0: null, bar1: null };
+
+  function aggregate(candles) {
+    if (candles.length < 20) return null; // too many gaps, unreliable
+    const sorted = [...candles].sort((a, b) => a.openMs - b.openMs);
+    return {
+      open:  sorted[0].open,
+      high:  Math.max(...sorted.map(c => c.high)),
+      low:   Math.min(...sorted.map(c => c.low)),
+      close: sorted[sorted.length - 1].close,
+      time:  sorted[0].openMs,
+    };
+  }
+
+  return {
+    bar0: aggregate(groups[days[0]]),
+    bar1: aggregate(groups[days[1]]),
+  };
+}
+
+// fetchCandles() already filters to closed candles internally (both the
+// Twelve Data and Yahoo branches run getClosedCandles before returning).
+async function fetchSynthesizedDailyBars(symbol, env) {
+  const rawHourly = await fetchCandles(symbol, '1H', env.DB, env, 52);
+  if (!rawHourly) return { bar0: null, bar1: null };
+  const boundaryHour = getNYUTCBoundaryHour(Date.now());
+  return synthesiseDailyCandle(rawHourly, boundaryHour);
 }
 
 // ============================================================
@@ -930,10 +1012,22 @@ async function handleEBPCron(tf, env, debugLog = null) {
 
   for (const [symbol, userRows] of symbolMap) {
     try {
-      const candles = await fetchCandles(symbol, tf, env.DB, env, 10);
-      if (!candles || candles.length < 2) {
-        log(`[${symbol}] SKIP: insufficient candles`);
-        continue;
+      let candles;
+      if (tf === 'D') {
+        // Forex daily candles open at 5 PM NY, not midnight UTC — synthesise
+        // from closed 1H candles instead of the provider's D interval.
+        const { bar0, bar1 } = await fetchSynthesizedDailyBars(symbol, env);
+        if (!bar0 || !bar1) {
+          log(`[${symbol}] SKIP: insufficient closed 1H candles for daily synthesis`);
+          continue;
+        }
+        candles = [bar0, bar1];
+      } else {
+        candles = await fetchCandles(symbol, tf, env.DB, env, 10);
+        if (!candles || candles.length < 2) {
+          log(`[${symbol}] SKIP: insufficient candles`);
+          continue;
+        }
       }
 
       // Different users on this symbol+tf may have different htf_override
@@ -943,7 +1037,15 @@ async function handleEBPCron(tf, env, debugLog = null) {
       const neededHtfs = new Set(userRows.map(row => resolveHTF('ebp', tf, row.htf_override)).filter(Boolean));
       const biasByTF = new Map();
       for (const htf of neededHtfs) {
-        const htfCandles = await fetchCandles(symbol, htf, env.DB, env, 10);
+        // 'D' HTF bias (used by 1H default / 1H+4H overrides) has the same
+        // midnight-UTC misalignment as the Daily TF itself — synthesise it too.
+        let htfCandles;
+        if (htf === 'D') {
+          const { bar0, bar1 } = await fetchSynthesizedDailyBars(symbol, env);
+          htfCandles = (bar0 && bar1) ? [bar0, bar1] : null;
+        } else {
+          htfCandles = await fetchCandles(symbol, htf, env.DB, env, 10);
+        }
         let bias = 'neutral';
         if (htfCandles?.length >= 2) {
           const biasResult = calcTTradesBias({ bar1: htfCandles[0], bar2: htfCandles[1] });
@@ -959,43 +1061,48 @@ async function handleEBPCron(tf, env, debugLog = null) {
 
       await updateCandleCache(env.DB, symbol, tf, candles);
 
-      // FVG Phase 1 — candles are newest-first; processFVGs needs oldest-first
-      if (candles.length >= 3) {
+      // FVG Phase 1 — candles are newest-first; processFVGs needs oldest-first.
+      // Daily TF only has the two synthesised bars (bar0/bar1) — FVG needs 3,
+      // so it's skipped there, but swing state / MSS still run on bar0.
+      let mssResult = null;
+      if (tf === 'D') {
+        mssResult = await updateSwingState(env.DB, symbol, tf, [null, null, candles[0]]);
+      } else if (candles.length >= 3) {
         const oldestFirst = [candles[2], candles[1], candles[0]];
         await processFVGs(env.DB, symbol, tf, oldestFirst, candles[0]);
 
         // Phase 1.5 + 2 — Swing state + MSS
-        const mssResult = await updateSwingState(env.DB, symbol, tf, oldestFirst);
-        if (mssResult) {
-          for (const row of userRows) {
-            const userTfAccess = JSON.parse(row.user_tf_access || '["M5","M15","M30","1H","4H","D","W"]');
-            if (!userTfAccess.includes(tf)) continue;
+        mssResult = await updateSwingState(env.DB, symbol, tf, oldestFirst);
+      }
+      if (mssResult) {
+        for (const row of userRows) {
+          const userTfAccess = JSON.parse(row.user_tf_access || '["M5","M15","M30","1H","4H","D","W"]');
+          if (!userTfAccess.includes(tf)) continue;
 
-            const userBiasTF    = resolveHTF('ebp', tf, row.htf_override);
-            const userHtfBias   = userBiasTF ? (biasByTF.get(userBiasTF) ?? 'neutral') : 'neutral';
-            const alertMode     = row.alert_mode ?? 'aligned';
-            const biasOverrides = JSON.parse(row.bias_overrides || '{}');
-            const effectiveBias = getEffectiveBias(userBiasTF, { [userBiasTF]: { bias: userHtfBias } }, biasOverrides);
-            const shouldAlert   = alertMode === 'all' || mssResult.direction === effectiveBias || effectiveBias === 'neutral';
-            if (!shouldAlert) continue;
+          const userBiasTF    = resolveHTF('ebp', tf, row.htf_override);
+          const userHtfBias   = userBiasTF ? (biasByTF.get(userBiasTF) ?? 'neutral') : 'neutral';
+          const alertMode     = row.alert_mode ?? 'aligned';
+          const biasOverrides = JSON.parse(row.bias_overrides || '{}');
+          const effectiveBias = getEffectiveBias(userBiasTF, { [userBiasTF]: { bias: userHtfBias } }, biasOverrides);
+          const shouldAlert   = alertMode === 'all' || mssResult.direction === effectiveBias || effectiveBias === 'neutral';
+          if (!shouldAlert) continue;
 
-            const tg = await env.DB.prepare(
-              'SELECT chat_id FROM user_telegram WHERE user_id = ? AND verified = 1'
-            ).bind(row.user_id).first();
-            if (!tg?.chat_id) continue;
+          const tg = await env.DB.prepare(
+            'SELECT chat_id FROM user_telegram WHERE user_id = ? AND verified = 1'
+          ).bind(row.user_id).first();
+          if (!tg?.chat_id) continue;
 
-            const msg = formatMSSAlert(symbol, tf, mssResult, userHtfBias, getHTFBiasLabel(userBiasTF));
-            await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, msg);
+          const msg = formatMSSAlert(symbol, tf, mssResult, userHtfBias, getHTFBiasLabel(userBiasTF));
+          await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, msg);
 
-            await env.DB.prepare(
-              `INSERT INTO alert_history
-               (id,user_id,symbol,timeframe,direction,trend_bias,candle_time,fired_at,alert_type)
-               VALUES (?,?,?,?,?,?,?,?,'mss')`
-            ).bind(
-              crypto.randomUUID(), row.user_id, symbol, tf,
-              mssResult.direction, userHtfBias, mssResult.candle_time, Date.now()
-            ).run();
-          }
+          await env.DB.prepare(
+            `INSERT INTO alert_history
+             (id,user_id,symbol,timeframe,direction,trend_bias,candle_time,fired_at,alert_type)
+             VALUES (?,?,?,?,?,?,?,?,'mss')`
+          ).bind(
+            crypto.randomUUID(), row.user_id, symbol, tf,
+            mssResult.direction, userHtfBias, mssResult.candle_time, Date.now()
+          ).run();
         }
       }
 
@@ -1008,14 +1115,12 @@ async function handleEBPCron(tf, env, debugLog = null) {
       // Signal ID generated once per symbol+TF event here (not per user
       // below) — every user notified for this event shares the same ID.
       let ebpSignalId = null;
-      if (['4H', 'D', 'W'].includes(tf)) {
-        const signalTf = tf === 'D' ? '1D' : tf === 'W' ? '1W' : '4H';
+      if (tf !== 'W') {
+        const signalTf = tf === 'D' ? '1D' : tf; // 'D'→'1D'; M15/1H/4H pass through unchanged
         ebpSignalId = await generateEbpSignalId(signalTf, symbol, env);
         const firedAt = new Date().toISOString();
         // price_at_signal: detectEBP() has no `ebpCandle` — the EBP candle's
         // close is ebp.closedLevel (= bar0.close), already computed above.
-        // htf_bias: 'neutral' by design for W-tf signals (BIAS_SOURCE.ebp['W']
-        // is null — there's no timeframe higher than Weekly to bias against).
         await env.DB.prepare(`
           INSERT INTO signals (
             signal_id, template_type, symbol, htf_tf, ltf_tf, direction, fired_at, expires_at,
@@ -1487,10 +1592,15 @@ router.post('/user/templates/:assetId', async (req, env) => {
   return json({ id, template, htf, ltf, window_mins: window_mins ?? 60, enabled: enabled ? 1 : 0 }, 201, origin);
 });
 
+const TEMPLATE_TF_RANK = { 'M5': 1, 'M15': 2, 'M30': 3, '1H': 4, '4H': 5, 'D': 6, 'W': 7 };
+
 router.patch('/user/template/:id', async (req, env) => {
   const { user: clerkUser, origin, error, params } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
   const { enabled, htf, ltf, window_mins } = await req.json();
+  if (htf && ltf && TEMPLATE_TF_RANK[ltf] >= TEMPLATE_TF_RANK[htf]) {
+    return json({ error: 'LTF must be strictly lower than HTF' }, 400, origin);
+  }
   await env.DB.prepare(
     'UPDATE user_templates SET enabled=COALESCE(?,enabled), htf=COALESCE(?,htf), ltf=COALESCE(?,ltf), window_mins=COALESCE(?,window_mins) WHERE id=? AND user_id=?'
   ).bind(enabled ?? null, htf ?? null, ltf ?? null, window_mins ?? null, params.id, clerkUser.id).run();
@@ -1715,9 +1825,9 @@ router.delete('/user/nse-indicator-configs/:id', async (req, env) => {
 // ── Bias Cache ────────────────────────────────────────────────
 
 router.get('/user/bias/:symbol', async (req, env) => {
-  const { user: clerkUser, origin, error } = req._ctx;
+  const { user: clerkUser, origin, error, params } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const symbol = decodeURIComponent(req._params.symbol);
+  const symbol = decodeURIComponent(params.symbol);
   const { results } = await env.DB.prepare(
     'SELECT timeframe, bias, updated_at FROM bias_cache WHERE symbol = ?'
   ).bind(symbol).all();

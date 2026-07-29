@@ -35,3 +35,13 @@ export const NSE_BIAS_SOURCE_FRONTEND = {
 
 export const NSE_EBP_TFS   = ['M1', 'M5', 'M15', 'M30', '1H', 'D'];
 export const NSE_SWEEP_TFS = ['M1', 'M5', 'M15', 'M30', '1H', 'D'];
+
+// AI Alert templates (T1-T4) — user-configurable HTF/LTF pairing.
+// Matches TEMPLATE_TF_RANK in the worker's PATCH /user/template/:id validator.
+export const TEMPLATE_TF_RANK = { 'M5': 1, 'M15': 2, 'M30': 3, '1H': 4, '4H': 5, 'D': 6, 'W': 7 };
+export const TEMPLATE_HTF_OPTIONS = ['M15', '1H', '4H', 'D'];
+export const TEMPLATE_ALL_TFS     = ['M5', 'M15', 'M30', '1H', '4H', 'D'];
+
+export function templateLtfOptions(htf) {
+  return TEMPLATE_ALL_TFS.filter(tf => TEMPLATE_TF_RANK[tf] < TEMPLATE_TF_RANK[htf]);
+}
