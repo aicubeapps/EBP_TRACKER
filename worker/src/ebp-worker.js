@@ -2032,10 +2032,10 @@ var ebp_worker_default = {
       return json({ error: "Internal server error", detail: err.message }, 500, origin);
     }
   },
-  // Cloudflare scheduled handler — not used (cron-job.org handles scheduling
-  // via POST /cron/ebp; no [triggers] block in wrangler.toml calls this)
+  // Market Breadth CF native cron — fires at :05 every hour
+  // EBP cron remains on cron-job.org (POST /cron/ebp)
   async scheduled(event, env, ctx) {
-    console.log("Scheduled event received \u2014 scheduling handled via cron-job.org HTTP triggers");
+    ctx.waitUntil(handleMarketBreadthCron(env));
   }
 };
 export {
