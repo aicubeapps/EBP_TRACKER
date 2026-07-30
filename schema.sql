@@ -48,16 +48,17 @@ CREATE TABLE IF NOT EXISTS alert_history (
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
+-- Unified candle cache (IM-1) — replaces the old per-bar-column
+-- candle_cache/sweep_candle_cache pair. Watchdog Worker is the sole
+-- writer (Twelve Data + Yahoo); EBP Worker and Sweep Worker both read
+-- this same table, filtered by tf, so there is no separate sweep cache.
 CREATE TABLE IF NOT EXISTS candle_cache (
-  symbol      TEXT NOT NULL,
-  timeframe   TEXT NOT NULL,
-  bar_0_open  REAL, bar_0_high REAL, bar_0_low REAL, bar_0_close REAL,
-  bar_1_open  REAL, bar_1_high REAL, bar_1_low REAL, bar_1_close REAL,
-  bar_2_open  REAL, bar_2_high REAL, bar_2_low REAL, bar_2_close REAL,
-  bar_0_time  INTEGER,
-  bar_1_time  INTEGER,
-  updated_at  INTEGER NOT NULL,
-  PRIMARY KEY (symbol, timeframe)
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol       TEXT NOT NULL,
+  tf           TEXT NOT NULL,
+  candles_json TEXT NOT NULL,
+  fetched_at   TEXT NOT NULL,
+  UNIQUE (symbol, tf)
 );
 
 CREATE TABLE IF NOT EXISTS invite_tokens (
@@ -66,19 +67,6 @@ CREATE TABLE IF NOT EXISTS invite_tokens (
   used_by    TEXT,
   used_at    INTEGER,
   active     INTEGER DEFAULT 1
-);
-
--- Sweep Candle Cache (separate from EBP cache — different TF set)
-CREATE TABLE IF NOT EXISTS sweep_candle_cache (
-  symbol        TEXT NOT NULL,
-  timeframe     TEXT NOT NULL,
-  bar_0_open    REAL, bar_0_high REAL, bar_0_low REAL, bar_0_close REAL,
-  bar_1_open    REAL, bar_1_high REAL, bar_1_low REAL, bar_1_close REAL,
-  bar_2_open    REAL, bar_2_high REAL, bar_2_low REAL, bar_2_close REAL,
-  bar_0_time    INTEGER,
-  bar_1_time    INTEGER,
-  updated_at    INTEGER NOT NULL,
-  PRIMARY KEY (symbol, timeframe)
 );
 
 -- Indexes
@@ -172,14 +160,10 @@ CREATE TABLE IF NOT EXISTS chain_state (
   htf_signal_time INTEGER,
   ltf_sweep_time  INTEGER,
   expires_at      INTEGER NOT NULL,
-  created_at      INTEGER NOT NULL
+  created_at      INTEGER NOT NULL,
+  htf_signal_id   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_chain_state_lookup ON chain_state(user_id, symbol, template, current_step, expires_at);
-
--- Migration (post-deploy): ALTER TABLE chain_state
--- ADD COLUMN htf_signal_id TEXT;
--- Added for IM-4: T3 Signal ID assigned at Step 1
--- and carried through Steps 2 and 3 via this column.
 
 -- D1 Console commands (run once on live DB):
 -- ALTER TABLE user_assets ADD COLUMN bias_overrides TEXT DEFAULT '{}';
@@ -409,3 +393,15 @@ CREATE TABLE IF NOT EXISTS market_breadth_correlation (
   matrix       TEXT NOT NULL,
   PRIMARY KEY (tf)
 );
+
+-- ── Live tables not yet in schema ────────────────────────────
+-- The following tables exist in production D1 but are not fully
+-- defined here. Added via ALTER TABLE or ad-hoc migration.
+-- daily_candle_cache:  Watchdog-synthesized daily OHLC per symbol,
+--   read by EBP/Sweep for D-timeframe HTF bias.
+-- weekly_candle_cache: Watchdog-synthesized weekly OHLC per symbol,
+--   read by EBP/Sweep for W-timeframe HTF bias.
+-- watchdog_log:        Watchdog Worker's own event/error log
+--   (info/warning/error rows from logWatchdog()).
+-- sma_cloud_states:    created in the original IM-1 migration but
+--   currently unused/orphaned — no worker code reads or writes it.

@@ -285,7 +285,11 @@ async function getCandlesFromCache(symbol, tf, env) {
 
   const intervalMs = { M15: 15 * 60 * 1000, M30: 30 * 60 * 1000, '1H': 60 * 60 * 1000, '4H': 4 * 60 * 60 * 1000 };
   const age = Date.now() - new Date(row.fetched_at).getTime();
-  if (age > 2 * intervalMs[tf]) {
+  // 4H gets a tighter window (1.25x = 5h) than the 2x default — a 4H candle
+  // that's 2 intervals (8h) stale is far more likely to be a genuinely
+  // missed Watchdog fetch than the equivalent staleness on faster TFs.
+  const maxAge = tf === '4H' ? 1.25 * intervalMs['4H'] : 2 * intervalMs[tf];
+  if (age > maxAge) {
     console.warn(`Stale cache for ${symbol} ${tf}: ${age}ms old`);
     return null;
   }
@@ -415,6 +419,39 @@ async function sendTelegramMessage(botToken, chatId, text) {
   const data = await res.json();
   if (!data.ok) throw new Error(`Telegram: ${data.description}`);
   return data;
+}
+
+// P1 — alert dedup guard. One window per fired TF; same symbol+TF+direction+
+// alertType within that window is treated as a duplicate and skipped.
+const ALERT_INTERVAL_MS = {
+  M15: 15 * 60 * 1000,
+  M30: 30 * 60 * 1000,
+  '1H': 60 * 60 * 1000,
+  '4H': 4 * 60 * 60 * 1000,
+  D:   24 * 60 * 60 * 1000,
+  W:   7  * 24 * 60 * 60 * 1000,
+};
+
+// fired_at is stored as an INTEGER ms epoch (Date.now(), never
+// toISOString()) — the cutoff bound here must match that type, or SQLite's
+// NULL < INTEGER/REAL < TEXT affinity rule makes every comparison against
+// an INTEGER column silently false regardless of the TEXT value.
+async function isDuplicateAlert(db, userId, symbol, tf, direction, alertType) {
+  const windowMs = ALERT_INTERVAL_MS[tf] || 60 * 60 * 1000;
+  const cutoff = Date.now() - windowMs;
+
+  const existing = await db.prepare(`
+    SELECT id FROM alert_history
+    WHERE user_id = ?
+    AND symbol = ?
+    AND timeframe = ?
+    AND direction = ?
+    AND alert_type = ?
+    AND fired_at > ?
+    LIMIT 1
+  `).bind(userId, symbol, tf, direction, alertType, cutoff).first();
+
+  return existing !== null;
 }
 
 function fmtNY(ts) {
@@ -901,6 +938,12 @@ async function handleEBPCron(tf, env, debugLog = null) {
           ).bind(row.user_id).first();
           if (!tg?.chat_id) continue;
 
+          const isDup = await isDuplicateAlert(env.DB, row.user_id, symbol, tf, mssResult.direction, 'mss');
+          if (isDup) {
+            console.log(`[${symbol}] DEDUP: skipping duplicate ${tf} ${mssResult.direction} MSS alert`);
+            continue;
+          }
+
           const msg = formatMSSAlert(symbol, tf, mssResult, userHtfBias, getHTFBiasLabel(userBiasTF));
           await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, msg);
 
@@ -962,6 +1005,12 @@ async function handleEBPCron(tf, env, debugLog = null) {
           'SELECT chat_id FROM user_telegram WHERE user_id = ? AND verified = 1'
         ).bind(row.user_id).first();
         if (!tg?.chat_id) continue;
+
+        const isDup = await isDuplicateAlert(env.DB, row.user_id, symbol, tf, ebp.direction, 'ebp');
+        if (isDup) {
+          console.log(`[${symbol}] DEDUP: skipping duplicate ${tf} ${ebp.direction} EBP alert`);
+          continue;
+        }
 
         const msg = formatEBPAlert({
           symbol, tf,
