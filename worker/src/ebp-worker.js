@@ -191,16 +191,16 @@ async function loadBiasCache(db, symbol, biasTF) {
 
 // ── Phase 3 — T3 Chain State Machine ─────────────────────────
 
-async function initiateT3Chain(db, userId, assetId, symbol, direction, htfTf, ltf, windowMins) {
+async function initiateT3Chain(db, userId, assetId, symbol, direction, htfTf, ltf, windowMins, signalId) {
   const now = Date.now();
   await db.prepare(`
     INSERT INTO chain_state
-    (id,user_id,asset_id,symbol,template,direction,current_step,htf_tf,ltf,htf_signal_time,expires_at,created_at)
-    VALUES (?,?,?,?,?,?,2,?,?,?,?,?)
+    (id,user_id,asset_id,symbol,template,direction,current_step,htf_tf,ltf,htf_signal_time,expires_at,created_at,htf_signal_id)
+    VALUES (?,?,?,?,?,?,2,?,?,?,?,?,?)
   `).bind(
     crypto.randomUUID(), userId, assetId, symbol,
     't3', direction, htfTf, ltf, now,
-    now + (windowMins * 60 * 1000), now
+    now + (windowMins * 60 * 1000), now, signalId
   ).run();
 }
 
@@ -226,17 +226,24 @@ async function cleanupExpiredChains(db) {
   await db.prepare('DELETE FROM chain_state WHERE expires_at < ?').bind(Date.now()).run();
 }
 
-function formatT3Alert(symbol, direction, htfTf, ltfTf, htfBar, ltfBar, mssBar) {
-  const dir     = direction === 'bullish' ? '🟢 Bullish' : '🔴 Bearish';
-  const htfTime = new Date(htfBar.time).toUTCString().slice(5, 22);
-  const ltfTime = new Date(ltfBar.time).toUTCString().slice(5, 22);
-  const mssTime = new Date(mssBar.time).toUTCString().slice(5, 22);
+// IM-4/5 — shared format across ebp-worker.js and sweep-cron.js; the Signal
+// ID is assigned once at Step 1 (initiateT3Chain) and reused verbatim at
+// Steps 2 and 3 via chain_state.htf_signal_id. direction is always
+// 'bullish'/'bearish' throughout this codebase (detectEBP/detectSweep/
+// detectMSS), never 'bull'/'bear'.
+function formatT3Alert(symbol, htf, ltf, direction, session, price, signalId, step) {
+  const emoji    = direction === 'bullish' ? '🟢' : '🔴';
+  const dirLabel = direction === 'bullish' ? 'BULL' : 'BEAR';
+  const stepLabel = '/S' + step;
+
   return [
-    `⛓ T3 Chain Complete — ${symbol}`,
-    `Direction: ${dir}`,
-    `Step 1 — ${htfTf} EBP: ${htfTime}`,
-    `Step 2 — ${ltfTf} Sweep: ${ltfTime}`,
-    `Step 3 — ${ltfTf} MSS: ${mssTime}`,
+    '🎯 T3 Chain — ' + symbol,
+    'Step: S' + step + ' of 3',
+    'HTF: ' + htf + ' EBP → LTF: ' + ltf + ' Sweep → LTF: ' + ltf + ' MSS',
+    'Direction: ' + emoji + ' ' + dirLabel,
+    'Session: ' + session,
+    'Price: ' + price,
+    'Signal ID: ' + signalId + stepLabel
   ].join('\n');
 }
 
@@ -481,6 +488,26 @@ function detectEBP(candles) {
   };
 }
 
+// IM-3 — used by /sweep/dashboard (moved from Sweep Worker), which
+// re-runs detection live at request time against cached candles rather
+// than reading a precomputed sweep-state table.
+function detectSweep(candles) {
+  if (!candles || candles.length < 2) return null;
+  const bar0 = candles[0];
+  const bar1 = candles[1];
+  const bullSweep = bar0.low  < bar1.low  && bar0.close > bar1.low;
+  const bearSweep = bar0.high > bar1.high && bar0.close < bar1.high;
+  if (!bullSweep && !bearSweep) return null;
+  return {
+    direction:         bullSweep ? 'bullish' : 'bearish',
+    candleTime:        bar0.time,
+    sweptLevel:        bullSweep ? bar1.low   : bar1.high,
+    closedInsideLevel: bar0.close,
+    prevHigh:          bar1.high,
+    prevLow:           bar1.low,
+  };
+}
+
 // ============================================================
 // FVG Engine (Phase 1)
 // ============================================================
@@ -698,6 +725,32 @@ async function generateEbpSignalId(tf, symbol, env) {
   const normSymbol = symbol.replace('/', '').toUpperCase();
   const countStr   = count.toString().padStart(3, '0');
   return `EBP-${normSymbol}-${tf}${series}${countStr}`;
+}
+
+// IM-4 — T3 Signal IDs, ported verbatim from sweep-cron.js's generator so
+// both workers share the same global 'T3' signal_counters row (one counter
+// across all symbols, not per-symbol). Now called at chain initiation
+// (Step 1) instead of at MSS completion — the ID is carried through Steps
+// 2/3 via chain_state.htf_signal_id rather than regenerated.
+async function generateSignalId(db, template, symbol) {
+  const row = await db.prepare(
+    'SELECT series, count FROM signal_counters WHERE template = ?'
+  ).bind(template).first();
+
+  let { series, count } = row;
+  count += 1;
+  if (count > 999) {
+    series = String.fromCharCode(series.charCodeAt(0) + 1);
+    count = 1;
+  }
+
+  await db.prepare(
+    'UPDATE signal_counters SET series = ?, count = ? WHERE template = ?'
+  ).bind(series, count, template).run();
+
+  const normSymbol = symbol.replace('/', '').toUpperCase();
+  const countStr   = count.toString().padStart(3, '0');
+  return `${template}-${normSymbol}-${series}${countStr}`;
 }
 
 // EBP 4H/1D signals expire end of the current UTC month; 1W signals expire
@@ -933,15 +986,25 @@ async function handleEBPCron(tf, env, debugLog = null) {
           ebp.direction, effectiveBias, ebp.candleTime, Date.now()
         ).run();
 
-        // T3 chain initiation
+        // T3 chain initiation — Signal ID assigned here (Step 1) and
+        // carried through Steps 2/3 via chain_state.htf_signal_id (IM-4).
         const tmpl = await env.DB.prepare(
           `SELECT * FROM user_templates WHERE user_id=? AND asset_id=? AND template='t3' AND enabled=1 AND htf=?`
         ).bind(row.user_id, row.asset_id, tf).first();
         if (tmpl) {
+          const t3SignalId = await generateSignalId(env.DB, 'T3', symbol);
           await initiateT3Chain(
             env.DB, row.user_id, row.asset_id, symbol,
-            ebp.direction, tf, tmpl.ltf, tmpl.window_mins
+            ebp.direction, tf, tmpl.ltf, tmpl.window_mins, t3SignalId
           );
+
+          const t3FiredAt = new Date().toISOString();
+          const t3Msg = formatT3Alert(
+            symbol, tf, tmpl.ltf, ebp.direction,
+            deriveSession(t3FiredAt), ebp.closedLevel ?? null,
+            t3SignalId, 1
+          );
+          await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, t3Msg);
         }
       }
 
@@ -2210,6 +2273,52 @@ router.get('/invite/:token', async (req, env) => {
   ).bind(params.token).first();
   if (!record) return json({ valid: false, error: 'Invalid or already used token' }, 400, origin);
   return json({ valid: true, token: params.token }, 200, origin);
+});
+
+// ── Sweep (moved from Sweep Worker — IM-3) ────────────────────
+
+router.get('/sweep/dashboard', async (req, env) => {
+  const { user: clerkUser, origin, error } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+
+  const assets = await env.DB.prepare(`
+    SELECT ua.id as asset_id, ua.symbol
+    FROM user_assets ua
+    WHERE ua.user_id = ?
+  `).bind(clerkUser.id).all();
+
+  const result = [];
+  for (const asset of (assets.results ?? [])) {
+    const { results: configs } = await env.DB.prepare(
+      'SELECT timeframe FROM user_sweep_configs WHERE asset_id = ? AND enabled = 1'
+    ).bind(asset.asset_id).all();
+    const tfs    = (configs ?? []).map(c => c.timeframe);
+    const status = {};
+
+    for (const tf of tfs) {
+      const candles = await getCandlesFromCache(asset.symbol, tf, env);
+      status[tf] = (candles && candles.length >= 2) ? (detectSweep(candles)?.direction ?? 'none') : 'none';
+    }
+
+    result.push({ symbol: asset.symbol, sweepStatus: status });
+  }
+
+  return json(result, 200, origin);
+});
+
+router.get('/sweep/history', async (req, env) => {
+  const { user: clerkUser, origin, error } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+
+  const url    = new URL(req.url);
+  const limit  = parseInt(url.searchParams.get('limit') ?? '50');
+  const alerts = await env.DB.prepare(`
+    SELECT * FROM alert_history
+    WHERE user_id = ? AND alert_type = 'sweep'
+    ORDER BY fired_at DESC LIMIT ?
+  `).bind(clerkUser.id, limit).all();
+
+  return json(alerts.results ?? [], 200, origin);
 });
 
 // ============================================================

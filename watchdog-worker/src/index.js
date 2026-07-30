@@ -42,15 +42,26 @@ const MAJOR_PAIRS = [
 ];
 const BREADTH_SYMBOLS = MAJOR_PAIRS.map(([pair]) => pair);
 
+// Only symbols with at least one enabled EBP or Sweep config — narrower
+// than "everything in user_assets," which was spending Twelve Data quota
+// on tracked-but-not-actually-alerted-on assets.
 async function getSignalSymbols(db) {
-  const { results } = await db.prepare(
-    `SELECT DISTINCT symbol FROM user_assets WHERE asset_type IN ('forex','crypto','commodity')`
-  ).all();
+  const { results } = await db.prepare(`
+    SELECT DISTINCT ua.symbol
+    FROM user_assets ua
+    WHERE ua.asset_type IN ('forex','crypto','commodity')
+    AND (
+      EXISTS (
+        SELECT 1 FROM user_ebp_configs ec
+        WHERE ec.asset_id = ua.id AND ec.enabled = 1
+      )
+      OR EXISTS (
+        SELECT 1 FROM user_sweep_configs sc
+        WHERE sc.asset_id = ua.id AND sc.enabled = 1
+      )
+    )
+  `).all();
   return (results ?? []).map(r => r.symbol);
-}
-
-function dedupeSymbols(arr) {
-  return [...new Set(arr)];
 }
 
 // ============================================================
@@ -164,6 +175,32 @@ async function getActiveTwelveDataKey(db) {
   return null; // all keys exhausted (or none configured) — fall through to Yahoo
 }
 
+// Full list of usable keys for chunk assignment (as opposed to
+// getActiveTwelveDataKey, which just answers "is there at least one?").
+// key_name is aliased from ak.id, NOT ak.label — api_key_state.key_name is
+// always a foreign key to api_keys.id everywhere else in this file; label
+// is only the human-readable "Twelve Data Key N" string, kept here
+// separately for log messages.
+async function getActiveKeys(db) {
+  await resetExhaustedKeys(db);
+
+  const { results } = await db.prepare(`
+    SELECT ak.id as key_name, ak.label, ak.key_value
+    FROM api_keys ak
+    LEFT JOIN api_key_state aks ON ak.id = aks.key_name
+    WHERE ak.enabled = 1
+    AND ak.source = 'twelvedata'
+    AND (aks.exhausted IS NULL OR aks.exhausted = 0)
+    ORDER BY ak.label ASC
+  `).all();
+
+  const keys = results ?? [];
+  if (!keys.length) {
+    await logWatchdog(db, 'error', 'No active Twelve Data keys available');
+  }
+  return keys;
+}
+
 async function markKeyExhausted(db, keyName) {
   const now = Date.now();
   await db.prepare(
@@ -257,6 +294,13 @@ async function yieldToRuntime() {
   return new Promise(resolve => setTimeout(resolve, 0));
 }
 
+// Real wall-clock gap between signal TF fetches (65s) so consecutive
+// Twelve Data calls land in different per-minute rate-limit windows. I/O
+// wait, not active JS execution — doesn't consume CPU time on Workers.
+async function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // ============================================================
 // watchdog_log — only failures get logged; successful writes
 // are not (too verbose for a 15-min cron × dozens of symbols).
@@ -272,71 +316,60 @@ async function logWatchdog(db, eventType, message) {
 }
 
 // ============================================================
-// Twelve Data batch fetch — one HTTP call for all symbols on a TF.
-// Returns Map<symbol, candle[]>. A symbol with no usable data is
-// simply absent from the map — failure on one symbol never aborts
-// the others.
+// Twelve Data signal-symbol fetch — the (small) signal-symbol pool is
+// split into chunks of 7, each chunk fired in parallel on its own key
+// (breadth no longer goes through Twelve Data at all — see
+// fetchBreadthFromYahoo). A 429 here is a per-minute rate limit on that
+// specific key, not daily-credit exhaustion, so it's just logged and that
+// chunk is skipped this cycle (not marked exhausted — it'll be fine again
+// well before the next tick).
 // ============================================================
-async function fetchCandlesBatch(symbols, tf, env) {
+const CHUNK_SIZE = 7;
+
+async function fetchChunkWithKey(chunk, tf, key, env) {
   const resultMap = new Map();
-  if (!symbols.length) return resultMap;
+  const interval  = TF_TO_INTERVAL[tf];
+  const joined    = chunk.join(',');
+  const url       = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(joined)}&interval=${interval}&outputsize=50&timezone=America/New_York&order=DESC&apikey=${key.key_value}`;
 
-  const interval = TF_TO_INTERVAL[tf];
-  const joined   = symbols.join(',');
+  try {
+    const res = await fetch(url);
 
-  const maxAttempts = 5; // safety cap — more than the realistic key count
-  let batchData = null;
-  let allKeysExhausted = false;
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const active = await getActiveTwelveDataKey(env.DB);
-    if (!active) { allKeysExhausted = true; break; }
-
-    await ensureKeyStateRow(env.DB, active.keyName);
-
-    const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(joined)}&interval=${interval}&outputsize=50&order=DESC&timezone=America/New_York&apikey=${active.apiKey}`;
-
-    try {
-      const res = await fetch(url);
-      if (!res.ok) {
-        await logWatchdog(env.DB, 'error', `Twelve Data HTTP ${res.status} for batch ${tf} (${symbols.length} symbols) on ${active.label}`);
-        return resultMap;
-      }
-
-      const data = await res.json();
-      // Single-symbol batches come back as a bare {values:[...]} object
-      // instead of keyed-by-symbol — normalise so downstream logic is uniform.
-      const bySymbol = symbols.length === 1 ? { [symbols[0]]: data } : data;
-
-      const entries = Object.values(bySymbol);
-      const keyExhausted = entries.length > 0 && entries.every(v => isTwelveDataExhausted(v));
-      if (keyExhausted) {
-        await markKeyExhausted(env.DB, active.keyName);
-        continue; // rotate to next key, retry the whole batch
-      }
-
-      // Proactive exhaustion — Twelve Data reports remaining daily credits
-      // in a response header; mark the key exhausted the moment it hits 0
-      // instead of waiting for the next call to come back 429.
-      const creditsLeft = res.headers.get('api-credits-left');
-      if (creditsLeft !== null && parseInt(creditsLeft, 10) === 0) {
-        await markKeyExhausted(env.DB, active.keyName);
-      }
-
-      await incrementKeyCallCount(env.DB, active.keyName);
-      await logApiCall(env.DB, active.keyName, `batch:${symbols.length}`, tf, 1);
-      batchData = bySymbol;
-      break;
-
-    } catch (e) {
-      await logWatchdog(env.DB, 'error', `Twelve Data fetch error batch ${tf}: ${e.message}`);
+    if (res.status === 429) {
+      await logWatchdog(env.DB, 'warning', `TF=${tf} key=${key.key_name} chunk=${chunk.join(',')} got 429 — skipped`);
       return resultMap;
     }
-  }
+    if (!res.ok) {
+      await logWatchdog(env.DB, 'error', `TF=${tf} key=${key.key_name} chunk=${chunk.join(',')} got HTTP ${res.status} — skipped`);
+      return resultMap;
+    }
 
-  if (batchData) {
-    for (const symbol of symbols) {
-      const entry = batchData[symbol];
+    const data = await res.json();
+    // Single-symbol chunks come back as a bare {values:[...]} object
+    // instead of keyed-by-symbol — normalise so downstream logic is uniform.
+    const bySymbol = chunk.length === 1 ? { [chunk[0]]: data } : data;
+
+    const entries = Object.values(bySymbol);
+    if (entries.length > 0 && entries.every(v => isTwelveDataExhausted(v))) {
+      await markKeyExhausted(env.DB, key.key_name);
+      await logWatchdog(env.DB, 'error', `${key.label} exhausted (daily credits) for chunk ${tf}`);
+      return resultMap;
+    }
+
+    await ensureKeyStateRow(env.DB, key.key_name);
+    await incrementKeyCallCount(env.DB, key.key_name);
+    await logApiCall(env.DB, key.key_name, `chunk:${chunk.length}`, tf, 1);
+
+    // Proactive exhaustion — Twelve Data reports remaining daily credits in
+    // a response header; mark the key exhausted the moment it hits 0
+    // instead of waiting for the next call to come back 429.
+    const creditsLeft = res.headers.get('api-credits-left');
+    if (creditsLeft !== null && parseInt(creditsLeft, 10) === 0) {
+      await markKeyExhausted(env.DB, key.key_name);
+    }
+
+    for (const symbol of chunk) {
+      const entry = bySymbol[symbol];
       if (!entry || entry.status === 'error' || !entry.values) {
         await logWatchdog(env.DB, 'warning', `${symbol} ${tf}: Twelve Data symbol error — ${entry?.message ?? 'no data'}`);
         continue;
@@ -350,21 +383,46 @@ async function fetchCandlesBatch(symbols, tf, env) {
       }));
       resultMap.set(symbol, getClosedCandles(raw, INTERVAL_MS[tf]));
     }
-    return resultMap;
+
+  } catch (e) {
+    await logWatchdog(env.DB, 'error', `TF=${tf} key=${key.key_name} chunk fetch error: ${e.message}`);
   }
 
-  if (allKeysExhausted) {
-    await logWatchdog(env.DB, 'error', `All Twelve Data keys exhausted — falling back to Yahoo for batch ${tf} (${symbols.length} symbols)`);
-    for (const symbol of symbols) {
-      try {
-        const raw    = await fetchYahooFinance(symbol, tf, 50);
-        const closed = getClosedCandles(raw, INTERVAL_MS[tf]);
-        resultMap.set(symbol, closed);
-        await logApiCall(env.DB, 'yahoo', symbol, tf, 1);
-      } catch (e) {
-        await logWatchdog(env.DB, 'error', `Symbol fetch failure ${symbol} ${tf}: Yahoo fallback also failed — ${e.message}`);
-      }
-      await yieldToRuntime();
+  return resultMap;
+}
+
+// Splits signal symbols into chunks of 7, assigns one key per chunk
+// (round-robin — in practice chunks.length never exceeds keys.length once
+// the truncation below applies, so this always resolves to chunk i → key
+// i), fires them all in parallel, merges the results. Only logs when
+// chunks get dropped for lack of keys — per-chunk assignment on the
+// success path is deliberately not logged, matching this file's existing
+// "only failures get logged" convention for watchdog_log.
+async function fetchSignalTF(symbols, tf, keys, env) {
+  const resultMap = new Map();
+  if (!symbols.length || !keys.length) return resultMap;
+
+  const chunks = [];
+  for (let i = 0; i < symbols.length; i += CHUNK_SIZE) {
+    chunks.push(symbols.slice(i, i + CHUNK_SIZE));
+  }
+
+  let assignedChunks = chunks;
+  if (chunks.length > keys.length) {
+    const skipped        = chunks.slice(keys.length);
+    const skippedSymbols = skipped.flat();
+    await logWatchdog(env.DB, 'warning',
+      `TF=${tf} has ${chunks.length} chunks but only ${keys.length} keys — ${skipped.length} chunks skipped. Skipped symbols: ${skippedSymbols.join(',')}`);
+    assignedChunks = chunks.slice(0, keys.length);
+  }
+
+  const chunkResults = await Promise.all(
+    assignedChunks.map((chunk, i) => fetchChunkWithKey(chunk, tf, keys[i % keys.length], env))
+  );
+
+  for (const chunkMap of chunkResults) {
+    for (const [symbol, candles] of chunkMap) {
+      resultMap.set(symbol, candles);
     }
   }
 
@@ -381,15 +439,38 @@ async function writeCandleCache(db, symbol, tf, candles) {
   `).bind(symbol, tf, JSON.stringify(candles), new Date().toISOString()).run();
 }
 
-// Fetches one TF for a symbol list, then writes each valid result to D1.
-// Sequential with a yield between symbols — no Promise.all().
-async function fetchAndStore(symbols, tf, env) {
+// Fetches one TF for the signal-symbol pool via the parallel chunk
+// architecture, falling back to Yahoo per-symbol if every Twelve Data key
+// is exhausted (checked fresh via getActiveTwelveDataKey, not the possibly
+// stale `keys` list loaded once at the top of runWatchdog — a key can
+// become exhausted mid-tick between TFs in the stagger sequence). Signal
+// symbols always get real candle data one way or another; only the
+// source varies. Writes each valid result to D1.
+async function fetchSignalAndStore(symbols, tf, keys, env) {
   if (!symbols.length) return;
 
-  const batch = await fetchCandlesBatch(symbols, tf, env);
+  let resultMap;
+  const active = await getActiveTwelveDataKey(env.DB);
+  if (!active) {
+    resultMap = new Map();
+    await logWatchdog(env.DB, 'error', `All Twelve Data keys exhausted — falling back to Yahoo for ${tf} (${symbols.length} signal symbols)`);
+    for (const symbol of symbols) {
+      try {
+        const raw    = await fetchYahooFinance(symbol, tf, 50);
+        const closed = getClosedCandles(raw, INTERVAL_MS[tf]);
+        resultMap.set(symbol, closed);
+        await logApiCall(env.DB, 'yahoo', symbol, tf, 1);
+      } catch (e) {
+        await logWatchdog(env.DB, 'error', `Symbol fetch failure ${symbol} ${tf}: Yahoo fallback also failed — ${e.message}`);
+      }
+      await yieldToRuntime();
+    }
+  } else {
+    resultMap = await fetchSignalTF(symbols, tf, keys, env);
+  }
 
   for (const symbol of symbols) {
-    const candles = batch.get(symbol);
+    const candles = resultMap.get(symbol);
     if (candles && candles.length >= 20) {
       await writeCandleCache(env.DB, symbol, tf, candles);
     } else if (candles) {
@@ -397,6 +478,30 @@ async function fetchAndStore(symbols, tf, env) {
     }
     await yieldToRuntime();
   }
+}
+
+// Breadth is Yahoo-only now — sequential per-symbol, no per-key credit
+// concept to manage. Reuses fetchYahooFinance (symbol translation,
+// interval/range mapping, unix-seconds→ms, forming-candle exclusion)
+// rather than re-implementing the same parsing a second time.
+async function fetchBreadthFromYahoo(symbols, env) {
+  let successCount = 0;
+  for (const symbol of symbols) {
+    try {
+      const raw    = await fetchYahooFinance(symbol, '1H', 50);
+      const closed = getClosedCandles(raw, INTERVAL_MS['1H']);
+      if (closed.length >= 20) {
+        await writeCandleCache(env.DB, symbol, '1H', closed);
+        successCount++;
+      } else {
+        await logWatchdog(env.DB, 'warning', `${symbol} 1H (breadth): only ${closed.length} closed candles (<20) — skipping D1 write`);
+      }
+    } catch (e) {
+      await logWatchdog(env.DB, 'error', `Breadth fetch failed for ${symbol}: ${e.message}`);
+    }
+    await yieldToRuntime();
+  }
+  await logWatchdog(env.DB, 'info', `Breadth fetch complete: ${successCount}/${symbols.length} symbols written`);
 }
 
 // ============================================================
@@ -414,6 +519,44 @@ function nyDateAndHour(ms) {
   let hour = parseInt(map.hour, 10);
   if (hour === 24) hour = 0;
   return { date: `${map.year}-${map.month}-${map.day}`, hour };
+}
+
+// Manual DST calculation for the 4H cron boundary check (getNewYorkHour)
+// and the Friday weekly-synthesis gate (getNewYorkDay) — matches the same
+// "2nd Sunday of March / 1st Sunday of November" pattern already used in
+// worker/src/ebp-worker.js's deriveSession(), kept consistent rather than
+// substituted for the more precise Intl-based nyDateAndHour above. Note:
+// comparing against midnight UTC of the transition date (rather than the
+// actual 2am-local transition instant) means there's a ~6-7 hour window on
+// the two transition days each year where this is off by one hour — an
+// accepted, pre-existing tradeoff shared with deriveSession(), not new
+// here.
+function getNYOffset(utcMs) {
+  const date = new Date(utcMs);
+  const year = date.getUTCFullYear();
+
+  // DST start: second Sunday of March
+  const marchDate = new Date(Date.UTC(year, 2, 1));
+  const marchDay  = marchDate.getUTCDay();
+  const dstStart  = new Date(Date.UTC(year, 2, marchDay === 0 ? 8 : 15 - marchDay));
+
+  // DST end: first Sunday of November
+  const novDate = new Date(Date.UTC(year, 10, 1));
+  const novDay  = novDate.getUTCDay();
+  const dstEnd  = new Date(Date.UTC(year, 10, novDay === 0 ? 1 : 8 - novDay));
+
+  const isEDT = date >= dstStart && date < dstEnd;
+  return isEDT ? -4 : -5;
+}
+
+function getNewYorkHour(utcMs) {
+  const nyMs = utcMs + (getNYOffset(utcMs) * 60 * 60 * 1000);
+  return new Date(nyMs).getUTCHours();
+}
+
+function getNewYorkDay(utcMs) {
+  const nyMs = utcMs + (getNYOffset(utcMs) * 60 * 60 * 1000);
+  return new Date(nyMs).getUTCDay();
 }
 
 function addDaysToDateStr(dateStr, days) {
@@ -547,37 +690,58 @@ async function attemptWeeklySynthesis(symbols, env) {
 // Cron-gated orchestration
 // ============================================================
 async function runWatchdog(event, env) {
-  const now    = new Date(event.scheduledTime);
-  const minute = now.getUTCMinutes();
-  const hour   = now.getUTCHours();
+  const db     = env.DB;
+  const minute = new Date(event.scheduledTime).getUTCMinutes();
+  const nyHour = getNewYorkHour(event.scheduledTime);
+  const nyDay  = getNewYorkDay(event.scheduledTime);
 
-  const signalSymbols = dedupeSymbols(await getSignalSymbols(env.DB));
-  if (!signalSymbols.length) {
-    await logWatchdog(env.DB, 'warning', 'No signal symbols found in user_assets (forex/crypto/commodity)');
+  // Forex 4H candles align to the NY trading-day boundary (17:00 NY — same
+  // anchor daily synthesis uses), not a fixed UTC schedule. This set of NY
+  // hours maps to a different set of UTC hours depending on EDT/EST —
+  // that's intentional, not a bug: the goal is 6 fires per NY day, not 6
+  // fires per UTC day.
+  const NY_4H_BOUNDARIES = [17, 21, 1, 5, 9, 13];
+
+  const signalSymbols = await getSignalSymbols(db);
+  const keys = await getActiveKeys(db); // also logs if empty
+
+  const tfsToFetch = ['M15'];
+  if (minute % 30 === 0) tfsToFetch.push('M30');
+  if (minute === 0) tfsToFetch.push('1H');
+  if (minute === 0 && NY_4H_BOUNDARIES.includes(nyHour)) {
+    tfsToFetch.push('4H');
   }
-  const allSymbols = dedupeSymbols([...signalSymbols, ...BREADTH_SYMBOLS]);
 
-  // Always: M15 for tracked (signal) symbols only — breadth doesn't need M15.
-  await fetchAndStore(signalSymbols, 'M15', env);
+  // Only the signal TF-fetch loop is skipped when there's no signal pool —
+  // breadth (Yahoo, unrelated to user_assets/configs) and the hourly tasks
+  // below always run on schedule regardless.
+  if (!signalSymbols.length) {
+    await logWatchdog(db, 'warning', 'No active signal symbols found — skipping signal fetch this tick');
+  } else {
+    for (let i = 0; i < tfsToFetch.length; i++) {
+      await fetchSignalAndStore(signalSymbols, tfsToFetch[i], keys, env);
+      if (i < tfsToFetch.length - 1) {
+        await sleep(65000);
+      }
+    }
+  }
 
   if (minute === 0) {
-    // 1H covers everything — signal symbols + breadth pairs, deduped.
-    await fetchAndStore(allSymbols, '1H', env);
+    // Breadth from Yahoo — runs after signal fetches, no credit limits to
+    // worry about, just yieldToRuntime() between symbols.
+    await fetchBreadthFromYahoo(BREADTH_SYMBOLS, env);
 
-    await attemptDailySynthesis(allSymbols, env);
-    if (now.getUTCDay() === 5) {
-      await attemptWeeklySynthesis(allSymbols, env);
+    // Daily/weekly synthesis only makes sense for signal symbols — nothing
+    // reads daily_candle_cache/weekly_candle_cache for breadth pairs
+    // (Market Breadth reads candle_cache 1H directly), so there's no
+    // reason to spend D1 work synthesising them.
+    await attemptDailySynthesis(signalSymbols, env);
+
+    await cleanupApiCallLog(db);
+
+    if (nyDay === 5 && nyHour === 17) {
+      await attemptWeeklySynthesis(signalSymbols, env);
     }
-
-    await cleanupApiCallLog(env.DB);
-  }
-
-  if (minute % 30 === 0) {
-    await fetchAndStore(signalSymbols, 'M30', env);
-  }
-
-  if (hour % 4 === 0 && minute === 0) {
-    await fetchAndStore(signalSymbols, '4H', env);
   }
 }
 

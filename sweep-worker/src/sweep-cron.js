@@ -142,40 +142,27 @@ async function cleanupExpiredChains(db) {
   await db.prepare('DELETE FROM chain_state WHERE expires_at < ?').bind(Date.now()).run();
 }
 
-// ── Phase I — Signal IDs (per-template global counter, A001→Z999) ──
-async function generateSignalId(db, template, symbol) {
-  const row = await db.prepare(
-    'SELECT series, count FROM signal_counters WHERE template = ?'
-  ).bind(template).first();
+// IM-4/5 — Signal ID is now assigned once at chain initiation (Step 1, in
+// ebp-worker.js) and carried through Steps 2/3 via chain_state.htf_signal_id
+// (SELECT * already pulls it into `chain` at both call sites below), so the
+// per-template counter generator that used to run here at MSS completion is
+// gone — reusing the existing ID, never regenerating it.
+//
+// Shared format across ebp-worker.js and sweep-cron.js. direction is always
+// 'bullish'/'bearish' throughout this codebase, never 'bull'/'bear'.
+function formatT3Alert(symbol, htf, ltf, direction, session, price, signalId, step) {
+  const emoji    = direction === 'bullish' ? '🟢' : '🔴';
+  const dirLabel = direction === 'bullish' ? 'BULL' : 'BEAR';
+  const stepLabel = '/S' + step;
 
-  let { series, count } = row;
-  count += 1;
-  if (count > 999) {
-    series = String.fromCharCode(series.charCodeAt(0) + 1);
-    count = 1;
-  }
-
-  await db.prepare(
-    'UPDATE signal_counters SET series = ?, count = ? WHERE template = ?'
-  ).bind(series, count, template).run();
-
-  const normSymbol = symbol.replace('/', '').toUpperCase();
-  const countStr   = count.toString().padStart(3, '0');
-  return `${template}-${normSymbol}-${series}${countStr}`;
-}
-
-function formatT3Alert(symbol, direction, htfTf, ltfTf, htfBar, ltfBar, mssBar, signalId) {
-  const dir     = direction === 'bullish' ? '🟢 Bullish' : '🔴 Bearish';
-  const htfTime = new Date(htfBar.time).toUTCString().slice(5, 22);
-  const ltfTime = new Date(ltfBar.time).toUTCString().slice(5, 22);
-  const mssTime = new Date(mssBar.time).toUTCString().slice(5, 22);
   return [
-    `⛓ T3 Chain Complete — ${symbol}`,
-    `Direction: ${dir}`,
-    `Step 1 — ${htfTf} EBP: ${htfTime}`,
-    `Step 2 — ${ltfTf} Sweep: ${ltfTime}`,
-    `Step 3 — ${ltfTf} MSS: ${mssTime}`,
-    `🔗 Signal ID: ${signalId}`,
+    '🎯 T3 Chain — ' + symbol,
+    'Step: S' + step + ' of 3',
+    'HTF: ' + htf + ' EBP → LTF: ' + ltf + ' Sweep → LTF: ' + ltf + ' MSS',
+    'Direction: ' + emoji + ' ' + dirLabel,
+    'Session: ' + session,
+    'Price: ' + price,
+    'Signal ID: ' + signalId + stepLabel
   ].join('\n');
 }
 
@@ -664,7 +651,10 @@ export async function handleSweepCron(tf, env, debugLog = null) {
             for (const chain of mssChains) {
               if (chain.ltf !== tf) continue;
 
-              const signalId = await generateSignalId(env.DB, 'T3', symbol);
+              // Signal ID was assigned at Step 1 (chain initiation in
+              // ebp-worker.js) and carried on chain_state.htf_signal_id —
+              // reuse it, do not generate a new one (IM-4).
+              const signalId = chain.htf_signal_id;
               const firedAt  = new Date().toISOString();
               // price_at_signal: detectMSS() returns {direction, level, candle_time} —
               // no close field — so the actual MSS-triggering candle's close comes
@@ -690,12 +680,9 @@ export async function handleSweepCron(tf, env, debugLog = null) {
               ).run();
 
               const t3Msg = formatT3Alert(
-                symbol, mssResult.direction,
-                chain.htf_tf, tf,
-                { time: chain.htf_signal_time },
-                { time: chain.ltf_sweep_time },
-                { time: mssResult.candle_time },
-                signalId
+                symbol, chain.htf_tf, tf, mssResult.direction,
+                deriveSession(firedAt), candles[0].close ?? null,
+                signalId, 3
               );
               await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, t3Msg);
               await env.DB.prepare(`
@@ -780,6 +767,13 @@ export async function handleSweepCron(tf, env, debugLog = null) {
         for (const chain of sweepChains) {
           if (chain.ltf !== tf) continue;
           await advanceT3Chain(env.DB, chain.id, sweep.candleTime);
+
+          const step2Msg = formatT3Alert(
+            symbol, chain.htf_tf, tf, sweep.direction,
+            deriveSession(new Date().toISOString()), sweep.closedInsideLevel ?? null,
+            chain.htf_signal_id, 2
+          );
+          await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, step2Msg);
         }
       }
 

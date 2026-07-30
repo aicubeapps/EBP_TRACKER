@@ -176,6 +176,11 @@ CREATE TABLE IF NOT EXISTS chain_state (
 );
 CREATE INDEX IF NOT EXISTS idx_chain_state_lookup ON chain_state(user_id, symbol, template, current_step, expires_at);
 
+-- Migration (post-deploy): ALTER TABLE chain_state
+-- ADD COLUMN htf_signal_id TEXT;
+-- Added for IM-4: T3 Signal ID assigned at Step 1
+-- and carried through Steps 2 and 3 via this column.
+
 -- D1 Console commands (run once on live DB):
 -- ALTER TABLE user_assets ADD COLUMN bias_overrides TEXT DEFAULT '{}';
 -- UPDATE user_assets SET combined_enabled=0;
