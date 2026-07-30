@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  Legend, ResponsiveContainer,
+  LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
+  Legend, ResponsiveContainer, ReferenceLine, Cell, LabelList,
 } from 'recharts';
 import api from '../lib/api';
 
@@ -12,11 +12,6 @@ const CCY_COLORS = {
   EUR: '#3b82f6', GBP: '#8b5cf6', USD: '#10b981', JPY: '#f59e0b',
   CHF: '#ef4444', CAD: '#f97316', AUD: '#ec4899', NZD: '#06b6d4',
 };
-
-function fmtPct(v) {
-  if (v == null || isNaN(v)) return '—';
-  return (v >= 0 ? '+' : '') + v.toFixed(3) + '%';
-}
 
 function fmtScore(v) {
   if (v == null || isNaN(v)) return '—';
@@ -29,15 +24,36 @@ function fmtTime(ts) {
   }) + ' UTC';
 }
 
-// ── Heatmap cell background ──────────────────────────────────────
+function getNYOffset(epochMs) {
+  const date = new Date(epochMs);
+  const year = date.getUTCFullYear();
+  const marchDate = new Date(Date.UTC(year, 2, 1));
+  const marchDay = marchDate.getUTCDay();
+  const dstStart = new Date(Date.UTC(year, 2, marchDay === 0 ? 8 : 15 - marchDay));
+  const novDate = new Date(Date.UTC(year, 10, 1));
+  const novDay = novDate.getUTCDay();
+  const dstEnd = new Date(Date.UTC(year, 10, novDay === 0 ? 1 : 8 - novDay));
+  return (date >= dstStart && date < dstEnd) ? -4 : -5;
+}
 
-function cellStyle(pct) {
-  if (pct == null) return {};
-  const abs = Math.min(Math.abs(pct), 0.5);
-  const alpha = (abs / 0.5) * 0.55 + 0.05;
-  return pct >= 0
-    ? { background: `rgba(16,185,129,${alpha})`, color: pct > 0.1 ? '#065f46' : 'inherit' }
-    : { background: `rgba(239,68,68,${alpha})`,  color: pct < -0.1 ? '#7f1d1d' : 'inherit' };
+function toNYMs(epochMs) {
+  return epochMs + getNYOffset(epochMs) * 3600000;
+}
+
+function getCurrentSessionStart() {
+  const nowNY = toNYMs(Date.now());
+  const nyDate = new Date(nowNY);
+  let sessionStart = new Date(Date.UTC(
+    nyDate.getUTCFullYear(),
+    nyDate.getUTCMonth(),
+    nyDate.getUTCDate(),
+    17, 0, 0, 0
+  ));
+  if (nyDate.getUTCHours() < 17) {
+    sessionStart = new Date(sessionStart.getTime() - 24 * 3600000);
+  }
+  const offset = getNYOffset(sessionStart.getTime());
+  return sessionStart.getTime() - offset * 3600000;
 }
 
 // ── Correlation cell background ──────────────────────────────────
@@ -49,24 +65,6 @@ function corrStyle(r, isDiag) {
   return r > 0
     ? { background: `rgba(16,185,129,${alpha})` }
     : { background: `rgba(239,68,68,${alpha})` };
-}
-
-// ── Strength bar ─────────────────────────────────────────────────
-
-function StrengthBar({ value, max }) {
-  const pct = max > 0 ? (Math.abs(value) / max) * 100 : 0;
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 120 }}>
-      <div style={{
-        width: `${pct}%`, minWidth: 3, maxWidth: 80, height: 6, borderRadius: 3,
-        background: value >= 0 ? 'var(--bull)' : 'var(--bear)',
-        transition: 'width .3s',
-      }} />
-      <span style={{ color: value >= 0 ? 'var(--bull)' : 'var(--bear)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-        {fmtScore(value)}
-      </span>
-    </div>
-  );
 }
 
 export default function MarketBreathPage() {
@@ -98,17 +96,64 @@ export default function MarketBreathPage() {
   if (error)   return <div className="shell"><p style={{ color: 'var(--bear)' }}>{error}</p></div>;
   if (!data)   return null;
 
-  const { strength, heatmap, intraday, correlation, computed_at } = data;
+  const { intraday, correlation, computed_at } = data;
 
-  // Sort currencies by strength descending
-  const ranked = [...CURRENCIES].sort((a, b) => (strength[b] ?? 0) - (strength[a] ?? 0));
-  const maxAbs  = Math.max(...CURRENCIES.map(c => Math.abs(strength[c] ?? 0)), 0.0001);
+  // ── Session boundary ─────────────────────────────────────────────
+  const sessionStart = getCurrentSessionStart();
 
-  // Prepare intraday chart data
-  const chartData = (intraday ?? []).map(row => {
-    const s = typeof row.strength === 'string' ? JSON.parse(row.strength) : row.strength;
-    return { time: fmtTime(row.t), ...s };
-  });
+  const sessionSnapshots = (intraday ?? [])
+    .filter(s => s.t >= sessionStart)
+    .sort((a, b) => a.t - b.t);
+
+  // ── Chart 1: latest session snapshot → single CCY_COLORS bar ────
+  const latestSessionSnap = sessionSnapshots[sessionSnapshots.length - 1] ?? null;
+
+  const intradayChartData = latestSessionSnap
+    ? Object.entries(latestSessionSnap.strength)
+        .sort((a, b) => b[1] - a[1])
+        .map(([currency, value]) => ({
+          currency,
+          value: parseFloat(value.toFixed(4)),
+        }))
+    : [];
+
+  // ── Chart 2: today's latest vs yesterday's last snapshot ─────────
+  const todayStrength = intraday && intraday.length > 0
+    ? intraday[intraday.length - 1].strength
+    : null;
+
+  const yesterdaySnapshot = (intraday ?? [])
+    .filter(s => s.t < sessionStart)
+    .sort((a, b) => b.t - a.t)[0] ?? null;
+
+  const yesterdayStrength = yesterdaySnapshot ? yesterdaySnapshot.strength : null;
+
+  const dailyChartData = todayStrength
+    ? [...CURRENCIES]
+        .sort((a, b) => (todayStrength[b] ?? 0) - (todayStrength[a] ?? 0))
+        .map(c => ({
+          currency: c,
+          today: todayStrength[c] ?? 0,
+          yesterday: yesterdayStrength ? (yesterdayStrength[c] ?? 0) : null,
+          delta: yesterdayStrength != null
+            ? parseFloat(((todayStrength[c] ?? 0) - (yesterdayStrength[c] ?? 0)).toFixed(4))
+            : null,
+        }))
+    : [];
+
+  // ── Line chart (48h history) ──────────────────────────────────────
+  const lineChartData = (intraday ?? []).map(row => ({
+    time: fmtTime(row.t),
+    ...row.strength,
+  }));
+
+  const cardStyle = {
+    background: 'var(--surface)',
+    border: '1px solid var(--border)',
+    borderRadius: 8,
+    padding: '1.5rem',
+    marginBottom: '1.5rem',
+  };
 
   return (
     <div className="shell-wide">
@@ -128,89 +173,220 @@ export default function MarketBreathPage() {
         </button>
       </div>
 
-      {/* ── Strength ranking ──────────────────────────────────── */}
-      <section className="card" style={{ marginBottom: 16 }}>
-        <div className="card-header">
-          <span className="card-title">Currency Strength</span>
-          <span className="text-mono text-muted" style={{ fontSize: 11 }}>avg % change vs 7 counterparts</span>
+      {/* ── Chart 1: Intraday Strength ────────────────────────────── */}
+      <section style={cardStyle}>
+        <div style={{ fontWeight: 600, fontSize: '1rem', color: 'var(--ink)', marginBottom: '0.25rem' }}>
+          Intraday Strength
         </div>
-        <div style={{ overflowX: 'auto' }}>
-          <table className="alert-table" style={{ minWidth: 480 }}>
-            <thead>
-              <tr>
-                <th style={{ width: 40 }}>#</th>
-                <th>Currency</th>
-                <th>Score</th>
-                <th style={{ minWidth: 160 }}>Relative Strength</th>
-              </tr>
-            </thead>
-            <tbody>
-              {ranked.map((ccy, i) => {
-                const score = strength[ccy] ?? 0;
-                return (
-                  <tr key={ccy}>
-                    <td className="text-mono" style={{ color: 'var(--muted)' }}>{i + 1}</td>
-                    <td>
-                      <span style={{
-                        display: 'inline-block', width: 8, height: 8, borderRadius: '50%',
-                        background: CCY_COLORS[ccy], marginRight: 8, verticalAlign: 'middle',
-                      }} />
-                      <strong style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }}>{ccy}</strong>
-                    </td>
-                    <td className="text-mono" style={{ color: score >= 0 ? 'var(--bull)' : 'var(--bear)' }}>
-                      {fmtScore(score)}
-                    </td>
-                    <td>
-                      <StrengthBar value={score} max={maxAbs} />
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+        <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginBottom: '1rem' }}>
+          Cumulative from NY 5:00 PM · resets daily · updated hourly
+        </div>
+        {sessionSnapshots.length < 1 ? (
+          <p style={{ color: 'var(--muted)', fontSize: 13, padding: '16px 0', margin: 0 }}>
+            Intraday data building… check back after the next hourly update
+          </p>
+        ) : (
+          <>
+            <ResponsiveContainer width="100%" height={280}>
+              <BarChart
+                layout="vertical"
+                data={intradayChartData}
+                margin={{ top: 8, right: 48, left: 8, bottom: 8 }}
+              >
+                <XAxis type="number"
+                       tick={{ fontSize: 10, fontFamily: 'var(--font-mono)', fill: 'var(--muted)' }}
+                       tickFormatter={v => v.toFixed(3)} />
+                <YAxis type="category" dataKey="currency" width={40}
+                       tick={{ fontSize: 11, fontFamily: 'var(--font-mono)', fill: 'var(--ink)' }} />
+                <ReferenceLine x={0} stroke="var(--border)" strokeWidth={2} />
+                <Tooltip
+                  contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 11 }}
+                  formatter={val => val.toFixed(4)}
+                />
+                <Bar dataKey="value" name="Strength" radius={[0, 3, 3, 0]}>
+                  {intradayChartData.map((entry) => (
+                    <Cell
+                      key={entry.currency}
+                      fill={CCY_COLORS[entry.currency] || '#888'}
+                    />
+                  ))}
+                  <LabelList
+                    dataKey="value"
+                    position="right"
+                    formatter={v => v.toFixed(3)}
+                    style={{ fontSize: '0.7rem', fill: 'var(--muted)' }}
+                  />
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+            <div style={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: '0.75rem',
+              marginTop: '0.75rem',
+              justifyContent: 'center',
+            }}>
+              {intradayChartData.map(({ currency }) => (
+                <span key={currency} style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.3rem',
+                  fontSize: '0.75rem',
+                  color: 'var(--ink)',
+                }}>
+                  <span style={{
+                    width: 10,
+                    height: 10,
+                    borderRadius: '50%',
+                    backgroundColor: CCY_COLORS[currency] || '#888',
+                    display: 'inline-block',
+                  }} />
+                  {currency}
+                </span>
+              ))}
+            </div>
+          </>
+        )}
+      </section>
+
+      {/* ── Chart 2: Daily Strength ───────────────────────────────── */}
+      <section style={cardStyle}>
+        <div style={{ fontWeight: 600, fontSize: '1rem', color: 'var(--ink)', marginBottom: '0.25rem' }}>
+          Daily Strength
+        </div>
+        <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginBottom: '1rem' }}>
+          Today vs Yesterday · NY session
+        </div>
+        {dailyChartData.length === 0 ? (
+          <p style={{ color: 'var(--muted)', fontSize: 13, padding: '16px 0', margin: 0 }}>
+            No strength data yet.
+          </p>
+        ) : (
+          <>
+            <ResponsiveContainer width="100%" height={280}>
+              <BarChart layout="vertical" data={dailyChartData}
+                        margin={{ top: 4, right: 60, bottom: 4, left: 0 }}>
+                <XAxis type="number"
+                       tick={{ fontSize: 10, fontFamily: 'var(--font-mono)', fill: 'var(--muted)' }}
+                       tickFormatter={v => v.toFixed(3)} />
+                <YAxis type="category" dataKey="currency" width={40}
+                       tick={{ fontSize: 11, fontFamily: 'var(--font-mono)', fill: 'var(--ink)' }} />
+                <ReferenceLine x={0} stroke="var(--border)" strokeWidth={2} />
+                <Tooltip
+                  contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 11 }}
+                  formatter={val => val?.toFixed(4) ?? '—'}
+                />
+                <Bar dataKey="today" name="Today" barSize={10}>
+                  {dailyChartData.map((entry) => (
+                    <Cell
+                      key={`today-${entry.currency}`}
+                      fill={CCY_COLORS[entry.currency] || '#888'}
+                    />
+                  ))}
+                  <LabelList
+                    dataKey="delta"
+                    position="right"
+                    formatter={v => v != null ? `Δ ${v >= 0 ? '+' : ''}${v.toFixed(2)}` : ''}
+                    style={{ fontSize: 10, fontFamily: 'var(--font-mono)', fill: '#6b6050' }}
+                  />
+                </Bar>
+                <Bar dataKey="yesterday" name="Yesterday" barSize={10} opacity={0.35}>
+                  {dailyChartData.map((entry) => (
+                    <Cell
+                      key={`yest-${entry.currency}`}
+                      fill={CCY_COLORS[entry.currency] || '#888'}
+                    />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+            {!yesterdayStrength && (
+              <p style={{ fontSize: 11, color: 'var(--muted)', marginTop: '0.5rem', marginBottom: 0 }}>
+                Yesterday baseline available after first full NY session
+              </p>
+            )}
+            <div style={{ marginTop: '0.75rem' }}>
+              <div style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: '0.75rem',
+                justifyContent: 'center',
+                marginBottom: '0.4rem',
+              }}>
+                <span style={{ fontSize: '0.7rem', color: 'var(--muted)', marginRight: '0.25rem' }}>Today:</span>
+                {dailyChartData.map(({ currency }) => (
+                  <span key={currency} style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.3rem',
+                    fontSize: '0.75rem',
+                    color: 'var(--ink)',
+                  }}>
+                    <span style={{
+                      width: 10,
+                      height: 10,
+                      borderRadius: '50%',
+                      backgroundColor: CCY_COLORS[currency] || '#888',
+                      display: 'inline-block',
+                    }} />
+                    {currency}
+                  </span>
+                ))}
+              </div>
+              <div style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: '0.75rem',
+                justifyContent: 'center',
+              }}>
+                <span style={{ fontSize: '0.7rem', color: 'var(--muted)', marginRight: '0.25rem' }}>Yesterday:</span>
+                {dailyChartData.map(({ currency }) => (
+                  <span key={currency} style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.3rem',
+                    fontSize: '0.75rem',
+                    color: 'var(--ink)',
+                  }}>
+                    <span style={{
+                      width: 10,
+                      height: 10,
+                      borderRadius: '50%',
+                      backgroundColor: CCY_COLORS[currency] || '#888',
+                      opacity: 0.35,
+                      display: 'inline-block',
+                    }} />
+                    {currency}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
+      </section>
+
+      {/* ── Chart 3: Weekly Strength placeholder ─────────────────── */}
+      <section style={cardStyle}>
+        <div style={{ fontWeight: 600, fontSize: '1rem', color: 'var(--ink)', marginBottom: '0.25rem' }}>
+          Weekly Strength
+        </div>
+        <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginBottom: '1rem' }}>
+          Previous week · Mon–Fri close
+        </div>
+        <div style={{
+          padding: '2rem',
+          textAlign: 'center',
+          color: 'var(--muted)',
+          border: '1px dashed var(--border)',
+          borderRadius: '8px',
+          fontSize: '0.875rem',
+        }}>
+          📅 Weekly data available after Friday NY 5:00 PM close
         </div>
       </section>
 
-      {/* ── Heatmap and Correlation side by side ─────────────── */}
+      {/* ── Correlation matrix (heatmap removed) ─────────────────── */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
-
-        {/* Heatmap */}
-        <section className="card">
-          <div className="card-header">
-            <span className="card-title">Cross-Pair Heatmap</span>
-            <span className="text-mono text-muted" style={{ fontSize: 11 }}>% change (row vs col)</span>
-          </div>
-          <div style={{ overflowX: 'auto' }}>
-            <table className="breadth-heatmap">
-              <thead>
-                <tr>
-                  <th></th>
-                  {CURRENCIES.map(c => <th key={c}>{c}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {CURRENCIES.map(base => (
-                  <tr key={base}>
-                    <th>{base}</th>
-                    {CURRENCIES.map(quote => {
-                      if (base === quote) {
-                        return <td key={quote} style={{ background: 'var(--surface)', color: 'var(--muted)' }}>—</td>;
-                      }
-                      const pct = heatmap?.[base]?.[quote];
-                      return (
-                        <td key={quote} style={cellStyle(pct)} className="text-mono">
-                          {pct != null ? fmtPct(pct) : '—'}
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        {/* Correlation matrix */}
         <section className="card">
           <div className="card-header">
             <span className="card-title">Strength Correlation</span>
@@ -253,19 +429,19 @@ export default function MarketBreathPage() {
         </section>
       </div>
 
-      {/* ── Intraday line chart ───────────────────────────────── */}
+      {/* ── Strength History line chart (48h) ────────────────────── */}
       <section className="card">
         <div className="card-header">
           <span className="card-title">Strength History (48h)</span>
           <span className="text-mono text-muted" style={{ fontSize: 11 }}>hourly snapshots</span>
         </div>
-        {chartData.length < 2 ? (
+        {lineChartData.length < 2 ? (
           <p className="text-muted" style={{ padding: '16px 0', fontSize: 13 }}>
             Collecting data — chart appears after ≥2 hourly runs.
           </p>
         ) : (
           <ResponsiveContainer width="100%" height={280}>
-            <LineChart data={chartData} margin={{ top: 8, right: 16, bottom: 8, left: 0 }}>
+            <LineChart data={lineChartData} margin={{ top: 8, right: 16, bottom: 8, left: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
               <XAxis
                 dataKey="time"
