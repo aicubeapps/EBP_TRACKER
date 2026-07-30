@@ -7,10 +7,7 @@ binding = "DB"
 database_name = "ebp-tracker-db"
 database_id = "b93b206a-5537-4d12-8c86-a4b2372aae7f"
 
-# All crons now via cron-job.org HTTP triggers (POST /cron/ebp). The
-# scheduled() handler is a no-op — this empty array explicitly clears the
-# 5 legacy cron triggers still attached to the live Worker from before the
-# cron-job.org migration (commenting out [triggers] does not retroactively
-# remove triggers already attached on Cloudflare's side).
+# EBP cron still via cron-job.org HTTP triggers (POST /cron/ebp).
+# Market breadth runs hourly at :05 via this CF native cron.
 [triggers]
-crons = []
+crons = ["5 * * * *"]

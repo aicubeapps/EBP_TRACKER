@@ -215,8 +215,11 @@ async function incrementKeyCallCount(db, keyName) {
   ).bind(keyName).run();
 }
 
+// Per-minute 429 responses carry code=429 in the JSON body too — that's a
+// transient rate limit, not daily credit exhaustion, so it must NOT trip
+// this check (only 'run out'/'api credits' messages mean the day's quota
+// is actually gone).
 function isTwelveDataExhausted(data) {
-  if (data?.code === 429) return true;
   if (data?.status === 'error' && data?.message?.toLowerCase().includes('run out')) return true;
   if (data?.status === 'error' && data?.message?.toLowerCase().includes('api credits')) return true;
   return false;
