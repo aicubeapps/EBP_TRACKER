@@ -152,7 +152,6 @@ async function incrementKeyCallCount(db, keyName) {
   ).bind(keyName).run();
 }
 function isTwelveDataExhausted(data) {
-  if (data?.code === 429) return true;
   if (data?.status === "error" && data?.message?.toLowerCase().includes("run out")) return true;
   if (data?.status === "error" && data?.message?.toLowerCase().includes("api credits")) return true;
   return false;
