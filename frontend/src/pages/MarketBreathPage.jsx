@@ -13,29 +13,6 @@ const CCY_COLORS = {
   CHF: '#ef4444', CAD: '#f97316', AUD: '#ec4899', NZD: '#06b6d4',
 };
 
-const BLOCK_COLORS = [
-  '#6366f1', // 17–21 indigo
-  '#8b5cf6', // 21–01 violet
-  '#06b6d4', // 01–05 cyan
-  '#10b981', // 05–09 emerald
-  '#f59e0b', // 09–13 amber
-  '#ef4444', // 13–17 red
-];
-
-const BLOCKS = [
-  { label: '17–21', startHour: 17, endHour: 21 },
-  { label: '21–01', startHour: 21, endHour: 25 },
-  { label: '01–05', startHour: 1,  endHour: 5  },
-  { label: '05–09', startHour: 5,  endHour: 9  },
-  { label: '09–13', startHour: 9,  endHour: 13 },
-  { label: '13–17', startHour: 13, endHour: 17 },
-];
-
-function fmtPct(v) {
-  if (v == null || isNaN(v)) return '—';
-  return (v >= 0 ? '+' : '') + v.toFixed(3) + '%';
-}
-
 function fmtScore(v) {
   if (v == null || isNaN(v)) return '—';
   return (v >= 0 ? '+' : '') + v.toFixed(4);
@@ -79,27 +56,6 @@ function getCurrentSessionStart() {
   return sessionStart.getTime() - offset * 3600000;
 }
 
-function getBlockIndex(epochMs) {
-  const nyHour = new Date(toNYMs(epochMs)).getUTCHours();
-  if (nyHour >= 17) return 0; // 17–21
-  if (nyHour >= 13) return 5; // 13–17
-  if (nyHour >= 9)  return 4; // 09–13
-  if (nyHour >= 5)  return 3; // 05–09
-  if (nyHour >= 1)  return 2; // 01–05
-  return 1;                   // 21–01
-}
-
-// ── Heatmap cell background ──────────────────────────────────────
-
-function cellStyle(pct) {
-  if (pct == null) return {};
-  const abs = Math.min(Math.abs(pct), 0.5);
-  const alpha = (abs / 0.5) * 0.55 + 0.05;
-  return pct >= 0
-    ? { background: `rgba(16,185,129,${alpha})`, color: pct > 0.1 ? '#065f46' : 'inherit' }
-    : { background: `rgba(239,68,68,${alpha})`,  color: pct < -0.1 ? '#7f1d1d' : 'inherit' };
-}
-
 // ── Correlation cell background ──────────────────────────────────
 
 function corrStyle(r, isDiag) {
@@ -140,7 +96,7 @@ export default function MarketBreathPage() {
   if (error)   return <div className="shell"><p style={{ color: 'var(--bear)' }}>{error}</p></div>;
   if (!data)   return null;
 
-  const { strength, heatmap, intraday, correlation, computed_at } = data;
+  const { intraday, correlation, computed_at } = data;
 
   // ── Session boundary ─────────────────────────────────────────────
   const sessionStart = getCurrentSessionStart();
@@ -149,27 +105,17 @@ export default function MarketBreathPage() {
     .filter(s => s.t >= sessionStart)
     .sort((a, b) => a.t - b.t);
 
-  // ── Chart 1: last snapshot per 4H block → stacked horizontal bar ─
-  const blockSnapshots = BLOCKS.map((_, i) => {
-    const inBlock = sessionSnapshots.filter(s => getBlockIndex(s.t) === i);
-    return inBlock.length > 0 ? inBlock[inBlock.length - 1] : null;
-  });
+  // ── Chart 1: latest session snapshot → single CCY_COLORS bar ────
+  const latestSessionSnap = sessionSnapshots[sessionSnapshots.length - 1] ?? null;
 
-  const intradayChartData = (() => {
-    const rows = CURRENCIES.map(c => {
-      let total = 0;
-      const row = { currency: c };
-      blockSnapshots.forEach((snap, i) => {
-        const val = snap ? (snap.strength[c] ?? 0) : 0;
-        row[`block${i}`] = val;
-        total += val;
-      });
-      row._total = total;
-      return row;
-    });
-    // strongest at top (recharts renders data[0] at top for layout="vertical")
-    return rows.sort((a, b) => b._total - a._total);
-  })();
+  const intradayChartData = latestSessionSnap
+    ? Object.entries(latestSessionSnap.strength)
+        .sort((a, b) => b[1] - a[1])
+        .map(([currency, value]) => ({
+          currency,
+          value: parseFloat(value.toFixed(4)),
+        }))
+    : [];
 
   // ── Chart 2: today's latest vs yesterday's last snapshot ─────────
   const todayStrength = intraday && intraday.length > 0
@@ -195,7 +141,7 @@ export default function MarketBreathPage() {
         }))
     : [];
 
-  // ── Line chart (existing 48h history) ────────────────────────────
+  // ── Line chart (48h history) ──────────────────────────────────────
   const lineChartData = (intraday ?? []).map(row => ({
     time: fmtTime(row.t),
     ...row.strength,
@@ -241,9 +187,12 @@ export default function MarketBreathPage() {
           </p>
         ) : (
           <>
-            <ResponsiveContainer width="100%" height={320}>
-              <BarChart layout="vertical" data={intradayChartData}
-                        margin={{ top: 4, right: 60, bottom: 4, left: 0 }}>
+            <ResponsiveContainer width="100%" height={280}>
+              <BarChart
+                layout="vertical"
+                data={intradayChartData}
+                margin={{ top: 8, right: 48, left: 8, bottom: 8 }}
+              >
                 <XAxis type="number"
                        tick={{ fontSize: 10, fontFamily: 'var(--font-mono)', fill: 'var(--muted)' }}
                        tickFormatter={v => v.toFixed(3)} />
@@ -252,20 +201,48 @@ export default function MarketBreathPage() {
                 <ReferenceLine x={0} stroke="var(--border)" strokeWidth={2} />
                 <Tooltip
                   contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 11 }}
-                  formatter={(val, name) => [val?.toFixed(4) ?? '—', name]}
+                  formatter={val => val.toFixed(4)}
                 />
-                {BLOCKS.map((block, i) => (
-                  <Bar key={i} dataKey={`block${i}`} name={block.label}
-                       stackId="strength" fill={BLOCK_COLORS[i]} />
-                ))}
+                <Bar dataKey="value" name="Strength" radius={[0, 3, 3, 0]}>
+                  {intradayChartData.map((entry) => (
+                    <Cell
+                      key={entry.currency}
+                      fill={CCY_COLORS[entry.currency] || '#888'}
+                    />
+                  ))}
+                  <LabelList
+                    dataKey="value"
+                    position="right"
+                    formatter={v => v.toFixed(3)}
+                    style={{ fontSize: '0.7rem', fill: 'var(--muted)' }}
+                  />
+                </Bar>
               </BarChart>
             </ResponsiveContainer>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem 1.25rem', marginTop: '0.75rem' }}>
-              {BLOCKS.map((block, i) => (
-                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11 }}>
-                  <div style={{ width: 10, height: 10, borderRadius: 2, background: BLOCK_COLORS[i], flexShrink: 0 }} />
-                  <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--muted)' }}>{block.label} NY</span>
-                </div>
+            <div style={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: '0.75rem',
+              marginTop: '0.75rem',
+              justifyContent: 'center',
+            }}>
+              {intradayChartData.map(({ currency }) => (
+                <span key={currency} style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.3rem',
+                  fontSize: '0.75rem',
+                  color: 'var(--ink)',
+                }}>
+                  <span style={{
+                    width: 10,
+                    height: 10,
+                    borderRadius: '50%',
+                    backgroundColor: CCY_COLORS[currency] || '#888',
+                    display: 'inline-block',
+                  }} />
+                  {currency}
+                </span>
               ))}
             </div>
           </>
@@ -299,10 +276,12 @@ export default function MarketBreathPage() {
                   contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 11 }}
                   formatter={val => val?.toFixed(4) ?? '—'}
                 />
-                <Legend wrapperStyle={{ fontSize: 11 }} />
-                <Bar dataKey="today" name="Today">
-                  {dailyChartData.map((entry, i) => (
-                    <Cell key={i} fill={entry.today >= 0 ? 'var(--bull)' : 'var(--bear)'} />
+                <Bar dataKey="today" name="Today" barSize={10}>
+                  {dailyChartData.map((entry) => (
+                    <Cell
+                      key={`today-${entry.currency}`}
+                      fill={CCY_COLORS[entry.currency] || '#888'}
+                    />
                   ))}
                   <LabelList
                     dataKey="delta"
@@ -311,11 +290,12 @@ export default function MarketBreathPage() {
                     style={{ fontSize: 10, fontFamily: 'var(--font-mono)', fill: '#6b6050' }}
                   />
                 </Bar>
-                <Bar dataKey="yesterday" name="Yesterday">
-                  {dailyChartData.map((entry, i) => (
-                    <Cell key={i}
-                          fill={entry.yesterday != null && entry.yesterday >= 0 ? 'var(--bull)' : 'var(--bear)'}
-                          fillOpacity={0.4} />
+                <Bar dataKey="yesterday" name="Yesterday" barSize={10} opacity={0.35}>
+                  {dailyChartData.map((entry) => (
+                    <Cell
+                      key={`yest-${entry.currency}`}
+                      fill={CCY_COLORS[entry.currency] || '#888'}
+                    />
                   ))}
                 </Bar>
               </BarChart>
@@ -325,6 +305,62 @@ export default function MarketBreathPage() {
                 Yesterday baseline available after first full NY session
               </p>
             )}
+            <div style={{ marginTop: '0.75rem' }}>
+              <div style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: '0.75rem',
+                justifyContent: 'center',
+                marginBottom: '0.4rem',
+              }}>
+                <span style={{ fontSize: '0.7rem', color: 'var(--muted)', marginRight: '0.25rem' }}>Today:</span>
+                {dailyChartData.map(({ currency }) => (
+                  <span key={currency} style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.3rem',
+                    fontSize: '0.75rem',
+                    color: 'var(--ink)',
+                  }}>
+                    <span style={{
+                      width: 10,
+                      height: 10,
+                      borderRadius: '50%',
+                      backgroundColor: CCY_COLORS[currency] || '#888',
+                      display: 'inline-block',
+                    }} />
+                    {currency}
+                  </span>
+                ))}
+              </div>
+              <div style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: '0.75rem',
+                justifyContent: 'center',
+              }}>
+                <span style={{ fontSize: '0.7rem', color: 'var(--muted)', marginRight: '0.25rem' }}>Yesterday:</span>
+                {dailyChartData.map(({ currency }) => (
+                  <span key={currency} style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.3rem',
+                    fontSize: '0.75rem',
+                    color: 'var(--ink)',
+                  }}>
+                    <span style={{
+                      width: 10,
+                      height: 10,
+                      borderRadius: '50%',
+                      backgroundColor: CCY_COLORS[currency] || '#888',
+                      opacity: 0.35,
+                      display: 'inline-block',
+                    }} />
+                    {currency}
+                  </span>
+                ))}
+              </div>
+            </div>
           </>
         )}
       </section>
@@ -349,46 +385,8 @@ export default function MarketBreathPage() {
         </div>
       </section>
 
-      {/* ── Heatmap and Correlation side by side ─────────────────── */}
+      {/* ── Correlation matrix (heatmap removed) ─────────────────── */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
-
-        {/* Heatmap */}
-        <section className="card">
-          <div className="card-header">
-            <span className="card-title">Cross-Pair Heatmap</span>
-            <span className="text-mono text-muted" style={{ fontSize: 11 }}>% change (row vs col)</span>
-          </div>
-          <div style={{ overflowX: 'auto' }}>
-            <table className="breadth-heatmap">
-              <thead>
-                <tr>
-                  <th></th>
-                  {CURRENCIES.map(c => <th key={c}>{c}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {CURRENCIES.map(base => (
-                  <tr key={base}>
-                    <th>{base}</th>
-                    {CURRENCIES.map(quote => {
-                      if (base === quote) {
-                        return <td key={quote} style={{ background: 'var(--surface)', color: 'var(--muted)' }}>—</td>;
-                      }
-                      const pct = heatmap?.[base]?.[quote];
-                      return (
-                        <td key={quote} style={cellStyle(pct)} className="text-mono">
-                          {pct != null ? fmtPct(pct) : '—'}
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        {/* Correlation matrix */}
         <section className="card">
           <div className="card-header">
             <span className="card-title">Strength Correlation</span>
