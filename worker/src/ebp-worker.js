@@ -1201,9 +1201,9 @@ router.post('/user/assets', async (req, env) => {
 
   // Slot limit applies to forex/crypto only — NSE assets are unlimited and
   // never count against asset_limit.
-  if (assetType !== 'nse') {
+  if (assetType !== 'nse' && assetType !== 'system') {
     const count = await env.DB.prepare(
-      "SELECT COUNT(*) as cnt FROM user_assets WHERE user_id = ? AND asset_type != 'nse'"
+      "SELECT COUNT(*) as cnt FROM user_assets WHERE user_id = ? AND asset_type != 'nse' AND asset_type != 'system'"
     ).bind(clerkUser.id).first();
     if (count.cnt >= user.asset_limit) {
       return json({ error: 'asset_limit_reached', limit: user.asset_limit }, 403, origin);
@@ -1221,10 +1221,10 @@ router.post('/user/assets', async (req, env) => {
     return json({ error: 'Asset already in your list.' }, 400, origin);
   }
 
-  if (assetType !== 'forex' && assetType !== 'crypto') {
+  if (assetType !== 'forex' && assetType !== 'crypto' && assetType !== 'system') {
     // NSE ('nse') and any unrecognised type still go through Yahoo validation.
-    // Forex/crypto symbols come from the hardcoded asset browser list, so
-    // they're guaranteed valid and skip this call entirely.
+    // Forex/crypto come from the hardcoded asset browser list, and 'system'
+    // symbols (e.g. DXY) are known-valid — all skip this call.
     const validation = await validateSymbol(symbolStr, env.TWELVE_DATA_API_KEY);
     if (!validation.valid) {
       return json({ error: 'Symbol not found on any data source.' }, 400, origin);
@@ -1247,7 +1247,7 @@ router.get('/user/assets/count', async (req, env) => {
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
 
   const forexRow = await env.DB.prepare(
-    "SELECT COUNT(*) as cnt FROM user_assets WHERE user_id = ? AND asset_type != 'nse'"
+    "SELECT COUNT(*) as cnt FROM user_assets WHERE user_id = ? AND asset_type != 'nse' AND asset_type != 'system'"
   ).bind(clerkUser.id).first();
   const nseRow = await env.DB.prepare(
     "SELECT COUNT(*) as cnt FROM user_assets WHERE user_id = ? AND asset_type = 'nse'"

@@ -1600,39 +1600,48 @@ html, body, #root {
   50% { opacity: 1; }
 }
 
+/* ── Hamburger (hidden on desktop, visible on mobile) ── */
+.hamburger {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--nav-active-accent);
+  font-size: 1.4rem;
+  cursor: pointer;
+  padding: 0 0.5rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+/* ── Sidebar overlay (only rendered via React when open) ── */
+.sidebar-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 199;
+}
+
 /* ── Responsive ── */
 @media (max-width: 860px) {
-  .sidebar { width: 64px; }
-  .sidebar .ni-label,
-  .sidebar-section,
-  .sidebar-footer { display: none; }
-  .nav-item { justify-content: center; padding: 12px 0; }
-  .nav-item .ni-icon { width: auto; }
+  .hamburger { display: block; }
+
+  .sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    height: 100vh;
+    z-index: 200;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+  }
+
+  .sidebar.sidebar-open {
+    transform: translateX(0);
+  }
 }
 
 /* ── Mobile ── */
 @media (max-width: 640px) {
-  :root {
-    --nav-w: 56px;
-  }
-
-  .sidebar {
-    width: var(--nav-w);
-    overflow: hidden;
-  }
-
-  .ni-label {
-    display: none;
-  }
-
-  .sidebar-section {
-    display: none;
-  }
-
-  .sidebar-footer {
-    display: none;
-  }
-
   .ni-icon {
     font-size: 22px;
   }
@@ -1719,9 +1728,20 @@ html, body, #root {
   .asset-grid {
     grid-template-columns: repeat(2, 1fr);
   }
+
+  .breadth-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ── Market Breadth ─────────────────────────────────────────────── */
+
+.breadth-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
 
 .breadth-heatmap {
   border-collapse: collapse;

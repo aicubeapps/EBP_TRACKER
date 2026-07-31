@@ -106,6 +106,32 @@ export default function Assets() {
         </>
       ) : (
         <>
+          {/* ── DXY — always free, exempt from slot limit ── */}
+          <div className="card" style={{ marginBottom: 16, padding: '10px 12px', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, fontSize: 13 }}>DXY</span>
+            <span style={{
+              fontSize: 10, padding: '1px 6px', borderRadius: 4,
+              background: 'var(--gold-lt)', color: 'var(--gold)',
+              fontFamily: 'var(--font-mono)', fontWeight: 700, letterSpacing: '0.5px',
+            }}>FREE</span>
+            <span style={{ fontSize: 12, color: 'var(--muted)' }}>US Dollar Index · ICE Synthetic</span>
+            {ownedMap['DXY'] ? (
+              <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--bull)', fontFamily: 'var(--font-mono)' }}>✓ Added</span>
+            ) : (
+              <button
+                className="btn btn-outline"
+                style={{ marginLeft: 'auto', fontSize: 12, padding: '4px 12px' }}
+                onClick={() => handleToggle('DXY', 'system', true)}
+                disabled={!!pending['DXY']}
+              >
+                {pending['DXY'] ? '…' : 'Add DXY (Free)'}
+              </button>
+            )}
+            {rowErrors['DXY'] && (
+              <span className="asset-check-error" style={{ width: '100%' }}>{rowErrors['DXY']}</span>
+            )}
+          </div>
+
           <div className="section-heading">Forex</div>
           {FOREX_SECTIONS.map(section => (
             <div key={section.label}>

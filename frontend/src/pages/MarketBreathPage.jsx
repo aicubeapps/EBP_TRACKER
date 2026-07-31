@@ -386,7 +386,7 @@ export default function MarketBreathPage() {
       </section>
 
       {/* ── Correlation matrix (heatmap removed) ─────────────────── */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+      <div className="breadth-grid">
         <section className="card">
           <div className="card-header">
             <span className="card-title">Strength Correlation</span>
@@ -397,8 +397,8 @@ export default function MarketBreathPage() {
               No correlation data yet — needs ≥2 hourly runs.
             </p>
           ) : (
-            <div style={{ overflowX: 'auto' }}>
-              <table className="breadth-heatmap">
+            <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+              <table className="breadth-heatmap" style={{ minWidth: 480 }}>
                 <thead>
                   <tr>
                     <th></th>
@@ -441,7 +441,7 @@ export default function MarketBreathPage() {
           </p>
         ) : (
           <ResponsiveContainer width="100%" height={280}>
-            <LineChart data={lineChartData} margin={{ top: 8, right: 16, bottom: 8, left: 0 }}>
+            <LineChart data={lineChartData} margin={{ top: 8, right: 16, bottom: 8, left: 40 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
               <XAxis
                 dataKey="time"
@@ -449,6 +449,7 @@ export default function MarketBreathPage() {
                 interval="preserveStartEnd"
               />
               <YAxis
+                width={40}
                 tick={{ fontSize: 10, fontFamily: 'var(--font-mono)', fill: 'var(--muted)' }}
                 tickFormatter={v => v.toFixed(3)}
               />

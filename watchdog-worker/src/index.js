@@ -38,7 +38,7 @@ const MAJOR_PAIRS = [
   ['CHF/JPY', 'CHF', 'JPY'], ['CAD/JPY', 'CAD', 'JPY'], ['AUD/JPY', 'AUD', 'JPY'],
   ['NZD/JPY', 'NZD', 'JPY'], ['AUD/CAD', 'AUD', 'CAD'], ['AUD/CHF', 'AUD', 'CHF'],
   ['AUD/NZD', 'AUD', 'NZD'], ['NZD/CAD', 'NZD', 'CAD'], ['NZD/CHF', 'NZD', 'CHF'],
-  ['CAD/CHF', 'CAD', 'CHF'],
+  ['CAD/CHF', 'CAD', 'CHF'], ['USD/SEK', 'USD', 'SEK'],
 ];
 const BREADTH_SYMBOLS = MAJOR_PAIRS.map(([pair]) => pair);
 
@@ -501,6 +501,63 @@ async function fetchBreadthFromYahoo(symbols, env) {
 }
 
 // ============================================================
+// Synthetic DXY — ICE formula computed from 1H breadth candles.
+// Weights: EUR/USD −0.576, USD/JPY +0.136, GBP/USD −0.119,
+//          USD/CAD +0.091, USD/SEK +0.042, USD/CHF +0.036
+// Called after fetchBreadthFromYahoo so constituent candles are fresh.
+// ============================================================
+async function computeSyntheticDXY(env) {
+  const CONSTITUENTS = ['EUR/USD', 'USD/JPY', 'GBP/USD', 'USD/CAD', 'USD/SEK', 'USD/CHF'];
+  const WEIGHTS = {
+    'EUR/USD': -0.576, 'USD/JPY':  0.136, 'GBP/USD': -0.119,
+    'USD/CAD':  0.091, 'USD/SEK':  0.042, 'USD/CHF':  0.036,
+  };
+  const K = 50.14348112;
+
+  const byTime = {};
+  for (const sym of CONSTITUENTS) {
+    const row = await env.DB.prepare(
+      'SELECT candles_json FROM candle_cache WHERE symbol = ? AND tf = ?'
+    ).bind(sym, '1H').first();
+    if (!row) {
+      await logWatchdog(env.DB, 'warning', `computeSyntheticDXY: missing 1H candles for ${sym} — skipping`);
+      return;
+    }
+    for (const c of JSON.parse(row.candles_json)) {
+      if (!byTime[c.time]) byTime[c.time] = {};
+      byTime[c.time][sym] = c;
+    }
+  }
+
+  // For each OHLC field, compute DXY using the appropriate price from each
+  // constituent. For high: use low of negatively-weighted pairs (they pull DXY
+  // down when high) and high of positively-weighted pairs. Reverse for low.
+  const dxy = (prices, getVal) => {
+    let v = K;
+    for (const sym of CONSTITUENTS) v *= Math.pow(getVal(prices[sym], WEIGHTS[sym]), WEIGHTS[sym]);
+    return parseFloat(v.toFixed(5));
+  };
+
+  const candles = Object.entries(byTime)
+    .filter(([, p]) => CONSTITUENTS.every(s => p[s]))
+    .sort(([a], [b]) => Number(a) - Number(b))
+    .map(([t, p]) => ({
+      time:  Number(t),
+      open:  dxy(p, c => c.open),
+      close: dxy(p, c => c.close),
+      high:  dxy(p, (c, w) => w < 0 ? c.low  : c.high),
+      low:   dxy(p, (c, w) => w < 0 ? c.high : c.low),
+    }));
+
+  if (candles.length < 20) {
+    await logWatchdog(env.DB, 'warning', `computeSyntheticDXY: only ${candles.length} common candles — skipping`);
+    return;
+  }
+
+  await writeCandleCache(env.DB, 'DXY', '1H', candles);
+}
+
+// ============================================================
 // Daily synthesis — forex trading day runs 17:00 NY → 16:00 NY the
 // next calendar day. A day is complete once its 16:00 NY bar exists.
 // ============================================================
@@ -747,16 +804,21 @@ async function runWatchdog(event, env) {
     // worry about, just yieldToRuntime() between symbols.
     await fetchBreadthFromYahoo(BREADTH_SYMBOLS, env);
 
-    // Daily/weekly synthesis only makes sense for signal symbols — nothing
-    // reads daily_candle_cache/weekly_candle_cache for breadth pairs
-    // (Market Breadth reads candle_cache 1H directly), so there's no
-    // reason to spend D1 work synthesising them.
-    await attemptDailySynthesis(signalSymbols, env);
+    // DXY synthetic — must run after breadth so constituent 1H candles are
+    // fresh (EUR/USD, USD/JPY, GBP/USD, USD/CAD, USD/SEK, USD/CHF all live
+    // in BREADTH_SYMBOLS and are written by fetchBreadthFromYahoo above).
+    await computeSyntheticDXY(env);
+
+    // Daily/weekly synthesis includes DXY so its daily/weekly candles are
+    // built alongside signal-symbol candles. Market Breadth still reads
+    // candle_cache 1H directly; daily_candle_cache/weekly_candle_cache are
+    // only needed for DXY chart/detection.
+    await attemptDailySynthesis([...signalSymbols, 'DXY'], env);
 
     await cleanupApiCallLog(db);
 
     if (nyDay === 5 && nyHour === 17) {
-      await attemptWeeklySynthesis(signalSymbols, env);
+      await attemptWeeklySynthesis([...signalSymbols, 'DXY'], env);
     }
   }
 }

@@ -27,6 +27,7 @@ export default function Layout({ children }) {
   const { getToken } = useAuth();
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [lastApiCall, setLastApiCall]   = useState(null);
+  const [sidebarOpen, setSidebarOpen]   = useState(false);
 
   const fetchApiStatus = useCallback(async () => {
     try {
@@ -43,6 +44,8 @@ export default function Layout({ children }) {
     return () => clearInterval(iv);
   }, [fetchApiStatus]);
 
+  useEffect(() => setSidebarOpen(false), [location.pathname]);
+
   const nav = [...NAV];
   if (user?.is_admin === 1) {
     nav.push({ id: 'nav-market', path: '/market', icon: '📡', label: 'Market' });
@@ -56,6 +59,11 @@ export default function Layout({ children }) {
   return (
     <div className="app-shell">
       <div className="topbar">
+        <button
+          className="hamburger"
+          aria-label="Toggle navigation"
+          onClick={() => setSidebarOpen(o => !o)}
+        >☰</button>
         <div className="topbar-brand">
           <h1>FOREX ALERT MANAGER</h1>
           <p>REAL-TIME SIGNAL TRACKER</p>
@@ -81,7 +89,7 @@ export default function Layout({ children }) {
       </div>
 
       <div className="app-body">
-        <nav className="sidebar">
+        <nav className={`sidebar${sidebarOpen ? ' sidebar-open' : ''}`}>
           <div style={{ display: 'flex', justifyContent: 'center', padding: '16px 0' }}>
             <img src={logoSrc} alt="EBP Tracker" style={{ width: 56, height: 56, borderRadius: '50%' }} />
           </div>
@@ -103,6 +111,9 @@ export default function Layout({ children }) {
           </div>
         </nav>
 
+        {sidebarOpen && (
+          <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)} />
+        )}
         <main className="content">
           <ExpiryBanner />
           {children}
