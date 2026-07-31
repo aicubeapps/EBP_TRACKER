@@ -297,13 +297,6 @@ async function yieldToRuntime() {
   return new Promise(resolve => setTimeout(resolve, 0));
 }
 
-// Real wall-clock gap between signal TF fetches (65s) so consecutive
-// Twelve Data calls land in different per-minute rate-limit windows. I/O
-// wait, not active JS execution — doesn't consume CPU time on Workers.
-async function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 // ============================================================
 // watchdog_log — only failures get logged; successful writes
 // are not (too verbose for a 15-min cron × dozens of symbols).
@@ -708,25 +701,45 @@ async function runWatchdog(event, env) {
   const signalSymbols = await getSignalSymbols(db);
   const keys = await getActiveKeys(db); // also logs if empty
 
-  const tfsToFetch = ['M15'];
-  if (minute % 30 === 0) tfsToFetch.push('M30');
-  if (minute === 0) tfsToFetch.push('1H');
-  if (minute === 0 && NY_4H_BOUNDARIES.includes(nyHour)) {
-    tfsToFetch.push('4H');
+  // Assign dedicated key per TF by label — stable against exhaustion-driven
+  // index shifts (exhausted keys drop from the array, shifting [0],[1]…).
+  const keyM15 = keys.find(k => k.label === 'Twelve Data Key 1');
+  const keyM30 = keys.find(k => k.label === 'Twelve Data Key 2');
+  const key1H  = keys.find(k => k.label === 'Twelve Data Key 3');
+  const key4H  = keys.find(k => k.label === 'Twelve Data Key 4');
+
+  // Build parallel fetch array — only push TFs that are due this tick.
+  const fetches = [];
+
+  fetches.push(
+    fetchSignalAndStore(signalSymbols, 'M15', keyM15 ? [keyM15] : [], env)
+  );
+
+  if (minute % 30 === 0) {
+    fetches.push(
+      fetchSignalAndStore(signalSymbols, 'M30', keyM30 ? [keyM30] : [], env)
+    );
   }
 
-  // Only the signal TF-fetch loop is skipped when there's no signal pool —
+  if (minute === 0) {
+    fetches.push(
+      fetchSignalAndStore(signalSymbols, '1H', key1H ? [key1H] : [], env)
+    );
+  }
+
+  if (minute === 0 && NY_4H_BOUNDARIES.includes(nyHour)) {
+    fetches.push(
+      fetchSignalAndStore(signalSymbols, '4H', key4H ? [key4H] : [], env)
+    );
+  }
+
+  // Only the signal TF-fetch block is skipped when there's no signal pool —
   // breadth (Yahoo, unrelated to user_assets/configs) and the hourly tasks
   // below always run on schedule regardless.
-  if (!signalSymbols.length) {
-    await logWatchdog(db, 'warning', 'No active signal symbols found — skipping signal fetch this tick');
+  if (signalSymbols.length === 0) {
+    await logWatchdog(db, 'warning', 'No active signal symbols — skipping');
   } else {
-    for (let i = 0; i < tfsToFetch.length; i++) {
-      await fetchSignalAndStore(signalSymbols, tfsToFetch[i], keys, env);
-      if (i < tfsToFetch.length - 1) {
-        await sleep(65000);
-      }
-    }
+    await Promise.all(fetches);
   }
 
   if (minute === 0) {
