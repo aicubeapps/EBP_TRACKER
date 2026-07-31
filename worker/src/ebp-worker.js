@@ -2268,23 +2268,75 @@ router.get('/nse/search', async (req, env) => {
   const q   = (url.searchParams.get('q') ?? '').trim();
   if (!q) return json([], 200, origin);
 
-  try {
-    const yahooRes = await fetch(
-      `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&lang=en-IN&region=IN`,
-      { headers: { 'User-Agent': 'Mozilla/5.0' } }
-    );
-    const data   = await yahooRes.json();
-    const quotes = data?.quotes ?? [];
-    const results = quotes
-      .filter(item =>
-        NSE_KNOWN_INDICES.includes(item.symbol) ||
-        (/^[A-Z0-9&-]+\.NS$/.test(item.symbol ?? '') && item.quoteType === 'EQUITY')
-      )
-      .map(item => ({ symbol: item.symbol, shortName: item.shortname ?? item.longname ?? item.symbol }));
-    return json(results, 200, origin);
-  } catch (e) {
-    return json({ error: 'Search failed' }, 502, origin);
-  }
+  // Run both sources in parallel — Upstox covers equities, Yahoo covers
+  // indices only (Upstox's EQ-segment search doesn't surface index
+  // instruments like ^NSEI at all). Promise.allSettled so one source
+  // failing never kills the other.
+  const [upstoxResults, yahooIndexResults] = await Promise.allSettled([
+
+    // Source 1 — Upstox: equities only
+    (async () => {
+      const upstoxKey = await env.DB.prepare(
+        "SELECT key_value FROM api_keys WHERE source='upstox' AND enabled=1 LIMIT 1"
+      ).first();
+      if (!upstoxKey?.key_value) return [];
+
+      const res = await fetch(
+        `https://api.upstox.com/v2/instruments/search?query=${encodeURIComponent(q)}&exchanges=NSE&segments=EQ&records=20`,
+        {
+          headers: {
+            'Authorization': `Bearer ${upstoxKey.key_value}`,
+            'Accept': 'application/json'
+          }
+        }
+      );
+      if (!res.ok) return [];
+      const data = await res.json();
+      return (data?.data ?? [])
+        .filter(i =>
+          i.exchange === 'NSE' &&
+          i.instrument_type === 'EQ' &&
+          i.trading_symbol &&
+          !i.trading_symbol.includes('-') // exclude derivatives
+        )
+        .map(i => ({
+          symbol: `${i.trading_symbol}.NS`,
+          shortName: i.name || i.trading_symbol,
+          source: 'upstox'
+        }));
+    })(),
+
+    // Source 2 — Yahoo: indices only
+    (async () => {
+      const res = await fetch(
+        `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&lang=en-IN&region=IN`,
+        { headers: { 'User-Agent': 'Mozilla/5.0' } }
+      );
+      if (!res.ok) return [];
+      const data = await res.json();
+      return (data?.quotes ?? [])
+        .filter(item => NSE_KNOWN_INDICES.includes(item.symbol))
+        .map(item => ({
+          symbol: item.symbol,
+          shortName: item.shortName || item.longName || item.symbol,
+          source: 'yahoo'
+        }));
+    })()
+
+  ]);
+
+  const equities = upstoxResults.status === 'fulfilled' ? upstoxResults.value : [];
+  const indices  = yahooIndexResults.status === 'fulfilled' ? yahooIndexResults.value : [];
+
+  // Equities first, indices after; dedupe by symbol in case of overlap.
+  const seen = new Set();
+  const combined = [...equities, ...indices].filter(r => {
+    if (seen.has(r.symbol)) return false;
+    seen.add(r.symbol);
+    return true;
+  });
+
+  return json(combined, 200, origin);
 });
 
 // ── Trade Journal — Signal ID lookup/linking (Phase I) ─────────
