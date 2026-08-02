@@ -4,10 +4,10 @@ import api from '../lib/api';
 import { TEMPLATE_HTF_OPTIONS, templateLtfOptions } from '../lib/constants';
 
 const TEMPLATES = [
-  { id: 't1', label: 'T1', description: 'HTF FVG → Price at zone → LTF confirmation', comingSoon: true },
-  { id: 't2', label: 'T2', description: 'HTF EBP → LTF FVG retracement → LTF MSS',    comingSoon: true },
+  { id: 't1', label: 'T1', description: 'HTF FVG → Price at zone → LTF confirmation' },
+  { id: 't2', label: 'T2', description: 'HTF EBP → LTF FVG retracement → LTF MSS' },
   { id: 't3', label: 'T3', description: 'HTF EBP → LTF Sweep → LTF MSS',              comingSoon: false },
-  { id: 't4', label: 'T4', description: 'HTF Sweep → HTF FVG pullback → LTF MSS',     comingSoon: true },
+  { id: 't4', label: 'T4', description: 'HTF Sweep → HTF FVG pullback → LTF MSS' },
 ];
 
 export default function AIAlertsPanel({ assetId }) {

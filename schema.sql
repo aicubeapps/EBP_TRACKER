@@ -74,43 +74,44 @@ CREATE INDEX IF NOT EXISTS idx_ua_user_id      ON user_assets(user_id);
 CREATE INDEX IF NOT EXISTS idx_ua_symbol       ON user_assets(symbol);
 CREATE INDEX IF NOT EXISTS idx_ah_user_id      ON alert_history(user_id);
 CREATE INDEX IF NOT EXISTS idx_ah_fired_at     ON alert_history(fired_at);
--- FVG Detection Table (Phase 1)
-CREATE TABLE IF NOT EXISTS detected_fvgs (
-  id              TEXT PRIMARY KEY,
-  symbol          TEXT NOT NULL,
-  timeframe       TEXT NOT NULL,
-  direction       TEXT NOT NULL,
-  zone_low        REAL NOT NULL,
-  zone_high       REAL NOT NULL,
-  midpoint        REAL NOT NULL,
-  formed_at       INTEGER NOT NULL,
-  candle_time     INTEGER NOT NULL,
-  mitigated       INTEGER DEFAULT 0,
-  mitigated_at    INTEGER,
-  mitigation_rule TEXT,
-  expires_at      INTEGER NOT NULL,
-  created_at      INTEGER NOT NULL
+-- FVG Zones (Phase 1, migration_phase1_to_3.sql) — forex/crypto. NSE gets
+-- an identical nse_fvg_zones table (defined further down, Phase D section).
+CREATE TABLE IF NOT EXISTS fvg_zones (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol           TEXT NOT NULL,
+  tf               TEXT NOT NULL,
+  direction        TEXT NOT NULL,        -- 'bullish' | 'bearish'
+  top              REAL NOT NULL,
+  bottom           REAL NOT NULL,
+  midpoint         REAL NOT NULL,
+  formed_at        TEXT NOT NULL,        -- ISO datetime
+  expires_at       TEXT NOT NULL,        -- formed_at + 14 days
+  mitigated_at     TEXT,
+  mitigated_by_tf  TEXT,
+  created_at       TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_fvg_zones_lookup ON fvg_zones(symbol, tf, mitigated_at, expires_at);
 
-CREATE INDEX IF NOT EXISTS idx_fvg_lookup ON detected_fvgs(symbol, timeframe, mitigated, expires_at);
-
--- Swing State Table (Phase 1.5)
-CREATE TABLE IF NOT EXISTS swing_state (
-  symbol                    TEXT NOT NULL,
-  timeframe                 TEXT NOT NULL,
-  run_direction             TEXT NOT NULL,
-  run_start                 INTEGER NOT NULL,
-  run_extreme               REAL NOT NULL,
-  extreme_time              INTEGER NOT NULL,
-  confirmed_swing_high      REAL,
-  confirmed_swing_high_time INTEGER,
-  confirmed_swing_low       REAL,
-  confirmed_swing_low_time  INTEGER,
-  updated_at                INTEGER NOT NULL,
-  PRIMARY KEY (symbol, timeframe)
+-- Swing State (Phase 1.5/2, migration_phase1_to_3.sql) — forex/crypto.
+-- NSE gets an identical nse_swing_states table (Phase D section).
+CREATE TABLE IF NOT EXISTS swing_states (
+  id                              INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol                          TEXT NOT NULL,
+  tf                              TEXT NOT NULL,
+  run_dir                         TEXT,
+  run_start_time                  TEXT,
+  run_candle_count                INTEGER DEFAULT 0,
+  last_confirmed_swing_high       REAL,
+  last_confirmed_swing_high_time  TEXT,
+  last_confirmed_swing_low        REAL,
+  last_confirmed_swing_low_time   TEXT,
+  pending_swing_high              REAL,
+  pending_swing_high_time         TEXT,
+  pending_swing_low               REAL,
+  pending_swing_low_time          TEXT,
+  updated_at                      TEXT,
+  UNIQUE(symbol, tf)
 );
-
-CREATE INDEX IF NOT EXISTS idx_swing_state_lookup ON swing_state(symbol, timeframe);
 
 -- ── Phase 3 ──────────────────────────────────────────────────
 
@@ -146,24 +147,35 @@ CREATE TABLE IF NOT EXISTS user_templates (
 );
 CREATE INDEX IF NOT EXISTS idx_user_templates_lookup ON user_templates(user_id, asset_id, template, enabled);
 
--- Chain State — in-progress multi-step template chains
+-- Chain State (Phase 3, migration_phase1_to_3.sql) — in-progress multi-step
+-- template chains for T1/T2/T3/T4 (forex/crypto only — NSE has no
+-- template-chain machinery). state is a TEXT state machine per template:
+--   T1/T2/T4: 'awaiting_fvg_entry' | 'awaiting_retracement' (T2 only) | 'complete'
+--   T3:       'awaiting_sweep' | 'awaiting_mss' | 'complete'
+-- htf_candle_*: T2 only, bounds the retracement-FVG formed_at window.
 CREATE TABLE IF NOT EXISTS chain_state (
-  id              TEXT PRIMARY KEY,
-  user_id         TEXT NOT NULL,
-  asset_id        TEXT NOT NULL,
-  symbol          TEXT NOT NULL,
-  template        TEXT NOT NULL,
-  direction       TEXT NOT NULL,
-  current_step    INTEGER NOT NULL,
-  htf_tf          TEXT,
-  ltf             TEXT,
-  htf_signal_time INTEGER,
-  ltf_sweep_time  INTEGER,
-  expires_at      INTEGER NOT NULL,
-  created_at      INTEGER NOT NULL,
-  htf_signal_id   TEXT
+  id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+  template_type          TEXT NOT NULL,
+  user_id                TEXT NOT NULL,
+  asset_id               TEXT NOT NULL,
+  symbol                 TEXT NOT NULL,
+  htf                    TEXT NOT NULL,
+  ltf                    TEXT NOT NULL,
+  direction              TEXT NOT NULL,
+  state                  TEXT NOT NULL,
+  step1_signal_id        TEXT,
+  step2_signal_id        TEXT,
+  step3_signal_id        TEXT,
+  fvg_id                 INTEGER,
+  htf_candle_open        REAL,
+  htf_candle_close       REAL,
+  htf_candle_open_time   TEXT,
+  htf_candle_close_time  TEXT,
+  expires_at             TEXT NOT NULL,
+  created_at             TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_chain_state_lookup ON chain_state(user_id, symbol, template, current_step, expires_at);
+CREATE INDEX IF NOT EXISTS idx_chain_state_lookup ON chain_state(template_type, state, symbol, expires_at);
+CREATE INDEX IF NOT EXISTS idx_chain_state_asset ON chain_state(asset_id);
 
 -- D1 Console commands (run once on live DB):
 -- ALTER TABLE user_assets ADD COLUMN bias_overrides TEXT DEFAULT '{}';
@@ -203,16 +215,17 @@ CREATE TABLE IF NOT EXISTS user_sweep_configs (
 );
 CREATE INDEX IF NOT EXISTS idx_sweep_configs_lookup ON user_sweep_configs(user_id, asset_id, enabled);
 
--- Data-source call log — powers /health/datasources.
--- (Documented here for the first time — was created ad hoc directly in D1
--- before this table ever made it into schema.sql.)
-CREATE TABLE IF NOT EXISTS api_call_log (
-  id         TEXT PRIMARY KEY,
-  source     TEXT NOT NULL,
-  symbol     TEXT NOT NULL,
-  timeframe  TEXT NOT NULL,
-  called_at  INTEGER NOT NULL,
-  success    INTEGER DEFAULT 1
+-- Note: this table was created ad hoc in D1 before schema.sql existed.
+-- Production schema reflects actual D1 columns (verified 2026-08-02 via PRAGMA table_info).
+-- key_id column from original spec does not exist in production and has been removed.
+-- called_at is a Unix timestamp integer (not ISO string), success defaults to 1.
+CREATE TABLE api_call_log (
+  id        TEXT PRIMARY KEY,
+  source    TEXT NOT NULL,
+  symbol    TEXT NOT NULL,
+  timeframe TEXT NOT NULL,
+  called_at INTEGER NOT NULL,
+  success   INTEGER DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_api_call_log_source_time ON api_call_log(source, called_at);
 
@@ -259,6 +272,46 @@ CREATE TABLE IF NOT EXISTS nse_candle_cache (
   bar_0_time  INTEGER, bar_1_time INTEGER,
   updated_at  INTEGER,
   PRIMARY KEY (symbol, timeframe)
+);
+
+-- NSE FVG zones (Phase 1, migration_phase1_to_3.sql). TFs M5/M15/1H only.
+CREATE TABLE IF NOT EXISTS nse_fvg_zones (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol           TEXT NOT NULL,
+  tf               TEXT NOT NULL,
+  direction        TEXT NOT NULL,
+  top              REAL NOT NULL,
+  bottom           REAL NOT NULL,
+  midpoint         REAL NOT NULL,
+  formed_at        TEXT NOT NULL,
+  expires_at       TEXT NOT NULL,
+  mitigated_at     TEXT,
+  mitigated_by_tf  TEXT,
+  created_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_nse_fvg_zones_lookup ON nse_fvg_zones(symbol, tf, mitigated_at, expires_at);
+
+-- NSE swing state (Phase 1.5/2, migration_phase1_to_3.sql) — own table
+-- (not the shared swing_states) since NSE's M1 timeframe never collides
+-- with forex/crypto TFs on the same physical row anyway, but keeping them
+-- separate avoids any accidental cross-market key collision.
+CREATE TABLE IF NOT EXISTS nse_swing_states (
+  id                              INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol                          TEXT NOT NULL,
+  tf                              TEXT NOT NULL,
+  run_dir                         TEXT,
+  run_start_time                  TEXT,
+  run_candle_count                INTEGER DEFAULT 0,
+  last_confirmed_swing_high       REAL,
+  last_confirmed_swing_high_time  TEXT,
+  last_confirmed_swing_low        REAL,
+  last_confirmed_swing_low_time   TEXT,
+  pending_swing_high              REAL,
+  pending_swing_high_time         TEXT,
+  pending_swing_low               REAL,
+  pending_swing_low_time          TEXT,
+  updated_at                      TEXT,
+  UNIQUE(symbol, tf)
 );
 
 -- ── Phase D++ — NSE Indicators (TDI + SMA Cloud) ───────────────
@@ -365,6 +418,9 @@ CREATE TABLE IF NOT EXISTS signal_counters (
 -- Seed (migration 008): INSERT OR IGNORE INTO signal_counters (template, series, count) VALUES ('EBP-4H', 'A', 0);
 -- Seed (migration 008): INSERT OR IGNORE INTO signal_counters (template, series, count) VALUES ('EBP-1D', 'A', 0);
 -- Seed (migration 008): INSERT OR IGNORE INTO signal_counters (template, series, count) VALUES ('EBP-1W', 'A', 0);
+-- Seed (migration_phase1_to_3.sql): INSERT OR IGNORE INTO signal_counters (template, series, count) VALUES ('T1', 'A', 0);
+-- Seed (migration_phase1_to_3.sql): INSERT OR IGNORE INTO signal_counters (template, series, count) VALUES ('T2', 'A', 0);
+-- Seed (migration_phase1_to_3.sql): INSERT OR IGNORE INTO signal_counters (template, series, count) VALUES ('T4', 'A', 0);
 
 -- ── Market Breadth ────────────────────────────────────────────────
 -- Migration: npx wrangler d1 execute ebp-tracker-db --remote --command="CREATE TABLE IF NOT EXISTS market_breadth_cache ..."

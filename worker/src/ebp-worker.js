@@ -189,48 +189,55 @@ async function loadBiasCache(db, symbol, biasTF) {
   ).bind(symbol, biasTF).first();
 }
 
-// ── Phase 3 — T3 Chain State Machine ─────────────────────────
+// ── Phase 3 — Chain State Machine (T1/T2/T3/T4) ───────────────
+// chain_state schema (post Phase-1-to-3 migration): template_type/state
+// (TEXT state machine, not the old current_step INTEGER), asset_id (kept
+// beyond the original spec — user_templates and the asset-delete cascade
+// at DELETE /user/assets/:id are both asset_id-keyed), direction always
+// 'bullish'/'bearish' (never 'bull'/'bear' — matches every detector in this
+// codebase so cross-table direction comparisons need no translation layer).
 
-async function initiateT3Chain(db, userId, assetId, symbol, direction, htfTf, ltf, windowMins, signalId) {
-  const now = Date.now();
+function endOfUTCMonthISO() {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0, 23, 59, 59)).toISOString();
+}
+
+const TF_INTERVAL_MS = {
+  M15: 15 * 60 * 1000, M30: 30 * 60 * 1000, '1H': 60 * 60 * 1000,
+  '4H': 4 * 60 * 60 * 1000, D: 24 * 60 * 60 * 1000, W: 7 * 24 * 60 * 60 * 1000,
+};
+
+async function insertChain(db, { templateType, userId, assetId, symbol, htf, ltf, direction, state, step1SignalId, expiresAt, htfCandle }) {
+  const nowISO = new Date().toISOString();
   await db.prepare(`
     INSERT INTO chain_state
-    (id,user_id,asset_id,symbol,template,direction,current_step,htf_tf,ltf,htf_signal_time,expires_at,created_at,htf_signal_id)
-    VALUES (?,?,?,?,?,?,2,?,?,?,?,?,?)
+    (template_type,user_id,asset_id,symbol,htf,ltf,direction,state,step1_signal_id,
+     htf_candle_open,htf_candle_close,htf_candle_open_time,htf_candle_close_time,
+     expires_at,created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
-    crypto.randomUUID(), userId, assetId, symbol,
-    't3', direction, htfTf, ltf, now,
-    now + (windowMins * 60 * 1000), now, signalId
+    templateType, userId, assetId, symbol, htf, ltf, direction, state, step1SignalId ?? null,
+    htfCandle?.open ?? null, htfCandle?.close ?? null, htfCandle?.openTime ?? null, htfCandle?.closeTime ?? null,
+    expiresAt, nowISO
   ).run();
 }
 
-async function advanceT3Chain(db, chainId, ltfSweepTime) {
-  await db.prepare(
-    'UPDATE chain_state SET current_step=3, ltf_sweep_time=? WHERE id=?'
-  ).bind(ltfSweepTime, chainId).run();
+// T3 keeps its existing window_mins-based expiry (the Step-2 sweep must
+// land within that window) rather than the spec's general "end of UTC
+// month" default — that default is for T1/T2/T4, which have no such
+// short-window semantics; changing T3's expiry would break the chain's
+// actual timing gate.
+async function initiateT3Chain(db, userId, assetId, symbol, direction, htfTf, ltf, windowMins, signalId) {
+  const expiresAt = new Date(Date.now() + windowMins * 60 * 1000).toISOString();
+  await insertChain(db, {
+    templateType: 'T3', userId, assetId, symbol, htf: htfTf, ltf, direction,
+    state: 'awaiting_sweep', step1SignalId: signalId, expiresAt,
+  });
 }
 
-async function completeT3Chain(db, chainId) {
-  await db.prepare('DELETE FROM chain_state WHERE id=?').bind(chainId).run();
-}
-
-async function getActiveChains(db, userId, symbol, template, direction, step) {
-  const res = await db.prepare(`
-    SELECT * FROM chain_state
-    WHERE user_id=? AND symbol=? AND template=? AND direction=? AND current_step=? AND expires_at > ?
-  `).bind(userId, symbol, template, direction, step, Date.now()).all();
-  return res.results ?? [];
-}
-
-async function cleanupExpiredChains(db) {
-  await db.prepare('DELETE FROM chain_state WHERE expires_at < ?').bind(Date.now()).run();
-}
-
-// IM-4/5 — shared format across ebp-worker.js and sweep-cron.js; the Signal
-// ID is assigned once at Step 1 (initiateT3Chain) and reused verbatim at
-// Steps 2 and 3 via chain_state.htf_signal_id. direction is always
-// 'bullish'/'bearish' throughout this codebase (detectEBP/detectSweep/
-// detectMSS), never 'bull'/'bear'.
+// IM-4/5 — shared alert format across ebp-worker.js and sweep-cron.js; the
+// Signal ID is assigned once at Step 1 (initiateT3Chain) and reused
+// verbatim at Steps 2/3 via chain_state.step1_signal_id.
 function formatT3Alert(symbol, htf, ltf, direction, session, price, signalId, step) {
   const emoji    = direction === 'bullish' ? '🟢' : '🔴';
   const dirLabel = direction === 'bullish' ? 'BULL' : 'BEAR';
@@ -549,181 +556,204 @@ function detectSweep(candles) {
 // FVG Engine (Phase 1)
 // ============================================================
 
+// candles: oldest-first. Gap is between bar[i-2] and bar[i] — the middle
+// bar (bar[i-1]) is the impulse candle and isn't itself compared.
 function detectFVG(candles) {
-  const [c0, c1, c2] = candles; // [oldest, middle, newest]
-  if (c2.low > c0.high) {
-    return { direction: 'bullish', zone_low: c0.high, zone_high: c2.low, midpoint: (c0.high + c2.low) / 2, formed_at: c2.time, candle_time: c1.time };
+  if (!candles || candles.length < 3) return null;
+  const barIMinus2 = candles[candles.length - 3];
+  const barI       = candles[candles.length - 1];
+  if (barIMinus2.high < barI.low) {
+    const top = barI.low, bottom = barIMinus2.high;
+    return { direction: 'bullish', top, bottom, midpoint: (top + bottom) / 2, formed_at: barI.time };
   }
-  if (c2.high < c0.low) {
-    return { direction: 'bearish', zone_low: c2.high, zone_high: c0.low, midpoint: (c2.high + c0.low) / 2, formed_at: c2.time, candle_time: c1.time };
+  if (barIMinus2.low > barI.high) {
+    const top = barIMinus2.low, bottom = barI.high;
+    return { direction: 'bearish', top, bottom, midpoint: (top + bottom) / 2, formed_at: barI.time };
   }
   return null;
 }
 
-function checkFVGMitigation(fvg, candle, rule) {
-  if (rule === '50_percent') {
-    if (fvg.direction === 'bullish' && candle.low <= fvg.midpoint)  return true;
-    if (fvg.direction === 'bearish' && candle.high >= fvg.midpoint) return true;
-  }
-  if (rule === 'body_close') {
-    const bodyLow  = Math.min(candle.open, candle.close);
-    const bodyHigh = Math.max(candle.open, candle.close);
-    if (bodyLow >= fvg.zone_low && bodyHigh <= fvg.zone_high) return true;
-  }
-  return false;
+// 50% fill + body close beyond midpoint.
+function checkFVGMitigation(bar, fvgRow) {
+  if (fvgRow.direction === 'bullish') return bar.close < fvgRow.midpoint;
+  return bar.close > fvgRow.midpoint;
 }
 
-function isPriceInFVG(fvg, candle) {
-  return candle.low <= fvg.zone_high && candle.high >= fvg.zone_low;
+function isPriceInFVG(price, fvgRow) {
+  return price >= fvgRow.bottom && price <= fvgRow.top;
 }
 
-async function processFVGs(db, symbol, timeframe, candles, latestCandle) {
-  const now    = Date.now();
-  const TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// table: 'fvg_zones' | 'nse_fvg_zones'. candlesOldestFirst is the existing
+// 3-item [older, prior, current] window already threaded through this file.
+async function processFVGZones(db, table, symbol, tf, candlesOldestFirst, latestBar) {
+  const nowISO = new Date().toISOString();
 
-  const fvg = detectFVG(candles);
+  const fvg = detectFVG(candlesOldestFirst);
   if (fvg) {
-    const tol      = fvg.zone_low * 0.001;
+    // Dedup guard: skip if an active zone with the same direction already
+    // overlaps this price range.
     const existing = await db.prepare(
-      `SELECT id FROM detected_fvgs WHERE symbol=? AND timeframe=? AND mitigated=0
-       AND ABS(zone_low-?)<?  AND ABS(zone_high-?)<? LIMIT 1`
-    ).bind(symbol, timeframe, fvg.zone_low, tol, fvg.zone_high, tol).first();
+      `SELECT id FROM ${table} WHERE symbol=? AND tf=? AND direction=? AND mitigated_at IS NULL AND expires_at > ?
+       AND top >= ? AND bottom <= ? LIMIT 1`
+    ).bind(symbol, tf, fvg.direction, nowISO, fvg.bottom, fvg.top).first();
 
     if (!existing) {
+      const formedAtISO = new Date(fvg.formed_at).toISOString();
+      const expiresAt   = new Date(fvg.formed_at + 14 * 24 * 60 * 60 * 1000).toISOString();
       await db.prepare(
-        `INSERT INTO detected_fvgs
-         (id,symbol,timeframe,direction,zone_low,zone_high,midpoint,formed_at,candle_time,expires_at,created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)`
-      ).bind(
-        crypto.randomUUID(), symbol, timeframe, fvg.direction,
-        fvg.zone_low, fvg.zone_high, fvg.midpoint,
-        fvg.formed_at, fvg.candle_time, fvg.formed_at + TTL_MS, now
-      ).run();
+        `INSERT INTO ${table} (symbol, tf, direction, top, bottom, midpoint, formed_at, expires_at, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?)`
+      ).bind(symbol, tf, fvg.direction, fvg.top, fvg.bottom, fvg.midpoint, formedAtISO, expiresAt, nowISO).run();
     }
   }
 
   const { results: activeFVGs } = await db.prepare(
-    `SELECT * FROM detected_fvgs WHERE symbol=? AND timeframe=? AND mitigated=0 AND expires_at>?`
-  ).bind(symbol, timeframe, now).all();
+    `SELECT * FROM ${table} WHERE symbol=? AND tf=? AND mitigated_at IS NULL AND expires_at > ?`
+  ).bind(symbol, tf, nowISO).all();
 
-  for (const activeFVG of activeFVGs) {
-    const rule = activeFVG.mitigation_rule || '50_percent';
-    if (checkFVGMitigation(activeFVG, latestCandle, rule)) {
-      await db.prepare(`UPDATE detected_fvgs SET mitigated=1, mitigated_at=? WHERE id=?`)
-        .bind(now, activeFVG.id).run();
+  for (const row of activeFVGs ?? []) {
+    if (checkFVGMitigation(latestBar, row)) {
+      await db.prepare(`UPDATE ${table} SET mitigated_at=?, mitigated_by_tf=? WHERE id=?`)
+        .bind(nowISO, tf, row.id).run();
     }
   }
-}
-
-async function cleanupExpiredFVGs(db) {
-  const now = Date.now();
-  await db.prepare(`UPDATE detected_fvgs SET mitigated=1, mitigated_at=? WHERE mitigated=0 AND expires_at<?`)
-    .bind(now, now).run();
 }
 
 // ============================================================
 // Swing State + MSS Engine (Phase 1.5 + 2)
 // ============================================================
 
-function getCandleDirection(candle, priorDirection) {
-  if (candle.close > candle.open) return 'bullish';
-  if (candle.close < candle.open) return 'bearish';
-  return priorDirection;
+function isDoji(bar, dojiThreshold) {
+  return Math.abs(bar.close - bar.open) <= dojiThreshold;
 }
 
-async function updateSwingState(db, symbol, timeframe, candles) {
-  // candles = [oldest, middle, newest]
-  const currentCandle = candles[2];
-  const now = Date.now();
-
-  const state = await db.prepare(
-    `SELECT * FROM swing_state WHERE symbol=? AND timeframe=?`
-  ).bind(symbol, timeframe).first();
-
-  if (!state) {
-    const dir = currentCandle.close >= currentCandle.open ? 'bullish' : 'bearish';
-    await db.prepare(
-      `INSERT INTO swing_state
-       (symbol,timeframe,run_direction,run_start,run_extreme,extreme_time,updated_at)
-       VALUES (?,?,?,?,?,?,?)`
-    ).bind(
-      symbol, timeframe, dir, currentCandle.time,
-      dir === 'bullish' ? currentCandle.high : currentCandle.low,
-      currentCandle.time, now
-    ).run();
-    return null;
+// Real ATR(14) when enough history is passed in; the D1 candle cache this
+// file reads from only ever exposes the 3-bar window already used
+// elsewhere here, so this returns null in practice and callers fall back
+// to (high-low)*0.1 per the Phase 1.5 spec — kept so it activates
+// automatically if the cache is ever widened.
+function calcATR14(candlesOldestFirst) {
+  if (!candlesOldestFirst || candlesOldestFirst.length < 14) return null;
+  const bars = candlesOldestFirst.slice(-14);
+  let sum = 0;
+  for (let i = 0; i < bars.length; i++) {
+    const bar = bars[i];
+    const prevClose = i > 0 ? bars[i - 1].close : bar.open;
+    sum += Math.max(bar.high - bar.low, Math.abs(bar.high - prevClose), Math.abs(bar.low - prevClose));
   }
-
-  const currentDir = getCandleDirection(currentCandle, state.run_direction);
-  let newState = { ...state };
-
-  if (currentDir === state.run_direction) {
-    if (currentDir === 'bullish' && currentCandle.high > state.run_extreme) {
-      newState.run_extreme  = currentCandle.high;
-      newState.extreme_time = currentCandle.time;
-    } else if (currentDir === 'bearish' && currentCandle.low < state.run_extreme) {
-      newState.run_extreme  = currentCandle.low;
-      newState.extreme_time = currentCandle.time;
-    }
-  } else {
-    if (state.run_direction === 'bullish') {
-      newState.confirmed_swing_high      = state.run_extreme;
-      newState.confirmed_swing_high_time = state.extreme_time;
-    } else {
-      newState.confirmed_swing_low      = state.run_extreme;
-      newState.confirmed_swing_low_time = state.extreme_time;
-    }
-    newState.run_direction = currentDir;
-    newState.run_start     = currentCandle.time;
-    newState.run_extreme   = currentDir === 'bullish' ? currentCandle.high : currentCandle.low;
-    newState.extreme_time  = currentCandle.time;
-  }
-
-  newState.updated_at = now;
-
-  await db.prepare(
-    `INSERT INTO swing_state
-     (symbol,timeframe,run_direction,run_start,run_extreme,extreme_time,
-      confirmed_swing_high,confirmed_swing_high_time,
-      confirmed_swing_low,confirmed_swing_low_time,updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?)
-     ON CONFLICT(symbol,timeframe) DO UPDATE SET
-       run_direction=excluded.run_direction,
-       run_start=excluded.run_start,
-       run_extreme=excluded.run_extreme,
-       extreme_time=excluded.extreme_time,
-       confirmed_swing_high=excluded.confirmed_swing_high,
-       confirmed_swing_high_time=excluded.confirmed_swing_high_time,
-       confirmed_swing_low=excluded.confirmed_swing_low,
-       confirmed_swing_low_time=excluded.confirmed_swing_low_time,
-       updated_at=excluded.updated_at`
-  ).bind(
-    symbol, timeframe,
-    newState.run_direction, newState.run_start, newState.run_extreme, newState.extreme_time,
-    newState.confirmed_swing_high ?? null, newState.confirmed_swing_high_time ?? null,
-    newState.confirmed_swing_low  ?? null, newState.confirmed_swing_low_time  ?? null,
-    newState.updated_at
-  ).run();
-
-  return detectMSS(newState, currentCandle);
+  return sum / bars.length;
 }
 
-function detectMSS(swingState, currentCandle) {
-  if (
-    swingState.run_direction === 'bearish' &&
-    swingState.confirmed_swing_high != null &&
-    currentCandle.close > swingState.confirmed_swing_high
-  ) {
-    return { direction: 'bullish', level: swingState.confirmed_swing_high, candle_time: currentCandle.time };
+function detectMSS(bar, swingState) {
+  if (!swingState || swingState.run_dir == null || (swingState.run_candle_count ?? 0) < 3) return null;
+  if (swingState.run_dir === 'bearish' && swingState.last_confirmed_swing_high != null && bar.close > swingState.last_confirmed_swing_high) {
+    return { direction: 'bullish', level: swingState.last_confirmed_swing_high, candle_time: bar.time };
   }
-  if (
-    swingState.run_direction === 'bullish' &&
-    swingState.confirmed_swing_low != null &&
-    currentCandle.close < swingState.confirmed_swing_low
-  ) {
-    return { direction: 'bearish', level: swingState.confirmed_swing_low, candle_time: currentCandle.time };
+  if (swingState.run_dir === 'bullish' && swingState.last_confirmed_swing_low != null && bar.close < swingState.last_confirmed_swing_low) {
+    return { direction: 'bearish', level: swingState.last_confirmed_swing_low, candle_time: bar.time };
   }
   return null;
+}
+
+// table: 'swing_states' | 'nse_swing_states'. Only the newest bar
+// (candlesOldestFirst's last element) is a genuinely new close each cron
+// cycle — the array's second-to-last element is used only as the
+// comparison bar when bootstrapping run_dir from empty state.
+async function updateSwingState(db, table, symbol, tf, candlesOldestFirst) {
+  const bar     = candlesOldestFirst[candlesOldestFirst.length - 1];
+  const prevBar = candlesOldestFirst[candlesOldestFirst.length - 2] ?? null;
+  const nowISO  = new Date().toISOString();
+
+  let state = await db.prepare(`SELECT * FROM ${table} WHERE symbol=? AND tf=?`).bind(symbol, tf).first();
+  if (!state) {
+    state = {
+      run_dir: null, run_start_time: null, run_candle_count: 0,
+      last_confirmed_swing_high: null, last_confirmed_swing_high_time: null,
+      last_confirmed_swing_low: null, last_confirmed_swing_low_time: null,
+      pending_swing_high: null, pending_swing_high_time: null,
+      pending_swing_low: null, pending_swing_low_time: null,
+    };
+  }
+
+  const atr14         = calcATR14(candlesOldestFirst);
+  const dojiThreshold = atr14 != null ? atr14 * 0.1 : (bar.high - bar.low) * 0.1;
+
+  let mssResult = null;
+  if (!isDoji(bar, dojiThreshold)) {
+    const barTimeISO = new Date(bar.time).toISOString();
+
+    if (state.run_dir === null) {
+      if (prevBar && bar.close > prevBar.high)      state.run_dir = 'bullish';
+      else if (prevBar && bar.close < prevBar.low)  state.run_dir = 'bearish';
+      else                                           state.run_dir = 'bullish';
+      state.run_start_time   = barTimeISO;
+      state.run_candle_count = 1;
+    } else if (state.run_dir === 'bullish') {
+      if (bar.high > (state.pending_swing_high ?? -Infinity)) {
+        state.pending_swing_high      = bar.high;
+        state.pending_swing_high_time = barTimeISO;
+      }
+      if (state.pending_swing_high != null && bar.close < state.pending_swing_high) {
+        state.last_confirmed_swing_high      = state.pending_swing_high;
+        state.last_confirmed_swing_high_time = state.pending_swing_high_time;
+        state.pending_swing_high      = null;
+        state.pending_swing_high_time = null;
+      }
+      state.run_candle_count = (state.run_candle_count ?? 0) + 1;
+    } else {
+      if (bar.low < (state.pending_swing_low ?? Infinity)) {
+        state.pending_swing_low      = bar.low;
+        state.pending_swing_low_time = barTimeISO;
+      }
+      if (state.pending_swing_low != null && bar.close > state.pending_swing_low) {
+        state.last_confirmed_swing_low      = state.pending_swing_low;
+        state.last_confirmed_swing_low_time = state.pending_swing_low_time;
+        state.pending_swing_low      = null;
+        state.pending_swing_low_time = null;
+      }
+      state.run_candle_count = (state.run_candle_count ?? 0) + 1;
+    }
+
+    mssResult = detectMSS(bar, state);
+    if (mssResult) {
+      state.run_dir           = mssResult.direction;
+      state.pending_swing_high = null; state.pending_swing_high_time = null;
+      state.pending_swing_low  = null; state.pending_swing_low_time  = null;
+      state.run_candle_count  = 1;
+      state.run_start_time    = barTimeISO;
+    }
+  }
+
+  state.updated_at = nowISO;
+  await db.prepare(`
+    INSERT INTO ${table} (symbol, tf, run_dir, run_start_time, run_candle_count,
+      last_confirmed_swing_high, last_confirmed_swing_high_time,
+      last_confirmed_swing_low, last_confirmed_swing_low_time,
+      pending_swing_high, pending_swing_high_time,
+      pending_swing_low, pending_swing_low_time, updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(symbol, tf) DO UPDATE SET
+      run_dir=excluded.run_dir, run_start_time=excluded.run_start_time,
+      run_candle_count=excluded.run_candle_count,
+      last_confirmed_swing_high=excluded.last_confirmed_swing_high,
+      last_confirmed_swing_high_time=excluded.last_confirmed_swing_high_time,
+      last_confirmed_swing_low=excluded.last_confirmed_swing_low,
+      last_confirmed_swing_low_time=excluded.last_confirmed_swing_low_time,
+      pending_swing_high=excluded.pending_swing_high,
+      pending_swing_high_time=excluded.pending_swing_high_time,
+      pending_swing_low=excluded.pending_swing_low,
+      pending_swing_low_time=excluded.pending_swing_low_time,
+      updated_at=excluded.updated_at
+  `).bind(
+    symbol, tf, state.run_dir, state.run_start_time, state.run_candle_count,
+    state.last_confirmed_swing_high, state.last_confirmed_swing_high_time,
+    state.last_confirmed_swing_low, state.last_confirmed_swing_low_time,
+    state.pending_swing_high, state.pending_swing_high_time,
+    state.pending_swing_low, state.pending_swing_low_time,
+    state.updated_at
+  ).run();
+
+  return mssResult;
 }
 
 function formatMSSAlert(symbol, tf, mss, htfBias, htfLabelStr) {
@@ -768,7 +798,7 @@ async function generateEbpSignalId(tf, symbol, env) {
 // both workers share the same global 'T3' signal_counters row (one counter
 // across all symbols, not per-symbol). Now called at chain initiation
 // (Step 1) instead of at MSS completion — the ID is carried through Steps
-// 2/3 via chain_state.htf_signal_id rather than regenerated.
+// 2/3 via chain_state.step1_signal_id rather than regenerated.
 async function generateSignalId(db, template, symbol) {
   const row = await db.prepare(
     'SELECT series, count FROM signal_counters WHERE template = ?'
@@ -907,18 +937,18 @@ async function handleEBPCron(tf, env, debugLog = null) {
       // record below — that table has no per-user concept.
       const htfBias = defaultBiasTF ? (biasByTF.get(defaultBiasTF) ?? 'neutral') : 'neutral';
 
-      // FVG Phase 1 — candles are newest-first; processFVGs needs oldest-first.
+      // FVG Phase 1 — candles are newest-first; processFVGZones needs oldest-first.
       // Daily TF only has the two synthesised bars (bar0/bar1) — FVG needs 3,
       // so it's skipped there, but swing state / MSS still run on bar0.
       let mssResult = null;
       if (tf === 'D') {
-        mssResult = await updateSwingState(env.DB, symbol, tf, [null, null, candles[0]]);
+        mssResult = await updateSwingState(env.DB, 'swing_states', symbol, tf, [null, null, candles[0]]);
       } else if (candles.length >= 3) {
         const oldestFirst = [candles[2], candles[1], candles[0]];
-        await processFVGs(env.DB, symbol, tf, oldestFirst, candles[0]);
+        await processFVGZones(env.DB, 'fvg_zones', symbol, tf, oldestFirst, candles[0]);
 
         // Phase 1.5 + 2 — Swing state + MSS
-        mssResult = await updateSwingState(env.DB, symbol, tf, oldestFirst);
+        mssResult = await updateSwingState(env.DB, 'swing_states', symbol, tf, oldestFirst);
       }
       if (mssResult) {
         for (const row of userRows) {
@@ -1035,25 +1065,52 @@ async function handleEBPCron(tf, env, debugLog = null) {
           ebp.direction, effectiveBias, ebp.candleTime, Date.now()
         ).run();
 
-        // T3 chain initiation — Signal ID assigned here (Step 1) and
-        // carried through Steps 2/3 via chain_state.htf_signal_id (IM-4).
-        const tmpl = await env.DB.prepare(
-          `SELECT * FROM user_templates WHERE user_id=? AND asset_id=? AND template='t3' AND enabled=1 AND htf=?`
-        ).bind(row.user_id, row.asset_id, tf).first();
-        if (tmpl) {
-          const t3SignalId = await generateSignalId(env.DB, 'T3', symbol);
-          await initiateT3Chain(
-            env.DB, row.user_id, row.asset_id, symbol,
-            ebp.direction, tf, tmpl.ltf, tmpl.window_mins, t3SignalId
-          );
+        // Phase 3 — T1/T2/T3 Step 1, all triggered by this same EBP event.
+        // T3's Signal ID is assigned here and carried through Steps 2/3 via
+        // chain_state.step1_signal_id (IM-4). T1/T2 don't get a Signal ID
+        // until their chain actually completes (Step 2, in sweep-cron.js).
+        for (const templateId of ['t1', 't2', 't3']) {
+          const tmpl = await env.DB.prepare(
+            `SELECT * FROM user_templates WHERE user_id=? AND asset_id=? AND template=? AND enabled=1 AND htf=?`
+          ).bind(row.user_id, row.asset_id, templateId, tf).first();
+          if (!tmpl) continue;
 
-          const t3FiredAt = new Date().toISOString();
-          const t3Msg = formatT3Alert(
-            symbol, tf, tmpl.ltf, ebp.direction,
-            deriveSession(t3FiredAt), ebp.closedLevel ?? null,
-            t3SignalId, 1
-          );
-          await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, t3Msg);
+          if (templateId === 't3') {
+            const t3SignalId = await generateSignalId(env.DB, 'T3', symbol);
+            await initiateT3Chain(
+              env.DB, row.user_id, row.asset_id, symbol,
+              ebp.direction, tf, tmpl.ltf, tmpl.window_mins, t3SignalId
+            );
+
+            const t3FiredAt = new Date().toISOString();
+            const t3Msg = formatT3Alert(
+              symbol, tf, tmpl.ltf, ebp.direction,
+              deriveSession(t3FiredAt), ebp.closedLevel ?? null,
+              t3SignalId, 1
+            );
+            await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, t3Msg);
+          } else if (templateId === 't1') {
+            await insertChain(env.DB, {
+              templateType: 'T1', userId: row.user_id, assetId: row.asset_id, symbol,
+              htf: tf, ltf: tmpl.ltf, direction: ebp.direction, state: 'awaiting_fvg_entry',
+              expiresAt: endOfUTCMonthISO(),
+            });
+          } else if (templateId === 't2') {
+            const htfIntervalMs = TF_INTERVAL_MS[tf] ?? 0;
+            await insertChain(env.DB, {
+              templateType: 'T2', userId: row.user_id, assetId: row.asset_id, symbol,
+              htf: tf, ltf: tmpl.ltf, direction: ebp.direction, state: 'awaiting_retracement',
+              expiresAt: endOfUTCMonthISO(),
+              htfCandle: {
+                open: candles[0].open, close: candles[0].close,
+                openTime: new Date(candles[0].time).toISOString(),
+                // closeTime approximated as open + one HTF interval — the
+                // cache only stores the candle's open timestamp, but the
+                // Step-2 retracement-window check needs a real close bound.
+                closeTime: new Date(candles[0].time + htfIntervalMs).toISOString(),
+              },
+            });
+          }
         }
       }
 
@@ -1829,6 +1886,32 @@ function pearsonCorr(a, b) {
 }
 
 async function handleMarketBreadthCron(env, debugLog = []) {
+  // Forex weekend gate — Friday 17:00 NY through Sunday 17:00 NY, no new 1H
+  // bars are actually forming, so breadth computation is suppressed. Reuses
+  // the same Intl shortOffset technique nyDateAtHourToUTCms already uses
+  // for daily/weekly candle synthesis (not a new DST helper), just applied
+  // in the other direction — current UTC instant to NY wall-clock.
+  const nowUtc = new Date();
+  const nyOffsetParts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    timeZoneName: 'shortOffset',
+  }).formatToParts(nowUtc);
+  const nyOffsetStr   = nyOffsetParts.find(p => p.type === 'timeZoneName').value;
+  const nyOffsetHours = parseInt(nyOffsetStr.replace('GMT', ''));
+  const nyWallClock   = new Date(nowUtc.getTime() + nyOffsetHours * 3600 * 1000);
+  const nyDayOfWeek   = nyWallClock.getUTCDay();
+  const nyHour        = nyWallClock.getUTCHours();
+
+  const isForexWeekend =
+    (nyDayOfWeek === 5 && nyHour >= 17) || // Friday from 17:00
+    nyDayOfWeek === 6 ||                   // all Saturday
+    (nyDayOfWeek === 0 && nyHour < 17);    // Sunday before 17:00
+
+  if (isForexWeekend) {
+    console.log('Market breadth cron skipped — forex weekend (Friday 17:00 to Sunday 17:00 NY)');
+    return { skipped: true, reason: 'forex weekend — breadth suppressed Friday 17:00 to Sunday 17:00 NY' };
+  }
+
   const BREADTH_TF = '1H';
   const now = Date.now();
 

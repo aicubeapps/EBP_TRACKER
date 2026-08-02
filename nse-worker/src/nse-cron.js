@@ -427,110 +427,198 @@ function detectSweep(candles) {
   };
 }
 
-// ── Swing state + MSS — copied verbatim from worker/src/ebp-worker.js ──
-// Uses the shared swing_state table — same rows the EBP/Sweep Workers
-// write to, keyed by (symbol, timeframe). NSE timeframes (M1/M30) don't
-// collide with forex/crypto TFs on the same symbols since symbols differ
-// (RELIANCE.NS vs EUR/USD), so sharing the table is safe.
-function getCandleDirection(candle, priorDirection) {
-  if (candle.close > candle.open) return 'bullish';
-  if (candle.close < candle.open) return 'bearish';
-  return priorDirection;
-}
-
-async function updateSwingState(db, symbol, timeframe, candles) {
-  // candles = [oldest, middle, newest]
-  const currentCandle = candles[2];
-  const now = Date.now();
-
-  const state = await db.prepare(
-    `SELECT * FROM swing_state WHERE symbol=? AND timeframe=?`
-  ).bind(symbol, timeframe).first();
-
-  if (!state) {
-    const dir = currentCandle.close >= currentCandle.open ? 'bullish' : 'bearish';
-    await db.prepare(
-      `INSERT INTO swing_state
-       (symbol,timeframe,run_direction,run_start,run_extreme,extreme_time,updated_at)
-       VALUES (?,?,?,?,?,?,?)`
-    ).bind(
-      symbol, timeframe, dir, currentCandle.time,
-      dir === 'bullish' ? currentCandle.high : currentCandle.low,
-      currentCandle.time, now
-    ).run();
-    return null;
+// ── FVG engine — copied verbatim from sweep-worker/src/sweep-cron.js ──
+// NSE FVG TFs are M5/M15/1H only (enforced by the caller in handleNseCron).
+function detectFVG(candles) {
+  if (!candles || candles.length < 3) return null;
+  const barIMinus2 = candles[candles.length - 3];
+  const barI       = candles[candles.length - 1];
+  if (barIMinus2.high < barI.low) {
+    const top = barI.low, bottom = barIMinus2.high;
+    return { direction: 'bullish', top, bottom, midpoint: (top + bottom) / 2, formed_at: barI.time };
   }
-
-  const currentDir = getCandleDirection(currentCandle, state.run_direction);
-  let newState = { ...state };
-
-  if (currentDir === state.run_direction) {
-    if (currentDir === 'bullish' && currentCandle.high > state.run_extreme) {
-      newState.run_extreme  = currentCandle.high;
-      newState.extreme_time = currentCandle.time;
-    } else if (currentDir === 'bearish' && currentCandle.low < state.run_extreme) {
-      newState.run_extreme  = currentCandle.low;
-      newState.extreme_time = currentCandle.time;
-    }
-  } else {
-    if (state.run_direction === 'bullish') {
-      newState.confirmed_swing_high      = state.run_extreme;
-      newState.confirmed_swing_high_time = state.extreme_time;
-    } else {
-      newState.confirmed_swing_low      = state.run_extreme;
-      newState.confirmed_swing_low_time = state.extreme_time;
-    }
-    newState.run_direction = currentDir;
-    newState.run_start     = currentCandle.time;
-    newState.run_extreme   = currentDir === 'bullish' ? currentCandle.high : currentCandle.low;
-    newState.extreme_time  = currentCandle.time;
-  }
-
-  newState.updated_at = now;
-
-  await db.prepare(
-    `INSERT INTO swing_state
-     (symbol,timeframe,run_direction,run_start,run_extreme,extreme_time,
-      confirmed_swing_high,confirmed_swing_high_time,
-      confirmed_swing_low,confirmed_swing_low_time,updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?)
-     ON CONFLICT(symbol,timeframe) DO UPDATE SET
-       run_direction=excluded.run_direction,
-       run_start=excluded.run_start,
-       run_extreme=excluded.run_extreme,
-       extreme_time=excluded.extreme_time,
-       confirmed_swing_high=excluded.confirmed_swing_high,
-       confirmed_swing_high_time=excluded.confirmed_swing_high_time,
-       confirmed_swing_low=excluded.confirmed_swing_low,
-       confirmed_swing_low_time=excluded.confirmed_swing_low_time,
-       updated_at=excluded.updated_at`
-  ).bind(
-    symbol, timeframe,
-    newState.run_direction, newState.run_start, newState.run_extreme, newState.extreme_time,
-    newState.confirmed_swing_high ?? null, newState.confirmed_swing_high_time ?? null,
-    newState.confirmed_swing_low  ?? null, newState.confirmed_swing_low_time  ?? null,
-    newState.updated_at
-  ).run();
-
-  return detectMSS(newState, currentCandle);
-}
-
-function detectMSS(swingState, currentCandle) {
-  if (
-    swingState.run_direction === 'bearish' &&
-    swingState.confirmed_swing_high != null &&
-    currentCandle.close > swingState.confirmed_swing_high
-  ) {
-    return { direction: 'bullish', level: swingState.confirmed_swing_high, candle_time: currentCandle.time };
-  }
-  if (
-    swingState.run_direction === 'bullish' &&
-    swingState.confirmed_swing_low != null &&
-    currentCandle.close < swingState.confirmed_swing_low
-  ) {
-    return { direction: 'bearish', level: swingState.confirmed_swing_low, candle_time: currentCandle.time };
+  if (barIMinus2.low > barI.high) {
+    const top = barIMinus2.low, bottom = barI.high;
+    return { direction: 'bearish', top, bottom, midpoint: (top + bottom) / 2, formed_at: barI.time };
   }
   return null;
+}
+
+function checkFVGMitigation(bar, fvgRow) {
+  if (fvgRow.direction === 'bullish') return bar.close < fvgRow.midpoint;
+  return bar.close > fvgRow.midpoint;
+}
+
+async function processFVGZones(db, symbol, tf, candlesOldestFirst, latestBar) {
+  const nowISO = new Date().toISOString();
+
+  const fvg = detectFVG(candlesOldestFirst);
+  if (fvg) {
+    const existing = await db.prepare(
+      `SELECT id FROM nse_fvg_zones WHERE symbol=? AND tf=? AND direction=? AND mitigated_at IS NULL AND expires_at > ?
+       AND top >= ? AND bottom <= ? LIMIT 1`
+    ).bind(symbol, tf, fvg.direction, nowISO, fvg.bottom, fvg.top).first();
+
+    if (!existing) {
+      const formedAtISO = new Date(fvg.formed_at).toISOString();
+      const expiresAt   = new Date(fvg.formed_at + 14 * 24 * 60 * 60 * 1000).toISOString();
+      await db.prepare(
+        `INSERT INTO nse_fvg_zones (symbol, tf, direction, top, bottom, midpoint, formed_at, expires_at, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?)`
+      ).bind(symbol, tf, fvg.direction, fvg.top, fvg.bottom, fvg.midpoint, formedAtISO, expiresAt, nowISO).run();
+    }
+  }
+
+  const { results: activeFVGs } = await db.prepare(
+    `SELECT * FROM nse_fvg_zones WHERE symbol=? AND tf=? AND mitigated_at IS NULL AND expires_at > ?`
+  ).bind(symbol, tf, nowISO).all();
+
+  for (const row of activeFVGs ?? []) {
+    if (checkFVGMitigation(latestBar, row)) {
+      await db.prepare(`UPDATE nse_fvg_zones SET mitigated_at=?, mitigated_by_tf=? WHERE id=?`)
+        .bind(nowISO, tf, row.id).run();
+    }
+  }
+}
+
+async function cleanupExpiredNseFVGs(db) {
+  const nowISO = new Date().toISOString();
+  await db.prepare(`DELETE FROM nse_fvg_zones WHERE expires_at < ?`).bind(nowISO).run();
+}
+
+// ── Swing state + MSS — copied verbatim from worker/src/ebp-worker.js ──
+// Own nse_swing_states table (not the shared forex/crypto swing_states) —
+// NSE runs an M1 timeframe forex/crypto never uses and this keeps the two
+// fully independent.
+function isDoji(bar, dojiThreshold) {
+  return Math.abs(bar.close - bar.open) <= dojiThreshold;
+}
+
+// Real ATR(14) when enough history is passed in; the D1 candle cache this
+// file reads from only ever exposes the 3-bar window already used
+// elsewhere here, so this returns null in practice and callers fall back
+// to (high-low)*0.1 per the Phase 1.5 spec.
+function calcATR14(candlesOldestFirst) {
+  if (!candlesOldestFirst || candlesOldestFirst.length < 14) return null;
+  const bars = candlesOldestFirst.slice(-14);
+  let sum = 0;
+  for (let i = 0; i < bars.length; i++) {
+    const bar = bars[i];
+    const prevClose = i > 0 ? bars[i - 1].close : bar.open;
+    sum += Math.max(bar.high - bar.low, Math.abs(bar.high - prevClose), Math.abs(bar.low - prevClose));
+  }
+  return sum / bars.length;
+}
+
+function detectMSS(bar, swingState) {
+  if (!swingState || swingState.run_dir == null || (swingState.run_candle_count ?? 0) < 3) return null;
+  if (swingState.run_dir === 'bearish' && swingState.last_confirmed_swing_high != null && bar.close > swingState.last_confirmed_swing_high) {
+    return { direction: 'bullish', level: swingState.last_confirmed_swing_high, candle_time: bar.time };
+  }
+  if (swingState.run_dir === 'bullish' && swingState.last_confirmed_swing_low != null && bar.close < swingState.last_confirmed_swing_low) {
+    return { direction: 'bearish', level: swingState.last_confirmed_swing_low, candle_time: bar.time };
+  }
+  return null;
+}
+
+// Only the newest bar (candlesOldestFirst's last element) is a genuinely
+// new close each cron cycle — the array's second-to-last element is used
+// only as the comparison bar when bootstrapping run_dir from empty state.
+async function updateSwingState(db, symbol, timeframe, candlesOldestFirst) {
+  const bar     = candlesOldestFirst[candlesOldestFirst.length - 1];
+  const prevBar = candlesOldestFirst[candlesOldestFirst.length - 2] ?? null;
+  const nowISO  = new Date().toISOString();
+
+  let state = await db.prepare(`SELECT * FROM nse_swing_states WHERE symbol=? AND tf=?`).bind(symbol, timeframe).first();
+  if (!state) {
+    state = {
+      run_dir: null, run_start_time: null, run_candle_count: 0,
+      last_confirmed_swing_high: null, last_confirmed_swing_high_time: null,
+      last_confirmed_swing_low: null, last_confirmed_swing_low_time: null,
+      pending_swing_high: null, pending_swing_high_time: null,
+      pending_swing_low: null, pending_swing_low_time: null,
+    };
+  }
+
+  const atr14         = calcATR14(candlesOldestFirst);
+  const dojiThreshold = atr14 != null ? atr14 * 0.1 : (bar.high - bar.low) * 0.1;
+
+  let mssResult = null;
+  if (!isDoji(bar, dojiThreshold)) {
+    const barTimeISO = new Date(bar.time).toISOString();
+
+    if (state.run_dir === null) {
+      if (prevBar && bar.close > prevBar.high)      state.run_dir = 'bullish';
+      else if (prevBar && bar.close < prevBar.low)  state.run_dir = 'bearish';
+      else                                           state.run_dir = 'bullish';
+      state.run_start_time   = barTimeISO;
+      state.run_candle_count = 1;
+    } else if (state.run_dir === 'bullish') {
+      if (bar.high > (state.pending_swing_high ?? -Infinity)) {
+        state.pending_swing_high      = bar.high;
+        state.pending_swing_high_time = barTimeISO;
+      }
+      if (state.pending_swing_high != null && bar.close < state.pending_swing_high) {
+        state.last_confirmed_swing_high      = state.pending_swing_high;
+        state.last_confirmed_swing_high_time = state.pending_swing_high_time;
+        state.pending_swing_high      = null;
+        state.pending_swing_high_time = null;
+      }
+      state.run_candle_count = (state.run_candle_count ?? 0) + 1;
+    } else {
+      if (bar.low < (state.pending_swing_low ?? Infinity)) {
+        state.pending_swing_low      = bar.low;
+        state.pending_swing_low_time = barTimeISO;
+      }
+      if (state.pending_swing_low != null && bar.close > state.pending_swing_low) {
+        state.last_confirmed_swing_low      = state.pending_swing_low;
+        state.last_confirmed_swing_low_time = state.pending_swing_low_time;
+        state.pending_swing_low      = null;
+        state.pending_swing_low_time = null;
+      }
+      state.run_candle_count = (state.run_candle_count ?? 0) + 1;
+    }
+
+    mssResult = detectMSS(bar, state);
+    if (mssResult) {
+      state.run_dir            = mssResult.direction;
+      state.pending_swing_high = null; state.pending_swing_high_time = null;
+      state.pending_swing_low  = null; state.pending_swing_low_time  = null;
+      state.run_candle_count   = 1;
+      state.run_start_time     = barTimeISO;
+    }
+  }
+
+  state.updated_at = nowISO;
+  await db.prepare(`
+    INSERT INTO nse_swing_states (symbol, tf, run_dir, run_start_time, run_candle_count,
+      last_confirmed_swing_high, last_confirmed_swing_high_time,
+      last_confirmed_swing_low, last_confirmed_swing_low_time,
+      pending_swing_high, pending_swing_high_time,
+      pending_swing_low, pending_swing_low_time, updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(symbol, tf) DO UPDATE SET
+      run_dir=excluded.run_dir, run_start_time=excluded.run_start_time,
+      run_candle_count=excluded.run_candle_count,
+      last_confirmed_swing_high=excluded.last_confirmed_swing_high,
+      last_confirmed_swing_high_time=excluded.last_confirmed_swing_high_time,
+      last_confirmed_swing_low=excluded.last_confirmed_swing_low,
+      last_confirmed_swing_low_time=excluded.last_confirmed_swing_low_time,
+      pending_swing_high=excluded.pending_swing_high,
+      pending_swing_high_time=excluded.pending_swing_high_time,
+      pending_swing_low=excluded.pending_swing_low,
+      pending_swing_low_time=excluded.pending_swing_low_time,
+      updated_at=excluded.updated_at
+  `).bind(
+    symbol, timeframe, state.run_dir, state.run_start_time, state.run_candle_count,
+    state.last_confirmed_swing_high, state.last_confirmed_swing_high_time,
+    state.last_confirmed_swing_low, state.last_confirmed_swing_low_time,
+    state.pending_swing_high, state.pending_swing_high_time,
+    state.pending_swing_low, state.pending_swing_low_time,
+    state.updated_at
+  ).run();
+
+  return mssResult;
 }
 
 // ── Phase D++ — NSE Indicator alert delivery (shared by TDI + SMA) ──
@@ -561,14 +649,14 @@ async function deliverNseIndicatorAlert(env, { userId, symbol, timeframe, direct
 
 // ── Phase D++ — TDI (Traders Dynamic Index) ─────────────────────
 
-// Divergence check with swing_state fallback. direction: 'bullish' checks
-// for a bullish (higher-low) divergence against a bearish run; 'bearish'
-// checks the mirror. Primary reference is the ongoing swing_state run's
-// extreme; if that's unavailable, falls back to a 20-candle lookback
-// extreme close as a proxy swing reference (spec's wording mixes
-// run_extreme/confirmed_swing_low terminology here — this is the most
-// internally-consistent reading: use the live run's extreme when present,
-// else approximate with the lookback).
+// Divergence check with nse_swing_states fallback. direction: 'bullish'
+// checks for a bullish (higher-low) divergence against a bearish run;
+// 'bearish' checks the mirror. Primary reference is the ongoing run's
+// pending (not-yet-confirmed) extreme; if that's unavailable, falls back
+// to a 20-candle lookback extreme close as a proxy swing reference (spec's
+// wording mixes run_extreme/confirmed_swing_low terminology here — this is
+// the most internally-consistent reading: use the live run's extreme when
+// present, else approximate with the lookback).
 function checkTdiDivergence(direction, candles, rsiSeries, swingState) {
   const priceKey    = direction === 'bullish' ? 'low' : 'high';
   const runDirNeeded = direction === 'bullish' ? 'bearish' : 'bullish';
@@ -576,9 +664,14 @@ function checkTdiDivergence(direction, candles, rsiSeries, swingState) {
   let refIdx = -1;
   let refPrice = null;
 
-  if (swingState?.run_direction === runDirNeeded && swingState.run_extreme != null && swingState.extreme_time != null) {
-    refIdx = candles.findIndex(c => c.time === swingState.extreme_time);
-    refPrice = swingState.run_extreme;
+  if (swingState?.run_dir === runDirNeeded) {
+    const extreme     = runDirNeeded === 'bearish' ? swingState.pending_swing_low : swingState.pending_swing_high;
+    const extremeTime = runDirNeeded === 'bearish' ? swingState.pending_swing_low_time : swingState.pending_swing_high_time;
+    if (extreme != null && extremeTime != null) {
+      const extremeMs = new Date(extremeTime).getTime();
+      refIdx = candles.findIndex(c => c.time === extremeMs);
+      refPrice = extreme;
+    }
   }
 
   if (refIdx < 0 || refIdx >= rsiSeries.length) {
@@ -609,8 +702,8 @@ function checkTdiDivergence(direction, candles, rsiSeries, swingState) {
 function checkTdiCondition4(direction, candles, swingState, isIndex) {
   if (!swingState) return false;
   const priceOk = direction === 'bullish'
-    ? (swingState.confirmed_swing_high != null && candles[0].close > swingState.confirmed_swing_high)
-    : (swingState.confirmed_swing_low  != null && candles[0].close < swingState.confirmed_swing_low);
+    ? (swingState.last_confirmed_swing_high != null && candles[0].close > swingState.last_confirmed_swing_high)
+    : (swingState.last_confirmed_swing_low  != null && candles[0].close < swingState.last_confirmed_swing_low);
   if (!priceOk) return false;
   if (isIndex) return true;
 
@@ -659,7 +752,7 @@ function formatTdiAlert({ symbol, timeframe, direction, candleTime, mssLevel, vo
 // already-fetched candles (newest-first, from nse_indicator_candle_cache).
 // updateSwingState() must already have run for this symbol/timeframe this
 // cron cycle (enforced by the caller in handleNseCron), since this reads
-// swing_state directly rather than taking it as a parameter.
+// nse_swing_states directly rather than taking it as a parameter.
 async function runTDIForAsset(symbol, timeframe, userId, assetId, candles, env) {
   if (!candles || candles.length < 48) return; // need enough history for RSI(13) + BB(34)
 
@@ -686,7 +779,7 @@ async function runTDIForAsset(symbol, timeframe, userId, assetId, candles, env) 
   if ([redNow, redPrev, yellowNow, yellowPrev, bbUpperNow, bbLowerNow].some(v => v == null)) return;
 
   const swingState = await env.DB.prepare(
-    'SELECT * FROM swing_state WHERE symbol = ? AND timeframe = ?'
+    'SELECT * FROM nse_swing_states WHERE symbol = ? AND tf = ?'
   ).bind(symbol, timeframe).first();
 
   const cond1Bull = redNow <= bbLowerNow;
@@ -736,7 +829,7 @@ async function runTDIForAsset(symbol, timeframe, userId, assetId, candles, env) 
   await env.DB.prepare('DELETE FROM nse_indicator_chain WHERE id = ?').bind(existingChain.id).run();
 
   const direction = existingChain.direction;
-  const mssLevel  = direction === 'bullish' ? swingState.confirmed_swing_high : swingState.confirmed_swing_low;
+  const mssLevel  = direction === 'bullish' ? swingState.last_confirmed_swing_high : swingState.last_confirmed_swing_low;
 
   let volumeRatio = null;
   if (!isIndex && candles.length >= 20) {
@@ -1323,6 +1416,10 @@ export async function handleNseCron(env, tf) {
     return { ok: false, error: `Invalid TF: ${tf}` };
   }
 
+  if (tf === 'M1') {
+    await cleanupExpiredNseFVGs(env.DB);
+  }
+
   // Two separate config-type queries — same proven pattern as
   // handleEBPCron/handleSweepCron — rather than the UNION originally
   // proposed, which dropped symbol/alert_mode and never joined
@@ -1404,6 +1501,10 @@ export async function handleNseCron(env, tf) {
       let mssResult = null;
       if (candles.length >= 3) {
         const oldestFirst = [candles[2], candles[1], candles[0]];
+        // FVG detection (Phase 1) — NSE TFs M5/M15/1H only.
+        if (['M5', 'M15', '1H'].includes(tf)) {
+          await processFVGZones(env.DB, symbol, tf, oldestFirst, candles[0]);
+        }
         mssResult = await updateSwingState(env.DB, symbol, tf, oldestFirst);
       }
 
@@ -1496,7 +1597,7 @@ export async function handleNseCron(env, tf) {
 
       // ── Phase D++ — TDI / SMA Cloud indicators ──
       // updateSwingState() already ran above (before this block) — required
-      // since TDI reads swing_state directly. Reuses `candles` (already
+      // since TDI reads nse_swing_states directly. Reuses `candles` (already
       // fetched above) via mergeAndCacheNSECandles rather than fetching
       // again — one Upstox call per symbol+TF per run regardless of how
       // many indicators/users are configured on this asset.
