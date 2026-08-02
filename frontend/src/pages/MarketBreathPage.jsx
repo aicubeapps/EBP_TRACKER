@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  Legend, ResponsiveContainer, ReferenceLine, Cell, LabelList,
+  Legend, ResponsiveContainer, ReferenceLine, Cell,
 } from 'recharts';
 import api from '../lib/api';
 
@@ -65,6 +65,66 @@ function corrStyle(r, isDiag) {
   return r > 0
     ? { background: `rgba(16,185,129,${alpha})` }
     : { background: `rgba(239,68,68,${alpha})` };
+}
+
+// ── Bar labels — positioned near the zero line, opposite side from the
+// bar's own direction (positive bars extend right so their label sits to
+// the left of zero; negative bars mirror that) ──────────────────────────
+const GAP = 6; // px from the zero line
+
+function DeltaLabel(props) {
+  const { x, y, width, height, value, payload } = props;
+  if (value === undefined || value === null) return null;
+
+  // Position/direction come from the Today bar's own geometry (value here
+  // is "today", per the Bar's dataKey) — that's what "opposite side from
+  // the bar" means. The displayed number is the delta, a different field
+  // on the same row, which recharts passes through as `payload` rather
+  // than `value` when using a Bar's `label` prop (unlike LabelList, which
+  // takes an explicit dataKey to pull a different field than the bar).
+  const delta = payload?.delta;
+  if (delta === undefined || delta === null) return null;
+
+  const isPositive = value >= 0;
+  const zeroX = isPositive ? x : x + width;
+  const labelX = isPositive ? zeroX - GAP : zeroX + GAP;
+  const labelAnchor = isPositive ? 'end' : 'start';
+
+  return (
+    <text
+      x={labelX}
+      y={y + height / 2}
+      textAnchor={labelAnchor}
+      dominantBaseline="middle"
+      fontSize={10}
+      fill={delta >= 0 ? 'var(--bull)' : 'var(--bear)'}
+    >
+      {delta >= 0 ? `Δ +${delta.toFixed(4)}` : `Δ ${delta.toFixed(4)}`}
+    </text>
+  );
+}
+
+function IntradayLabel(props) {
+  const { x, y, width, height, value } = props;
+  if (!value) return null;
+
+  const isPositive = value >= 0;
+  const zeroX = isPositive ? x : x + width;
+  const labelX = isPositive ? zeroX - GAP : zeroX + GAP;
+  const labelAnchor = isPositive ? 'end' : 'start';
+
+  return (
+    <text
+      x={labelX}
+      y={y + height / 2}
+      textAnchor={labelAnchor}
+      dominantBaseline="middle"
+      fontSize={10}
+      fill={value >= 0 ? 'var(--bull)' : 'var(--bear)'}
+    >
+      {value.toFixed(3)}
+    </text>
+  );
 }
 
 export default function MarketBreathPage() {
@@ -142,8 +202,14 @@ export default function MarketBreathPage() {
     : [];
 
   // ── Line chart (48h history) ──────────────────────────────────────
-  const lineChartData = (intraday ?? []).map(row => ({
-    time: fmtTime(row.t),
+  const OUTLIER_THRESHOLD = 0.3;
+  const filteredIntraday = (intraday ?? []).filter(snap => {
+    const vals = Object.values(snap.strength);
+    return vals.every(v => Math.abs(v) <= OUTLIER_THRESHOLD);
+  });
+
+  const lineChartData = filteredIntraday.map(row => ({
+    t: row.t,
     ...row.strength,
   }));
 
@@ -203,19 +269,13 @@ export default function MarketBreathPage() {
                   contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 11 }}
                   formatter={val => val.toFixed(4)}
                 />
-                <Bar dataKey="value" name="Strength" radius={[0, 3, 3, 0]}>
+                <Bar dataKey="value" name="Strength" radius={[0, 3, 3, 0]} label={<IntradayLabel />}>
                   {intradayChartData.map((entry) => (
                     <Cell
                       key={entry.currency}
                       fill={CCY_COLORS[entry.currency] || '#888'}
                     />
                   ))}
-                  <LabelList
-                    dataKey="value"
-                    position="right"
-                    formatter={v => v.toFixed(3)}
-                    style={{ fontSize: '0.7rem', fill: 'var(--muted)' }}
-                  />
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
@@ -276,19 +336,13 @@ export default function MarketBreathPage() {
                   contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 11 }}
                   formatter={val => val?.toFixed(4) ?? '—'}
                 />
-                <Bar dataKey="today" name="Today" barSize={10}>
+                <Bar dataKey="today" name="Today" barSize={10} label={<DeltaLabel />}>
                   {dailyChartData.map((entry) => (
                     <Cell
                       key={`today-${entry.currency}`}
                       fill={CCY_COLORS[entry.currency] || '#888'}
                     />
                   ))}
-                  <LabelList
-                    dataKey="delta"
-                    position="right"
-                    formatter={v => v != null ? `Δ ${v >= 0 ? '+' : ''}${v.toFixed(2)}` : ''}
-                    style={{ fontSize: 10, fontFamily: 'var(--font-mono)', fill: '#6b6050' }}
-                  />
                 </Bar>
                 <Bar dataKey="yesterday" name="Yesterday" barSize={10} opacity={0.35}>
                   {dailyChartData.map((entry) => (
@@ -397,7 +451,7 @@ export default function MarketBreathPage() {
               No correlation data yet — needs ≥2 hourly runs.
             </p>
           ) : (
-            <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+            <div style={{ position: 'relative', overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
               <table className="breadth-heatmap" style={{ minWidth: 480 }}>
                 <thead>
                   <tr>
@@ -424,6 +478,16 @@ export default function MarketBreathPage() {
                   ))}
                 </tbody>
               </table>
+              <div style={{
+                position: 'absolute',
+                right: 0,
+                top: 0,
+                bottom: 0,
+                width: 24,
+                background: 'linear-gradient(to right, transparent, rgba(243,237,227,0.8))',
+                pointerEvents: 'none',
+                borderRadius: '0 8px 8px 0',
+              }} />
             </div>
           )}
         </section>
@@ -444,9 +508,17 @@ export default function MarketBreathPage() {
             <LineChart data={lineChartData} margin={{ top: 8, right: 16, bottom: 8, left: 40 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
               <XAxis
-                dataKey="time"
+                dataKey="t"
+                type="number"
+                scale="time"
+                domain={['dataMin', 'dataMax']}
+                tickFormatter={(ms) => {
+                  const d = new Date(ms);
+                  return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')} UTC`;
+                }}
                 tick={{ fontSize: 10, fontFamily: 'var(--font-mono)', fill: 'var(--muted)' }}
                 interval="preserveStartEnd"
+                minTickGap={60}
               />
               <YAxis
                 width={40}
@@ -456,6 +528,7 @@ export default function MarketBreathPage() {
               <Tooltip
                 contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 11 }}
                 formatter={(v, name) => [fmtScore(v), name]}
+                labelFormatter={fmtTime}
               />
               <Legend wrapperStyle={{ fontSize: 11 }} />
               {CURRENCIES.map(ccy => (
