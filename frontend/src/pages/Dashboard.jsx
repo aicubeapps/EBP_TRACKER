@@ -34,8 +34,9 @@ export default function Dashboard() {
     api.get('/nse/status').then(data => setUpstoxConfigured(!!data?.upstox_configured)).catch(() => {});
   }, []);
 
-  const forexCryptoAssets = assets.filter(a => a.asset_type === 'forex' || a.asset_type === 'crypto');
-  const nseAssets         = assets.filter(a => a.asset_type === 'nse');
+  const dxyAsset           = assets.find(a => a.asset_type === 'system');
+  const forexCryptoAssets  = assets.filter(a => a.asset_type === 'forex' || a.asset_type === 'crypto');
+  const nseAssets          = assets.filter(a => a.asset_type === 'nse');
 
   // null = still loading / not yet known — panels skip filtering rather than
   // showing a false "no timeframes enabled" state before /user/me resolves.
@@ -61,6 +62,18 @@ export default function Dashboard() {
       )}
 
       <ApiErrorAlert error={error} />
+
+      {/* DXY — synthetic index, its own asset_type ('system'), doesn't
+          belong in the Forex/Crypto or NSE buckets below, so it needs its
+          own always-first slot rather than falling through a type filter. */}
+      {!loading && dxyAsset && (
+        <AssetCard
+          key={dxyAsset.id}
+          asset={dxyAsset}
+          allowedTfs={userTfAccess}
+          onRemove={async (id) => { await removeAsset(id); fetchAssetCount(); }}
+        />
+      )}
 
       {/* Forex & Crypto */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
