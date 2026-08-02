@@ -20,6 +20,36 @@ function json(data, status = 200) {
 }
 
 // ============================================================
+// Watchdog Telegram alerts (admin/developer-only — a separate bot
+// from the shared user-facing one; see sendWatchdogAlert below)
+// ============================================================
+
+// logWatchdog() only ever receives a D1 handle (db), not the full env —
+// several of its callers (e.g. getActiveKeys(db)) are themselves only
+// passed db, not env, so threading env through every call site would mean
+// widening many function signatures. Instead runWatchdog() stashes env
+// here at the start of each invocation, and logWatchdog() reads it back —
+// scoped to a single scheduled() run, reset every tick before any
+// logWatchdog call can fire.
+let _watchdogAlertEnv = null;
+
+async function sendWatchdogAlert(env, message) {
+  try {
+    await fetch(`https://api.telegram.org/bot${env.WATCHDOG_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: env.WATCHDOG_ADMIN_CHAT_ID,
+        text: message,
+        parse_mode: 'HTML'
+      })
+    });
+  } catch (e) {
+    // swallow — Telegram failure must never crash Watchdog
+  }
+}
+
+// ============================================================
 // Symbol pools
 // ============================================================
 
@@ -308,6 +338,14 @@ async function logWatchdog(db, eventType, message) {
     ).bind(eventType, message, new Date().toISOString()).run();
   } catch (e) {
     console.error('[WATCHDOG_LOG] failed to write log:', e.message);
+  }
+
+  if (_watchdogAlertEnv) {
+    if (eventType === 'error') {
+      await sendWatchdogAlert(_watchdogAlertEnv, `🚨 <b>Watchdog Failure</b>\n${message}`);
+    } else if (eventType === 'warning') {
+      await sendWatchdogAlert(_watchdogAlertEnv, `⚠️ <b>Watchdog Warning</b>\n${message}`);
+    }
   }
 }
 
@@ -740,13 +778,60 @@ async function attemptWeeklySynthesis(symbols, env) {
 }
 
 // ============================================================
+// Daily summary digest — watchdog_log activity in the last 24h
+// ============================================================
+async function sendWatchdogDailyDigest(env) {
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+  const { results } = await env.DB.prepare(
+    'SELECT event_type, COUNT(*) as count FROM watchdog_log WHERE created_at > ? GROUP BY event_type'
+  ).bind(cutoff).all();
+
+  if (!results || results.length === 0) {
+    await sendWatchdogAlert(env,
+      '📊 <b>Watchdog Daily Summary</b>\n⚠️ No watchdog_log entries in the last 24 hours — Watchdog may not be running.'
+    );
+    return;
+  }
+
+  const counts = { info: 0, warning: 0, error: 0 };
+  for (const row of results) {
+    if (row.event_type in counts) counts[row.event_type] = row.count;
+  }
+
+  const lastRun = await env.DB.prepare(
+    'SELECT created_at FROM watchdog_log WHERE created_at > ? ORDER BY created_at DESC LIMIT 1'
+  ).bind(cutoff).first();
+
+  const message = `📊 <b>Watchdog Daily Summary</b>
+Period: last 24 hours
+
+✅ Normal runs: ${counts.info}
+⚠️ Warnings: ${counts.warning}
+🚨 Errors: ${counts.error}
+
+Last run: ${lastRun?.created_at ?? 'unknown'}`;
+
+  await sendWatchdogAlert(env, message);
+}
+
+// ============================================================
 // Cron-gated orchestration
 // ============================================================
 async function runWatchdog(event, env) {
+  _watchdogAlertEnv = env;
+
   const db     = env.DB;
   const minute = new Date(event.scheduledTime).getUTCMinutes();
+  const hour   = new Date(event.scheduledTime).getUTCHours();
   const nyHour = getNewYorkHour(event.scheduledTime);
   const nyDay  = getNewYorkDay(event.scheduledTime);
+
+  // Daily summary digest — first tick after 08:00 UTC (plain UTC hour, not
+  // the NY-adjusted one everything else in this function uses).
+  if ((minute === 0 || minute < 15) && hour === 8) {
+    await sendWatchdogDailyDigest(env);
+  }
 
   // Forex 4H candles align to the NY trading-day boundary (17:00 NY — same
   // anchor daily synthesis uses), not a fixed UTC schedule. This set of NY
@@ -839,6 +924,7 @@ export default {
     ctx.waitUntil(
       runWatchdog(event, env).catch(async (e) => {
         console.error('[WATCHDOG] Unhandled error:', e.message);
+        _watchdogAlertEnv = env; // defensive — runWatchdog() sets this as its first line, but re-set here in case it threw before reaching it
         await logWatchdog(env.DB, 'error', `Unhandled scheduled() error: ${e.message}`);
       })
     );

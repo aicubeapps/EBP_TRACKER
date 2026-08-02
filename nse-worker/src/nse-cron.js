@@ -233,15 +233,6 @@ async function mergeAndCacheNSECandles(symbol, timeframe, freshCandles, env) {
   return combined;
 }
 
-// Thin standalone wrapper matching the spec's literal signature — fetches
-// fresh candles itself, then merges. Not used by handleNseCron's wiring
-// (which reuses the candles it already fetched via mergeAndCacheNSECandles
-// directly); kept for any standalone/manual-test call path.
-async function fetchAndCacheNSECandles(symbol, timeframe, env) {
-  const fresh = await fetchNseCandles(symbol, timeframe, env);
-  return mergeAndCacheNSECandles(symbol, timeframe, fresh, env);
-}
-
 // HTF candles for SMA Cloud's bias-reference leg — small fetch, no caching
 // (fresh each run). htfTimeframe is per-config ('M30' or '1H'). Reuses the
 // same Upstox-then-Yahoo fallback as everything else.

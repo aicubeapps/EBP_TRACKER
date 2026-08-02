@@ -46,11 +46,6 @@ function calcTTradesBias({ bar1, bar2 }) {
   return { bias, closure, closePos };
 }
 
-function getHTFForSweepTF(tf) {
-  const map = { 'M15': '1H', 'M30': '4H', '1H': 'D', '4H': 'W' };
-  return map[tf] ?? null;
-}
-
 // ── Phase 3 — Bias Source Map ─────────────────────────────────
 const BIAS_SOURCE = {
   ebp:      { 'M15': '4H', '1H': 'D', '4H': 'W', 'D': 'W', 'W': null },
@@ -99,12 +94,6 @@ async function writeBiasCache(db, symbol, biasTF, biasResult) {
   ).run();
 }
 
-async function loadBiasCache(db, symbol, biasTF) {
-  return db.prepare(
-    'SELECT * FROM bias_cache WHERE symbol=? AND timeframe=?'
-  ).bind(symbol, biasTF).first();
-}
-
 // ── Phase 3 — Chain State Machine (T1/T2/T3/T4) ───────────────
 // chain_state schema (post Phase-1-to-3 migration): template_type/state
 // (TEXT state machine, not the old current_step INTEGER), asset_id (kept
@@ -112,10 +101,6 @@ async function loadBiasCache(db, symbol, biasTF) {
 // asset-delete cascade are both asset_id-keyed), direction always
 // 'bullish'/'bearish' (never 'bull'/'bear' — matches every detector in
 // this codebase).
-
-function oppositeDirection(direction) {
-  return direction === 'bullish' ? 'bearish' : 'bullish';
-}
 
 async function insertChain(db, { templateType, userId, assetId, symbol, htf, ltf, direction, state, step1SignalId, expiresAt, htfCandle }) {
   const nowISO = new Date().toISOString();
@@ -208,6 +193,21 @@ function formatT3Alert(symbol, htf, ltf, direction, session, price, signalId, st
     'Session: ' + session,
     'Price: ' + price,
     'Signal ID: ' + signalId + stepLabel
+  ].join('\n');
+}
+
+// T3 completing at Step 2 because the template's step3_enabled=0 — MSS is
+// skipped entirely, chain completes on the sweep alone.
+function formatT3Step2CompleteAlert(symbol, htf, ltf, direction, session, signalId) {
+  const emoji    = direction === 'bullish' ? '🟢' : '🔴';
+  const dirLabel = direction === 'bullish' ? 'BULL' : 'BEAR';
+  return [
+    '🎯 T3 Signal — ' + symbol,
+    'HTF: ' + htf + ' EBP → LTF: ' + ltf + ' Sweep',
+    'Direction: ' + emoji + ' ' + dirLabel,
+    'Session: ' + session,
+    'Signal ID: ' + signalId,
+    'Note: Step 3 (MSS) disabled',
   ].join('\n');
 }
 
@@ -581,7 +581,20 @@ function detectFVG(candles) {
 }
 
 // 50% fill + body close beyond midpoint.
-function checkFVGMitigation(bar, fvgRow) {
+// rule: '50_percent' (default, body close beyond midpoint) | 'any_touch'
+// (close anywhere inside/beyond the zone) | 'full_fill' (close fully beyond
+// the far edge). Only checkFvgEntryChain's per-template check below ever
+// passes a non-default rule — processFVGZones' own mitigation sweep (which
+// sets fvg_zones.mitigated_at) always uses the default.
+function checkFVGMitigation(bar, fvgRow, rule = '50_percent') {
+  if (rule === 'any_touch') {
+    if (fvgRow.direction === 'bullish') return bar.close <= fvgRow.top;
+    return bar.close >= fvgRow.bottom;
+  }
+  if (rule === 'full_fill') {
+    if (fvgRow.direction === 'bullish') return bar.close < fvgRow.bottom;
+    return bar.close > fvgRow.top;
+  }
   if (fvgRow.direction === 'bullish') return bar.close < fvgRow.midpoint;
   return bar.close > fvgRow.midpoint;
 }
@@ -675,6 +688,14 @@ async function checkFvgEntryChain(env, chain, latestClose) {
     `SELECT * FROM fvg_zones WHERE symbol=? AND tf=? AND direction=? AND mitigated_at IS NULL AND expires_at > ?`
   ).bind(chain.symbol, chain.ltf, chain.direction, new Date().toISOString()).all();
 
+  // fvg_rule lives on user_templates, not chain_state — look up by
+  // user_id+asset_id+template (not htf+ltf: T4's chain_state.htf is always
+  // '', which never matches the real htf value on its user_templates row).
+  const tmplRow = await env.DB.prepare(
+    `SELECT fvg_rule FROM user_templates WHERE user_id=? AND asset_id=? AND template=?`
+  ).bind(chain.user_id, chain.asset_id, chain.template_type.toLowerCase()).first();
+  const fvgRule = tmplRow?.fvg_rule || '50_percent';
+
   for (const fvg of fvgs ?? []) {
     if (chain.template_type === 'T2') {
       if (!(fvg.formed_at >= chain.htf_candle_open_time && fvg.formed_at <= chain.htf_candle_close_time)) continue;
@@ -682,6 +703,11 @@ async function checkFvgEntryChain(env, chain, latestClose) {
       const bodyBottom = Math.min(chain.htf_candle_open, chain.htf_candle_close);
       if (!(fvg.top <= bodyTop && fvg.bottom >= bodyBottom)) continue;
     }
+    // Per-template mitigation check (independent of fvg_zones.mitigated_at,
+    // which is always 50_percent-based) — an FVG this template's own rule
+    // considers already mitigated is no longer a valid entry.
+    const isMitigated = checkFVGMitigation({ close: latestClose }, fvg, fvgRule);
+    if (isMitigated) continue;
     if (isPriceInFVG(latestClose, fvg)) return fvg;
   }
   return null;
@@ -693,7 +719,7 @@ async function processTemplateChains(tf, env, log) {
   // this is driven by user_templates directly rather than the EBP flow
   // T1/T2/T3 use.
   const { results: t4Templates } = await env.DB.prepare(
-    `SELECT ut.user_id, ut.asset_id, ua.symbol FROM user_templates ut
+    `SELECT ut.user_id, ut.asset_id, ut.bias_gate, ua.symbol FROM user_templates ut
      JOIN user_assets ua ON ut.asset_id = ua.id
      JOIN users u ON ut.user_id = u.id
      WHERE ut.template='t4' AND ut.enabled=1 AND ut.ltf=? AND u.active=1`
@@ -705,6 +731,23 @@ async function processTemplateChains(tf, env, log) {
       if (!candles || candles.length < 2) continue;
       const sweep = detectSweep(candles);
       if (!sweep) continue;
+
+      const biasGateEnabled = t.bias_gate !== 0; // default 1 = enabled
+      if (biasGateEnabled) {
+        const htf = BIAS_SOURCE.sweep[tf] ?? null;
+        let bias = 'neutral';
+        if (htf) {
+          let htfCandles;
+          if (htf === 'D') htfCandles = await getDailyCandlesFromCache(t.symbol, env);
+          else if (htf === 'W') htfCandles = await getWeeklyCandlesFromCache(t.symbol, env);
+          else htfCandles = await getCandlesFromCache(t.symbol, htf, env);
+          if (htfCandles?.length >= 2) {
+            const biasResult = calcTTradesBias({ bar1: htfCandles[0], bar2: htfCandles[1] });
+            bias = biasResult.bias;
+          }
+        }
+        if (bias !== sweep.direction) continue;
+      }
 
       const existing = await getChains(env.DB, {
         templateTypes: 'T4', state: 'awaiting_fvg_entry', symbol: t.symbol, direction: sweep.direction, userId: t.user_id,
@@ -1037,14 +1080,54 @@ export async function handleSweepCron(tf, env, debugLog = null) {
         });
         for (const chain of sweepChains) {
           if (chain.ltf !== tf) continue;
-          await advanceT3Chain(env.DB, chain.id);
 
-          const step2Msg = formatT3Alert(
-            symbol, chain.htf, tf, sweep.direction,
-            deriveSession(new Date().toISOString()), sweep.closedInsideLevel ?? null,
-            chain.step1_signal_id, 2
-          );
-          await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, step2Msg);
+          const tmplRow = await env.DB.prepare(
+            `SELECT step3_enabled FROM user_templates WHERE user_id=? AND asset_id=? AND template='t3' AND htf=? AND ltf=?`
+          ).bind(chain.user_id, chain.asset_id, chain.htf, chain.ltf).first();
+          const step3Enabled = (tmplRow?.step3_enabled ?? 1) !== 0; // default 1 = enabled
+
+          if (!step3Enabled) {
+            // MSS skipped by config — complete the chain right here at the
+            // sweep, same signals/alert_history bookkeeping the normal
+            // Step-3/MSS completion does, just fired one step early.
+            const firedAt = new Date().toISOString();
+            await env.DB.prepare(`
+              INSERT INTO signals (
+                signal_id, template_type, symbol, htf_tf, ltf_tf, direction, fired_at,
+                price_at_signal, session
+              )
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).bind(
+              chain.step1_signal_id, 'T3', symbol, chain.htf, tf,
+              sweep.direction, firedAt, sweep.closedInsideLevel ?? null, deriveSession(firedAt)
+            ).run();
+
+            const step2CompleteMsg = formatT3Step2CompleteAlert(
+              symbol, chain.htf, tf, sweep.direction,
+              deriveSession(firedAt), chain.step1_signal_id
+            );
+            await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, step2CompleteMsg);
+
+            await env.DB.prepare(`
+              INSERT INTO alert_history
+              (id,user_id,symbol,timeframe,direction,trend_bias,candle_time,fired_at,alert_type)
+              VALUES (?,?,?,?,?,?,?,?,'t3')
+            `).bind(
+              crypto.randomUUID(), row.user_id, symbol, `${chain.htf}+${tf}`,
+              sweep.direction, effectiveBias, sweep.candleTime, Date.now()
+            ).run();
+
+            await completeT3Chain(env.DB, chain.id);
+          } else {
+            await advanceT3Chain(env.DB, chain.id); // existing: set awaiting_mss
+
+            const step2Msg = formatT3Alert(
+              symbol, chain.htf, tf, sweep.direction,
+              deriveSession(new Date().toISOString()), sweep.closedInsideLevel ?? null,
+              chain.step1_signal_id, 2
+            );
+            await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, step2Msg);
+          }
         }
       }
 

@@ -131,11 +131,6 @@ function calcTTradesBias({ bar1, bar2 }) {
   return { bias, closure, closePos };
 }
 
-function getHTFForTF(tf) {
-  const map = { 'M15': '4H', '1H': 'D', '4H': 'W', 'D': 'W', 'W': null };
-  return map[tf] ?? null;
-}
-
 // ── Phase 3 — Bias Source Map ─────────────────────────────────
 const BIAS_SOURCE = {
   ebp:      { 'M15': '4H', '1H': 'D', '4H': 'W', 'D': 'W', 'W': null },
@@ -181,12 +176,6 @@ async function writeBiasCache(db, symbol, biasTF, biasResult) {
     symbol, biasTF, biasResult.bias, biasResult.closure,
     biasResult.closePos ?? null, biasResult.bar1Time, Date.now()
   ).run();
-}
-
-async function loadBiasCache(db, symbol, biasTF) {
-  return db.prepare(
-    'SELECT * FROM bias_cache WHERE symbol=? AND timeframe=?'
-  ).bind(symbol, biasTF).first();
 }
 
 // ── Phase 3 — Chain State Machine (T1/T2/T3/T4) ───────────────
@@ -577,10 +566,6 @@ function detectFVG(candles) {
 function checkFVGMitigation(bar, fvgRow) {
   if (fvgRow.direction === 'bullish') return bar.close < fvgRow.midpoint;
   return bar.close > fvgRow.midpoint;
-}
-
-function isPriceInFVG(price, fvgRow) {
-  return price >= fvgRow.bottom && price <= fvgRow.top;
 }
 
 // table: 'fvg_zones' | 'nse_fvg_zones'. candlesOldestFirst is the existing
@@ -1029,43 +1014,50 @@ async function handleEBPCron(tf, env, debugLog = null) {
         const biasOverrides = JSON.parse(row.bias_overrides || '{}');
         const effectiveBias = getEffectiveBias(userBiasTF, { [userBiasTF]: { bias: userHtfBias } }, biasOverrides);
         const trendAligned  = ebp.direction === effectiveBias;
-        if (alertMode === 'aligned' && !trendAligned) continue;
 
+        // tg is needed by both the plain EBP alert below and the T1/T2/T3
+        // template loop (T3's Step 1 message) — fetched once, unconditionally,
+        // so a template with bias_gate=0 can still fire even on a cron cycle
+        // where the plain EBP alert itself is skipped for misalignment.
         const tg = await env.DB.prepare(
           'SELECT chat_id FROM user_telegram WHERE user_id = ? AND verified = 1'
         ).bind(row.user_id).first();
         if (!tg?.chat_id) continue;
 
-        const isDup = await isDuplicateAlert(env.DB, row.user_id, symbol, tf, ebp.direction, 'ebp');
-        if (isDup) {
-          console.log(`[${symbol}] DEDUP: skipping duplicate ${tf} ${ebp.direction} EBP alert`);
-          continue;
+        if (!(alertMode === 'aligned' && !trendAligned)) {
+          const isDup = await isDuplicateAlert(env.DB, row.user_id, symbol, tf, ebp.direction, 'ebp');
+          if (isDup) {
+            console.log(`[${symbol}] DEDUP: skipping duplicate ${tf} ${ebp.direction} EBP alert`);
+          } else {
+            const msg = formatEBPAlert({
+              symbol, tf,
+              direction:   ebp.direction,
+              candleTime:  ebp.candleTime,
+              trendBias:   effectiveBias,
+              trendAligned,
+              sweptLevel:  ebp.sweptLevel?.toFixed(5),
+              closedLevel: ebp.closedLevel?.toFixed(5),
+              signalId:    ebpSignalId,
+              biasTF:      userBiasTF,
+            });
+
+            await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, msg);
+
+            await env.DB.prepare(`
+              INSERT INTO alert_history
+              (id, user_id, symbol, timeframe, direction, trend_bias, candle_time, fired_at, alert_type)
+              VALUES (?,?,?,?,?,?,?,?,'ebp')
+            `).bind(
+              crypto.randomUUID(), row.user_id, symbol, tf,
+              ebp.direction, effectiveBias, ebp.candleTime, Date.now()
+            ).run();
+          }
         }
 
-        const msg = formatEBPAlert({
-          symbol, tf,
-          direction:   ebp.direction,
-          candleTime:  ebp.candleTime,
-          trendBias:   effectiveBias,
-          trendAligned,
-          sweptLevel:  ebp.sweptLevel?.toFixed(5),
-          closedLevel: ebp.closedLevel?.toFixed(5),
-          signalId:    ebpSignalId,
-          biasTF:      userBiasTF,
-        });
-
-        await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, msg);
-
-        await env.DB.prepare(`
-          INSERT INTO alert_history
-          (id, user_id, symbol, timeframe, direction, trend_bias, candle_time, fired_at, alert_type)
-          VALUES (?,?,?,?,?,?,?,?,'ebp')
-        `).bind(
-          crypto.randomUUID(), row.user_id, symbol, tf,
-          ebp.direction, effectiveBias, ebp.candleTime, Date.now()
-        ).run();
-
         // Phase 3 — T1/T2/T3 Step 1, all triggered by this same EBP event.
+        // Runs independently of the plain EBP alert's alignment gate above —
+        // each template's own bias_gate column decides whether ITS chain
+        // requires HTF-bias alignment (default: yes, same as before).
         // T3's Signal ID is assigned here and carried through Steps 2/3 via
         // chain_state.step1_signal_id (IM-4). T1/T2 don't get a Signal ID
         // until their chain actually completes (Step 2, in sweep-cron.js).
@@ -1074,6 +1066,9 @@ async function handleEBPCron(tf, env, debugLog = null) {
             `SELECT * FROM user_templates WHERE user_id=? AND asset_id=? AND template=? AND enabled=1 AND htf=?`
           ).bind(row.user_id, row.asset_id, templateId, tf).first();
           if (!tmpl) continue;
+
+          const biasGateEnabled = tmpl.bias_gate !== 0; // default 1 = enabled
+          if (biasGateEnabled && !trendAligned) continue;
 
           if (templateId === 't3') {
             const t3SignalId = await generateSignalId(env.DB, 'T3', symbol);
@@ -1125,6 +1120,10 @@ async function handleEBPCron(tf, env, debugLog = null) {
   return { symbolsProcessed: symbolMap.size };
 }
 
+let _jwksCache = null;
+let _jwksCacheTime = 0;
+const JWKS_TTL_MS = 60 * 60 * 1000; // 1 hour
+
 // ============================================================
 // Auth — Clerk JWT via Web Crypto (no npm needed)
 // ============================================================
@@ -1139,11 +1138,17 @@ async function verifyClerkToken(token, secretKey) {
     throw new Error('Token expired');
   }
 
-  // Fetch Clerk JWKS to verify signature
-  const jwksRes = await fetch('https://api.clerk.com/v1/jwks', {
-    headers: { Authorization: `Bearer ${secretKey}` },
-  });
-  const jwks = await jwksRes.json();
+  // Fetch Clerk JWKS to verify signature — cached for 1 hour so this
+  // doesn't hit Clerk on every single authenticated request.
+  const now = Date.now();
+  if (!_jwksCache || (now - _jwksCacheTime) > JWKS_TTL_MS) {
+    const res = await fetch('https://api.clerk.com/v1/jwks', {
+      headers: { Authorization: `Bearer ${secretKey}` },
+    });
+    _jwksCache = await res.json();
+    _jwksCacheTime = now;
+  }
+  const jwks = _jwksCache;
 
   const header = JSON.parse(
     atob(parts[0].replace(/-/g, '+').replace(/_/g, '/'))
@@ -1952,13 +1957,17 @@ async function handleMarketBreadthCron(env, debugLog = []) {
     'INSERT OR REPLACE INTO market_breadth_cache (tf, computed_at, heatmap, strength) VALUES (?,?,?,?)'
   ).bind(BREADTH_TF, now, JSON.stringify(heatmap), JSON.stringify(strength)).run();
 
-  // Append intraday snapshot, prune rows older than 48 hours.
+  // Append intraday snapshot, prune rows older than 40 days. Was 48 hours
+  // (still all the /market/breadth route's intraday chart query reads —
+  // that query is its own separate 48h-bounded SELECT, unaffected by this
+  // retention window), extended so computeWeeklyBreadth() below actually
+  // has 5+ weeks of history to aggregate from.
   await env.DB.prepare(
     'INSERT OR REPLACE INTO market_breadth_intraday (tf, snapshot_at, strength) VALUES (?,?,?)'
   ).bind(BREADTH_TF, now, JSON.stringify(strength)).run();
   await env.DB.prepare(
     'DELETE FROM market_breadth_intraday WHERE tf = ? AND snapshot_at < ?'
-  ).bind(BREADTH_TF, now - 48 * 60 * 60 * 1000).run();
+  ).bind(BREADTH_TF, now - 40 * 24 * 60 * 60 * 1000).run();
 
   // Build per-candle strength series for correlation (up to 10 points).
   const seriesLen = Math.min(10, ...Object.values(pairData).map(d => d.candles.length));
@@ -1994,7 +2003,90 @@ async function handleMarketBreadthCron(env, debugLog = []) {
   ).bind(BREADTH_TF, now, JSON.stringify(matrix)).run();
 
   debugLog.push(`breadth ok: ${Object.keys(pairData).length}/28 pairs`);
+
+  await computeWeeklyBreadth(env, debugLog);
+
   return { pairs_fetched: Object.keys(pairData).length };
+}
+
+// ── Weekly Market Breadth aggregation ─────────────────────────
+function getIsoWeekKey(tsMs) {
+  const d = new Date(tsMs);
+  const thursday = new Date(d);
+  thursday.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7) + 3);
+  const yearStart = new Date(Date.UTC(thursday.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil(((thursday - yearStart) / 86400000 + 1) / 7);
+  return `${thursday.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+}
+
+// Same Thursday-anchor math as getIsoWeekKey, additionally resolved to the
+// ISO week's Sunday (date-only, UTC midnight) so "is this week complete"
+// can be checked without re-deriving the week boundary a second way.
+function getIsoWeekSundayMs(tsMs) {
+  const d = new Date(tsMs);
+  const thursday = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  thursday.setUTCDate(thursday.getUTCDate() - ((d.getUTCDay() + 6) % 7) + 3);
+  const mondayMs = thursday.getTime() - 3 * 24 * 60 * 60 * 1000;
+  return mondayMs + 6 * 24 * 60 * 60 * 1000;
+}
+
+// market_breadth_intraday only stores per-currency `strength`, not a
+// pair-level heatmap, so there's nothing to aggregate for a weekly heatmap —
+// the '1W' row gets heatmap='{}' (the column is NOT NULL with no default).
+async function computeWeeklyBreadth(env, debugLog) {
+  const now = Date.now();
+  const cutoff = now - 35 * 24 * 60 * 60 * 1000;
+  const { results } = await env.DB.prepare(
+    'SELECT * FROM market_breadth_intraday WHERE snapshot_at > ? ORDER BY snapshot_at ASC'
+  ).bind(cutoff).all();
+
+  const weeks = new Map(); // isoWeekKey -> { sundayMs, days: Set<dayIndex>, rows: [...] }
+  for (const row of results ?? []) {
+    const key = getIsoWeekKey(row.snapshot_at);
+    if (!weeks.has(key)) {
+      weeks.set(key, { sundayMs: getIsoWeekSundayMs(row.snapshot_at), days: new Set(), rows: [] });
+    }
+    const w = weeks.get(key);
+    w.days.add(Math.floor(row.snapshot_at / 86400000));
+    w.rows.push(row);
+  }
+
+  // Most recent completed week only (Sunday end date before today UTC),
+  // skipping any week with fewer than 3 distinct trading days.
+  const todayUTCms = Math.floor(now / 86400000) * 86400000;
+  let latestCompleted = null;
+  for (const [key, w] of weeks) {
+    if (w.days.size < 3) continue;
+    if (w.sundayMs >= todayUTCms) continue; // current/in-progress week
+    if (!latestCompleted || w.sundayMs > latestCompleted.sundayMs) {
+      latestCompleted = { key, ...w };
+    }
+  }
+  if (!latestCompleted) {
+    debugLog.push('weekly breadth: no completed week with >=3 trading days in the last 35 days');
+    return;
+  }
+
+  const sums = {}, counts = {};
+  for (const ccy of BREADTH_CURRENCIES) { sums[ccy] = 0; counts[ccy] = 0; }
+  for (const row of latestCompleted.rows) {
+    const strength = JSON.parse(row.strength);
+    for (const ccy of BREADTH_CURRENCIES) {
+      if (typeof strength[ccy] === 'number') { sums[ccy] += strength[ccy]; counts[ccy] += 1; }
+    }
+  }
+  const weeklyStrength = {};
+  for (const ccy of BREADTH_CURRENCIES) {
+    weeklyStrength[ccy] = counts[ccy] > 0 ? parseFloat((sums[ccy] / counts[ccy]).toFixed(4)) : 0;
+  }
+
+  await env.DB.prepare(`
+    INSERT INTO market_breadth_cache (tf, computed_at, heatmap, strength)
+    VALUES ('1W', ?, '{}', ?)
+    ON CONFLICT(tf) DO UPDATE SET computed_at = excluded.computed_at, strength = excluded.strength
+  `).bind(now, JSON.stringify(weeklyStrength)).run();
+
+  debugLog.push(`weekly breadth ok: week ${latestCompleted.key}, ${latestCompleted.days.size} trading days`);
 }
 
 // EBP cron trigger — public route, secured by X-Cron-Secret (cron-job.org)
@@ -2029,7 +2121,6 @@ router.post('/cron/ebp', async (req, env) => {
 router.get('/market/breadth', async (req, env) => {
   const { user: clerkUser, origin, error } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
 
   const cache = await env.DB.prepare(
     'SELECT * FROM market_breadth_cache WHERE tf = ?'
