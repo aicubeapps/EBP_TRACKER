@@ -1,0 +1,1018 @@
+# EBP Tracker — Architecture & State Report
+
+**Generated:** 2026-08-02, entirely from source code inspection and live D1 queries. Spec/roadmap docs (`EBP_Tracker_Roadmap.md`, `EBP_Tracker_Technical_Reference_v2.2.md`, etc.) were consulted only to flag divergences (marked ⚠️ DIVERGENCE below), never as a source of truth for "what exists." Anything described in a code comment but not actually implemented is marked "documented but not implemented."
+
+Legend: 🔶 UNTESTED = exists in code but not exercised on live data as of this audit. 🐛 BUG RISK = a concrete failure mode identified in the code. ⚠️ DIVERGENCE = contradicts a roadmap/reference doc.
+
+---
+
+## Section 1 — Project Overview
+
+### Live URLs
+| Service | URL |
+|---|---|
+| Frontend (Cloudflare Pages) | `https://ebp-tracker.pages.dev` (from `ALLOWED_ORIGINS` in `worker/src/ebp-worker.js` and `sweep-worker/src/index.js`) |
+| EBP Worker (`ebp-tracker-worker`) | `https://ebp-tracker-worker.aicube-apps.workers.dev` |
+| Sweep Worker (`sweep-detector`) | `https://sweep-detector.aicube-apps.workers.dev` |
+| NSE Worker (`nse-tracker`) | `https://nse-tracker.aicube-apps.workers.dev` |
+| Watchdog Worker (`ebp-watchdog`) | not directly confirmed this session (no outbound calls made to it), but per `wrangler.toml` name it would deploy to `https://ebp-watchdog.<account>.workers.dev` |
+| Telegram bot (user alerts) | `@EbP_Tracker_bot` (shared bot, token in `SHARED_BOT_TOKEN` secret — see Section 5) |
+| Telegram bot (Watchdog/dev alerts) | **Not implemented.** Watchdog Worker sends zero Telegram messages (confirmed via full-file grep — no `SHARED_BOT_TOKEN` reference, no secret configured at all). `DEVELOPER_TELEGRAM_CHAT_ID` exists as an EBP Worker secret but has no live call site in `ebp-worker.js` — documented but not implemented. |
+
+### Repo structure (source files only, line counts)
+```
+EBP_TRACKER/
+├── worker/                         — EBP Worker + main REST API (Cloudflare Worker "ebp-tracker-worker")
+│   ├── src/ebp-worker.js           2578 lines  — everything: routes, EBP/FVG/Swing/MSS detection, T1-T3 chain step 1, market breadth, admin
+│   └── wrangler.toml                 12 lines
+├── sweep-worker/                   — Sweep Worker (Cloudflare Worker "sweep-detector")
+│   ├── src/index.js                 118 lines  — HTTP entrypoint, cron-only
+│   ├── src/sweep-cron.js           1058 lines  — Sweep/MSS/FVG detection, T1/T2/T3(step2-3)/T4 chains
+│   └── wrangler.toml                 11 lines
+├── nse-worker/                     — NSE Worker (Cloudflare Worker "nse-tracker")
+│   ├── src/index.js                  62 lines  — HTTP entrypoint, cron-only
+│   ├── src/nse-cron.js             1643 lines  — NSE EBP/Sweep/MSS/FVG, TDI, SMA Cloud
+│   └── wrangler.toml                 11 lines
+├── watchdog-worker/                — Watchdog Worker (Cloudflare Worker "ebp-watchdog")
+│   ├── src/index.js                 846 lines  — sole Twelve Data/Yahoo caller, candle_cache writer, key rotation
+│   └── wrangler.toml                 11 lines
+├── frontend/                       — React 18 + Vite SPA, deployed to Cloudflare Pages
+│   ├── src/App.jsx                   48 lines  — router
+│   ├── src/main.jsx                  16 lines  — ClerkProvider bootstrap
+│   ├── src/pages/                    8 files (Landing, Dashboard, Assets, Alerts, Settings, Admin [549 lines], MarketBreathPage [551 lines], NotFound)
+│   ├── src/components/              11 files (AIAlertsPanel, AssetCard [134], PriceFeedPanel [403], EBPConfigPanel, SweepConfigPanel, TdiConfigPanel, SmaConfigPanel, NseSearchModal, BiasOverridePanel, ExpiryBanner, ApiErrorAlert, Layout)
+│   ├── src/hooks/                    2 files (useAssets.js, useUser.js)
+│   ├── src/lib/                      3 files (api.js, constants.js, utils.js)
+│   └── vite.config.js                 9 lines
+├── packages/core/                  — Legacy shared package, DEAD CODE (see Section 9) — datafeed.js, ttrades.js, telegram.js, package.json
+├── migrations/                     — 10 numbered SQL migration files (003–012), historical, already applied
+├── migration_phase1_to_3.sql       — the FVG/Swing/Chain-state migration applied 2026-08-02 (this session's earlier work)
+└── schema.sql                      — hand-maintained schema reference, NOT auto-applied; drifts from live D1 (see Section 3)
+```
+Total source line count (excluding `node_modules`, `dist`, `.wrangler`, lockfiles): **~10,300 lines** across 4 workers + frontend + packages/core.
+
+### Stack
+- **Frontend**: React 18, Vite (`vite`/`@vitejs/plugin-react`), `react-router-dom` v6, `@clerk/clerk-react` (auth), `recharts` (Market Breadth charts only), `xlsx` (Alerts export only). ⚠️ **DIVERGENCE**: `README.md` line 7 claims "React + Vite + **MUI**" — there is no MUI dependency in `frontend/package.json` and zero `@mui` imports anywhere in `src/`. All styling is hand-rolled CSS (`src/styles/tokens.css`, `global.css`).
+- **Backend**: 4 independent Cloudflare Workers, all zero-npm-dependency single-file (or single-file + one large cron-logic file) bundles, deliberately not importing from each other or from `packages/core` (which is dead — see Section 9).
+- **Database**: Cloudflare D1 (SQLite), a single shared database `ebp-tracker-db` (id `b93b206a-5537-4d12-8c86-a4b2372aae7f`) bound as `DB` in all four workers' `wrangler.toml`.
+- **Auth**: Clerk (`@clerk/clerk-react` frontend, hand-rolled JWKS-verification `verifyClerkToken()` in `ebp-worker.js` — no Clerk backend SDK).
+- **Scheduling**: Two distinct mechanisms coexist:
+  1. **cron-job.org HTTP triggers** — external service POSTs `X-Cron-Secret`-guarded routes (`/cron/ebp`, `/cron/sweep`, `/cron/nse`) on a schedule maintained *outside this repo* (cron-job.org's own dashboard — not queryable from code). This is the primary mechanism for EBP/Sweep/NSE detection, adopted specifically as a workaround for Cloudflare's free-tier native-cron-trigger limits.
+  2. **Native Cloudflare `[triggers]` cron** — used by Watchdog Worker (`*/15 * * * *`, its sole/primary schedule) and by EBP Worker for one secondary job (`5 * * * *`, hourly Market Breadth computation only — not EBP detection itself, which stays cron-job.org-driven).
+- **Deployment**: `npx wrangler deploy` per worker (imperative CLI, no CI/CD pipeline configured in-repo — see Section 10). Frontend via Cloudflare Pages, triggered by GitHub push (per `README.md`; build command `npm run build`, output `dist`, root `frontend`).
+
+### Environment variables / secrets per worker (names only)
+
+| Worker | Configured secrets (`wrangler secret list`) | `[vars]` (plaintext) |
+|---|---|---|
+| `worker` (ebp-tracker-worker) | `APP_URL`, `CLERK_SECRET_KEY`, `CRON_SECRET`, `DEVELOPER_TELEGRAM_CHAT_ID`, `JOURNAL_API_SECRET`, `SHARED_BOT_TOKEN`, `TWELVE_DATA_API_KEY_1/2/3` | none |
+| `sweep-worker` (sweep-detector) | `CLERK_SECRET_KEY`, `CRON_SECRET`, `SHARED_BOT_TOKEN`, `TWELVE_DATA_API_KEY_1/2/3` | none |
+| `nse-worker` (nse-tracker) | `CLERK_SECRET_KEY`, `CRON_SECRET`, `SHARED_BOT_TOKEN` | `ENVIRONMENT="production"` |
+| `watchdog-worker` (ebp-watchdog) | **none configured** (`wrangler secret list` → `[]`) | none |
+
+Several configured secrets are **dead** (present in Cloudflare but never referenced in the corresponding worker's source — see Section 9 for the full list): `DEVELOPER_TELEGRAM_CHAT_ID` and `TWELVE_DATA_API_KEY_1/2/3` on `worker`; `CLERK_SECRET_KEY` and `TWELVE_DATA_API_KEY_1/2/3` on `sweep-worker`; `CLERK_SECRET_KEY` on `nse-worker`. Live Twelve Data/Upstox credentials are **not** Worker secrets at all — they're rows in the D1 `api_keys` table, admin-managed via `/admin/api-keys`.
+
+Frontend build-time env vars (`.env.example`): `VITE_CLERK_PUBLISHABLE_KEY`, `VITE_WORKER_URL`, `VITE_SWEEP_WORKER_URL` (the last one is dead — never read anywhere in `src/`, see Section 9).
+
+---
+
+## Section 2 — Architecture & Data Pipeline
+
+### End-to-end data flow
+
+```
+                    ┌─────────────────────────────────────────────┐
+                    │         WATCHDOG WORKER (ebp-watchdog)       │
+                    │  native CF cron */15 * * * *                 │
+                    │                                               │
+                    │  Twelve Data (M15/M30/1H/4H, signal symbols)  │
+                    │  Yahoo Finance (fallback + all Market Breadth)│
+                    │       │                                       │
+                    │       ▼                                       │
+                    │  writeCandleCache() ──► D1: candle_cache      │
+                    │  attemptDailySynthesis() ──► daily_candle_cache│
+                    │  attemptWeeklySynthesis() ──► weekly_candle_cache│
+                    │  computeSyntheticDXY() ──► candle_cache('DXY')│
+                    └─────────────────────────────────────────────┘
+                                        │
+                                        │  (D1 read-only from here on)
+                                        ▼
+   ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
+   │   cron-job.org    │   │   cron-job.org    │   │   cron-job.org    │
+   │ POST /cron/ebp    │   │ POST /cron/sweep  │   │ POST /cron/nse    │
+   │ (X-Cron-Secret)   │   │ (X-Cron-Secret)   │   │ (X-Cron-Secret)   │
+   └────────┬──────────┘   └────────┬──────────┘   └────────┬──────────┘
+            ▼                       ▼                       ▼
+   ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
+   │   EBP WORKER      │   │  SWEEP WORKER     │   │   NSE WORKER      │
+   │ handleEBPCron()   │   │ handleSweepCron() │   │ handleNseCron()   │
+   │                   │   │                   │   │  (own Upstox/     │
+   │ reads candle_cache│   │ reads candle_cache│   │   Yahoo fetch —   │
+   │ detectEBP         │   │ detectSweep       │   │   NOT Watchdog-fed)│
+   │ FVG Phase1        │   │ FVG Phase1        │   │ detectEBP/Sweep/  │
+   │ Swing/MSS Ph1.5/2 │   │ Swing/MSS Ph1.5/2 │   │ MSS/FVG, TDI,     │
+   │ T1/T2/T3 Step1    │   │ T1/T2/T3(2-3)/T4  │   │ SMA Cloud          │
+   │       │           │   │       │           │   │       │           │
+   │       ▼           │   │       ▼           │   │       ▼           │
+   │ signals, chain_    │   │ signals, chain_    │   │ signals,           │
+   │ state, fvg_zones,  │   │ state, fvg_zones,  │   │ nse_fvg_zones,     │
+   │ swing_states,      │   │ swing_states,      │   │ nse_swing_states,  │
+   │ alert_history,     │   │ alert_history,     │   │ nse_indicator_*,   │
+   │ bias_cache         │   │ bias_cache         │   │ alert_history      │
+   │       │           │   │       │           │   │       │           │
+   │       ▼           │   │       ▼           │   │       ▼           │
+   │ sendTelegramMessage() via SHARED_BOT_TOKEN → @EbP_Tracker_bot → user's chat_id (user_telegram) │
+   └──────────────────┘   └──────────────────┘   └──────────────────┘
+            │                       │                       │
+            └───────────────────────┴───────────────────────┘
+                                        │
+                                        ▼ (Clerk-JWT-authenticated REST reads)
+                    ┌─────────────────────────────────────────────┐
+                    │         FRONTEND (React SPA, Cloudflare Pages)│
+                    │  Dashboard/Assets/Alerts/Settings/Admin/Market│
+                    │  all reads go through worker/src/ebp-worker.js│
+                    │  (the only worker frontend calls directly)    │
+                    └─────────────────────────────────────────────┘
+```
+
+Key structural fact: **the frontend never calls Sweep/NSE/Watchdog Workers directly.** All frontend↔backend traffic goes through `worker/src/ebp-worker.js` (`VITE_WORKER_URL`) — including `/sweep/dashboard` and `/sweep/history`, which were explicitly relocated there from Sweep Worker (IM-3 migration, see Section 9's dead-route note). `VITE_SWEEP_WORKER_URL` exists as a frontend env var but is never read.
+
+### Workers — name, entry file, routes summary
+
+| Worker | CF Worker name | Entry file | Route count | Auth mechanisms used |
+|---|---|---|---|---|
+| EBP Worker | `ebp-tracker-worker` | `worker/src/ebp-worker.js` | 51 routes (full REST API — user/admin/signals/telegram/sweep-dashboard/breadth, plus `/cron/ebp`) | Clerk JWT, X-Cron-Secret, X-Journal-Secret, none (public: `/health`, `/nse/status`, `/telegram/webhook`, `/invite/:token`) |
+| Sweep Worker | `sweep-detector` | `sweep-worker/src/index.js` | 2 routes (`/health`, `/cron/sweep`) | none, X-Cron-Secret |
+| NSE Worker | `nse-tracker` | `nse-worker/src/index.js` | 2 routes (`/health`, `/cron/nse`) | none, X-Cron-Secret |
+| Watchdog Worker | `ebp-watchdog` | `watchdog-worker/src/index.js` | 1 route (`/health`) | none |
+
+Full per-route tables are in Section 2's route inventory below and cross-referenced in Sections 5, 6, 7, 8.
+
+**Complete EBP Worker route table** (all 51 routes, method + path + auth + purpose):
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/health` | none | Liveness check |
+| GET | `/user/me` | Clerk JWT | Get/create current user row |
+| GET | `/user/assets` | Clerk JWT | List user's assets + live EBP status |
+| POST | `/user/assets` | Clerk JWT | Add asset (enforces asset_limit for forex/crypto; NSE unlimited) |
+| GET | `/user/assets/count` | Clerk JWT | Forex/crypto vs NSE counts + limits |
+| DELETE | `/user/assets/:id` | Clerk JWT | Delete asset + cascade delete configs/templates/chains |
+| PATCH | `/user/assets/:id/bias-overrides` | Clerk JWT | Update per-asset bias overrides |
+| GET | `/user/assets/validate` | Clerk JWT | Symbol validation (Yahoo-based) |
+| GET | `/user/ebp-configs/:assetId` | Clerk JWT | List EBP configs |
+| POST | `/user/ebp-configs/:assetId` | Clerk JWT | Create EBP config |
+| GET | `/user/sweep-configs/:assetId` | Clerk JWT | List Sweep configs |
+| POST | `/user/sweep-configs/:assetId` | Clerk JWT | Create Sweep config |
+| GET | `/user/templates/:assetId` | Clerk JWT | List T1-T4 templates |
+| POST | `/user/templates/:assetId` | Clerk JWT | Create a template |
+| PATCH | `/user/template/:id` | Clerk JWT | Update a template |
+| DELETE | `/user/template/:id` | Clerk JWT | Delete a template |
+| GET | `/dashboard` | Clerk JWT | Assets + last alert timestamps |
+| PATCH | `/user/ebp-configs/:id` | Clerk JWT | Update EBP config |
+| DELETE | `/user/ebp-configs/:id` | Clerk JWT | Delete EBP config |
+| PATCH | `/user/sweep-configs/:id` | Clerk JWT | Update Sweep config |
+| DELETE | `/user/sweep-configs/:id` | Clerk JWT | Delete Sweep config |
+| GET | `/user/nse-indicator-configs/:assetId` | Clerk JWT | List TDI/SMA configs |
+| POST | `/user/nse-indicator-configs/:assetId` | Clerk JWT | Create TDI/SMA config |
+| PATCH | `/user/nse-indicator-configs/:id` | Clerk JWT | Update TDI/SMA config |
+| DELETE | `/user/nse-indicator-configs/:id` | Clerk JWT | Delete + cleanup orphaned chain/sma_state rows |
+| GET | `/user/bias/:symbol` | Clerk JWT | bias_cache rows for a symbol |
+| GET | `/health/datasources` | Clerk JWT | Per-source API call stats |
+| GET | `/alerts/history` | Clerk JWT | Paginated alert history |
+| GET | `/alerts/export` | Clerk JWT | Bulk alert export (up to 5000 rows) |
+| GET | `/user/telegram` | Clerk JWT | Telegram connection status |
+| POST | `/user/telegram/initlink` | Clerk JWT | Generate link code |
+| POST | `/user/telegram/test` | Clerk JWT | Send test Telegram message |
+| POST | `/cron/ebp` | X-Cron-Secret | EBP detection per TF, or Market Breadth if `tf==='BREADTH'` |
+| GET | `/market/breadth` | Clerk JWT + admin | Breadth heatmap/strength/correlation |
+| POST | `/telegram/webhook` | none (public) | Telegram bot webhook (`/start`, link codes) |
+| POST | `/user/telegram/verify` | Clerk JWT | Poll: has bot verified the link code |
+| DELETE | `/user/telegram` | Clerk JWT | Disconnect Telegram |
+| GET | `/admin/users` | Clerk JWT + admin | List all users |
+| GET | `/admin/tokens` | Clerk JWT + admin | List invite tokens |
+| POST | `/admin/invite` | Clerk JWT + admin | Generate invite token |
+| POST | `/admin/expire/:id` | Clerk JWT + admin | Deactivate a user |
+| GET | `/admin/api-keys` | Clerk JWT + admin | List API keys w/ usage |
+| POST | `/admin/api-keys` | Clerk JWT + admin | Add API key |
+| PATCH | `/admin/api-keys/:id` | Clerk JWT + admin | Enable/disable API key |
+| DELETE | `/admin/api-keys/:id` | Clerk JWT + admin | Delete API key |
+| PATCH | `/admin/users/:id/asset-limit` | Clerk JWT + admin | Set asset limit |
+| GET | `/admin/users/:id/assets` | Clerk JWT + admin | List a user's assets |
+| GET | `/admin/users/:id/tf-access` | Clerk JWT + admin | Get forex/crypto TF access |
+| PATCH | `/admin/users/:id/tf-access` | Clerk JWT + admin | Set forex/crypto TF access |
+| GET | `/admin/users/:id/nse-tf-access` | Clerk JWT + admin | Get NSE TF access |
+| PATCH | `/admin/users/:id/nse-tf-access` | Clerk JWT + admin | Set NSE TF access |
+| GET | `/nse/status` | none (public) | Whether Upstox is configured |
+| GET | `/nse/search` | Clerk JWT | NSE symbol search (Upstox + Yahoo parallel) |
+| GET | `/signals/:id` | X-Journal-Secret | Trade Journal: fetch signal |
+| PATCH | `/signals/:id/traded` | X-Journal-Secret | Trade Journal: mark traded |
+| GET | `/invite/:token` | none (public) | Validate invite token |
+| GET | `/sweep/dashboard` | Clerk JWT | Live sweep status (moved from Sweep Worker) |
+| GET | `/sweep/history` | Clerk JWT | User's sweep alert history |
+
+Auth glue: Clerk JWT verified per-request via hand-rolled `verifyClerkToken()` (JWKS fetch against Clerk, no SDK) and attached to `request._ctx`; admin routes additionally call `requireAdmin()` which checks `users.is_admin`.
+
+**Sweep Worker routes**: `GET /health` (public), `POST /cron/sweep` (X-Cron-Secret, body `{tf}` ∈ `{M15,M30,1H,4H}`). Everything else 404s — file header comment explicitly documents `/sweep/dashboard`/`/sweep/history` as moved out (IM-3).
+
+**NSE Worker routes**: `GET /health` (public), `POST /cron/nse` (X-Cron-Secret, `tf` from JSON body or `?tf=` query fallback).
+
+**Watchdog Worker routes**: `GET /health` (public) only. No cron-secret-guarded HTTP route exists at all — it is the one worker with zero externally-triggerable business logic; everything fires from its native `scheduled()` handler.
+
+### Data sources — who calls what, for what, under what conditions
+
+| Caller | Source | Symbols | TFs | Condition | Fallback |
+|---|---|---|---|---|---|
+| Watchdog Worker | Twelve Data `time_series` | "signal symbols" = any symbol with ≥1 enabled `user_ebp_configs`/`user_sweep_configs` row | M15 (every tick), M30 (`minute%30===0`), 1H (`minute===0`), 4H (`minute===0` AND NY hour ∈ {17,21,1,5,9,13}) | Chunked 7-symbols-per-key across `api_keys` (source='twelvedata') | Per-symbol Yahoo Finance if all TD keys exhausted |
+| Watchdog Worker | Yahoo Finance | 28 `MAJOR_PAIRS` breadth cross-pairs | 1H only | `minute===0` | none (breadth is Yahoo-only, never Twelve Data) |
+| Watchdog Worker | (computed, no fetch) | synthetic `DXY` | 1H | `minute===0`, derived from 6 breadth pairs via ICE formula | n/a |
+| NSE Worker | Upstox `historical-candle` API | NSE equities/indices | M1/M5/M15/M30/1H/D | Only if an enabled `api_keys` row with `source='upstox'` exists | Yahoo Finance if Upstox errors or returns &lt;3 closed candles |
+| NSE Worker | Yahoo Finance | NSE equities/indices | same | Always available as the default/fallback | none further — if Yahoo also fails, cron logs and skips that symbol |
+| EBP/Sweep Workers | **none** — D1 `candle_cache` only | n/a | n/a | n/a | n/a (by design, post-Watchdog-migration) |
+| EBP Worker `/nse/search` | Upstox `instruments/search` (equities) + Yahoo `finance/search` (indices) | user-typed query | n/a | Upstox branch returns `[]` silently if no token configured | Yahoo index search always runs regardless |
+| Frontend `PriceFeedPanel.jsx` (admin debug tool) | Twelve Data WebSocket, direct from browser | admin-typed symbol | live ticks | Admin manually pastes an API key into the UI | none — diagnostic tool only, bypasses the worker entirely |
+
+### Cron schedule
+
+**cron-job.org jobs** (external service, schedule not stored in this repo — inferred from the TF sets each `/cron/*` route accepts):
+- `POST /cron/ebp` — one job per EBP timeframe: `M15`, `1H`, `4H`, `D`, `W`, plus a `BREADTH`-tagged variant is *not* needed here since Market Breadth uses the native CF cron instead (see below) — **but** the same route does accept `tf:'BREADTH'`, so it's plausible cron-job.org has a redundant BREADTH job too; this can't be confirmed from code alone.
+- `POST /cron/sweep` — one job per Sweep timeframe: `M15`, `M30`, `1H`, `4H`.
+- `POST /cron/nse` — one job per NSE timeframe: `M1`, `M5`, `M15`, `M30`, `1H`, `D`.
+
+All three require the `X-Cron-Secret` header matching each worker's `CRON_SECRET` secret.
+
+**Cloudflare native crons** (from `wrangler.toml` `[triggers]`, ground truth):
+- `watchdog-worker`: `*/15 * * * *` — sole schedule, internally self-gates M30/1H/4H/daily/weekly work by checking `minute`/NY-hour inside one handler.
+- `worker` (EBP Worker): `5 * * * *` — hourly, fires `handleMarketBreadthCron()` directly via the native `scheduled()` handler (not via `/cron/ebp`).
+- `sweep-worker`, `nse-worker`: no `[triggers]` block at all — 100% cron-job.org-driven.
+
+### Watchdog Worker vs EBP/Sweep/NSE Workers
+
+| | Watchdog | EBP/Sweep/NSE |
+|---|---|---|
+| Purpose | Sole external-data ETL: fetch → cache → synthesize | Signal detection + user alerting |
+| Trigger | Native CF cron (`*/15 * * * *`) | cron-job.org HTTP POST (`X-Cron-Secret`) |
+| External APIs called | Twelve Data, Yahoo (forex/crypto/commodity + breadth) | none (EBP/Sweep read D1 only); NSE calls Upstox/Yahoo itself |
+| Writes | `candle_cache`, `daily_candle_cache`, `weekly_candle_cache`, `api_key_state`, `api_call_log`, `watchdog_log` | `signals`, `chain_state`, `fvg_zones`/`nse_fvg_zones`, `swing_states`/`nse_swing_states`, `alert_history`, `bias_cache`, NSE indicator tables |
+| User data touched | none | `user_assets`, `user_telegram`, `user_ebp_configs`, etc. |
+| Alerts | **None** — only internal failure logging to `watchdog_log` | Telegram alerts via `SHARED_BOT_TOKEN` to `@EbP_Tracker_bot` |
+| Secrets | none configured | `CRON_SECRET`, `SHARED_BOT_TOKEN`, (+Clerk/Journal on EBP Worker) |
+
+---
+
+## Section 3 — Database Schema (ground truth)
+
+All tables live in the single shared D1 database `ebp-tracker-db`. **34 tables total live in production** (32 application tables + `sqlite_sequence` + `_cf_KV`, the latter two SQLite/Cloudflare-internal, not application schema). Column definitions below are the live `PRAGMA table_info()` ground truth, cross-checked against `schema.sql`; every divergence found is called out inline with ⚠️ DIVERGENCE.
+
+### Core user/asset tables
+
+**`users`** — `id` TEXT PK, `email` TEXT NOT NULL, `name` TEXT, `plan` TEXT DEFAULT 'free', `asset_limit` INTEGER DEFAULT **3** ⚠️ **DIVERGENCE**: `schema.sql` line 9 says `DEFAULT 5` — live production default has drifted to 3, likely via an untracked ALTER/D1-console edit never ported back to schema.sql), `created_at`/`expires_at` INTEGER NOT NULL, `active` INTEGER DEFAULT 1, `is_admin` INTEGER DEFAULT 0, `user_tf_access` TEXT DEFAULT `["M5","M15","M30","1H","4H","D","W"]`, `nse_tf_access` TEXT DEFAULT `["M1","M5","M15","M30","1H","D"]`.
+- Written by: `worker/src/ebp-worker.js` (`getOrCreateUser` — which itself still hardcodes `asset_limit=5` in its INSERT, line 1184 — so **new users get 5 via the app-level INSERT regardless of the column's DEFAULT 3**; the column default only matters for any INSERT that omits the column, which doesn't currently happen in app code); admin routes: expire, asset-limit, tf-access, nse-tf-access.
+- Read by: every worker (all four check `active`/`user_tf_access`/`nse_tf_access` before alerting); frontend via `/user/me` (`hooks/useUser.js`, polled every 2 min).
+- `plan` is effectively vestigial for feature-gating — see Section 7.
+
+**`user_assets`** — `id` TEXT PK, `user_id` TEXT NOT NULL FK→users, `symbol`/`display_name`/`asset_type` TEXT NOT NULL, `added_at` INTEGER NOT NULL, `bias_overrides` TEXT DEFAULT `{}`.
+- Written by: EBP Worker (`POST/DELETE /user/assets`, `PATCH .../bias-overrides`).
+- Read by: all three detection workers (joined into every config query); frontend `Dashboard.jsx`/`Assets.jsx` via `useAssets()` hook (`GET /user/assets`).
+- No `CHECK` constraint on `asset_type` — `'forex'`/`'crypto'`/`'nse'`/`'system'` (DXY) are a convention enforced only in application code.
+
+**`user_telegram`** — `user_id` TEXT PK FK→users, `chat_id` TEXT NOT NULL, `link_code` TEXT, `verified` INTEGER DEFAULT 0, `updated_at` INTEGER NOT NULL.
+- Written/read by: EBP Worker (`/user/telegram*`, `/telegram/webhook`). Read by all three detection workers to resolve `chat_id` before every Telegram send (`WHERE user_id=? AND verified=1`).
+
+**`alert_history`** — live has **10 columns**: `id` TEXT PK, `user_id` FK→users, `symbol`/`timeframe`/`direction`/`trend_bias` TEXT NOT NULL, `candle_time`/`fired_at` INTEGER NOT NULL, `alert_type` TEXT DEFAULT 'ebp', **`details` TEXT DEFAULT `{}`**. ⚠️ **DIVERGENCE**: `schema.sql`'s CREATE TABLE block (lines 38–49) only defines 9 columns — `details` is missing from the authoritative CREATE statement and only exists as a stray `-- ALTER TABLE alert_history ADD COLUMN details TEXT DEFAULT '{}';` comment further down under a "Phase 4" heading (line 186). The column is live and correct in production; schema.sql's CREATE block just hasn't been updated to include it.
+- Written by: all three detection workers, on every delivered alert (`ebp`, `sweep`, `mss`, `t3`, plus NSE's alert types, and TDI/SMA `alert_type='tdi'`/`'sma'`). `details` itself is never written to by any code path found (defaults to `{}` on every insert) — 🔶 **UNTESTED**/unused column in practice.
+- Read by: same workers for the dedup guard (`isDuplicateAlert`), and by EBP Worker's `/alerts/history`, `/alerts/export`, `/sweep/history` routes → frontend `Alerts.jsx`.
+- 🐛 **BUG RISK**: `fired_at` is stored as an INTEGER ms epoch here, but the newer `signals` table stores `fired_at` as an ISO 8601 TEXT string. Both tables track "when an alert fired" with incompatible types/formats — any future code that queries across both (e.g. a unified alert timeline) must not compare them directly. This is explicitly flagged in-code (`sweep-cron.js` comment above `isDuplicateAlert`) but remains a live footgun for new code.
+
+**`invite_tokens`** — `token` TEXT PK, `created_at` INTEGER NOT NULL, `used_by`/`used_at` nullable, `active` INTEGER DEFAULT 1.
+- Written/read by EBP Worker (`/admin/invite`, `/admin/tokens`, `/invite/:token`); read by frontend `Landing.jsx` (via the `:token` URL param, display-only) and `Admin.jsx`.
+
+### Candle cache tables (Watchdog-owned)
+
+**`candle_cache`** — `id` INTEGER PK AUTOINCREMENT, `symbol`/`tf` TEXT NOT NULL, `candles_json` TEXT NOT NULL, `fetched_at` TEXT NOT NULL, UNIQUE(symbol, tf).
+- Written exclusively by Watchdog Worker. Read by EBP Worker, Sweep Worker (both via `getCandlesFromCache`, staleness-gated — 2× TF interval, 1.25× for 4H). NSE Worker does **not** read this table (it has its own `nse_candle_cache`, fetched independently via Upstox/Yahoo).
+
+**`daily_candle_cache`** — `id` INTEGER PK AUTOINCREMENT, `symbol` TEXT NOT NULL, `date_ny` TEXT NOT NULL, `open`/`high`/`low`/`close` REAL NOT NULL, `synthesised_at` TEXT NOT NULL, UNIQUE(symbol, date_ny). **`weekly_candle_cache`** — same shape with `week_start_ny`/`week_end_ny` in place of `date_ny`, UNIQUE(symbol, week_start_ny). ⚠️ **DIVERGENCE**: both live in production but have **no CREATE TABLE statement anywhere in `schema.sql`** — only documented as a bottom-of-file comment ("Live tables not yet in schema... Added via ALTER TABLE or ad-hoc migration"). A developer relying solely on schema.sql would not know these tables' actual column shapes.
+- Written by Watchdog (`attemptDailySynthesis`/`attemptWeeklySynthesis`, from 1H and daily rows respectively; capped at 130/26 rows per symbol). Read by EBP Worker and Sweep Worker for D/W-timeframe HTF bias and EBP/MSS detection.
+
+**`watchdog_log`** — `id` INTEGER PK AUTOINCREMENT, `event_type` TEXT NOT NULL, `message` TEXT NOT NULL, `created_at` TEXT NOT NULL. Same ⚠️ DIVERGENCE as above — live, undocumented as a CREATE TABLE in schema.sql, only a comment. Written by Watchdog's `logWatchdog()` (failures/warnings only, by design). Not read by any worker or frontend page — write-only operational log, presumably intended for direct D1-console inspection.
+
+### FVG / Swing / Chain tables (Phase 1–3, this session's migration)
+
+**`fvg_zones`** (forex/crypto) / **`nse_fvg_zones`** (NSE) — identical 12-column shape: `id` INTEGER PK AUTOINCREMENT, `symbol`/`tf`/`direction` TEXT NOT NULL, `top`/`bottom`/`midpoint` REAL NOT NULL, `formed_at`/`expires_at` TEXT NOT NULL (ISO), `mitigated_at`/`mitigated_by_tf` TEXT nullable, `created_at` TEXT NOT NULL. Matches schema.sql exactly.
+- Written by: `ebp-worker.js` and `sweep-cron.js` (`processFVGZones`, both write `fvg_zones`) for forex/crypto TFs M15/M30/1H/4H; `nse-cron.js` (own copy) writes `nse_fvg_zones` for M5/M15/1H only.
+- Read by: `sweep-cron.js`'s `checkFvgEntryChain` (T1/T2/T4 completion check).
+- Not read by any frontend page/hook — no UI surfaces FVG zone data directly (consistent with `EBP_Tracker_Roadmap.md`'s own "Deferred" list item "FVG zone visualisation in UI" — not a contradiction, correctly deferred).
+- Cleanup: `DELETE FROM fvg_zones/nse_fvg_zones WHERE expires_at < now`, on the `tf==='M15'` branch of `handleSweepCron` (forex/crypto) and the `tf==='M1'` branch of `handleNseCron` (NSE).
+- **Live row counts** (queried this session): `fvg_zones` = **18 rows** (actively exercised on real data). `nse_fvg_zones` = **0 rows** 🔶 **UNTESTED** — never populated on live data as of this audit.
+
+**`swing_states`** (forex/crypto) / **`nse_swing_states`** (NSE) — `id` INTEGER PK AUTOINCREMENT, `symbol`/`tf` TEXT NOT NULL, `run_dir` TEXT nullable, `run_start_time` TEXT nullable, `run_candle_count` INTEGER DEFAULT 0, `last_confirmed_swing_high`/`_low` REAL nullable + `_time` TEXT nullable, `pending_swing_high`/`_low` REAL nullable + `_time` TEXT nullable, `updated_at` TEXT, UNIQUE(symbol, tf). Matches schema.sql exactly.
+- Written/read by: `ebp-worker.js`, `sweep-cron.js` (both write `swing_states`, keyed by symbol+tf — since EBP and Sweep Workers can both run on the same symbol+tf if a user has both an EBP config and a Sweep config on it, they share and both mutate the *same row* per symbol+tf); `nse-cron.js` writes/reads its own `nse_swing_states` exclusively (also read by TDI's `checkTdiDivergence`/`checkTdiCondition4`).
+- Not read by any frontend page.
+- **Live row counts**: `swing_states` = **22 rows** (actively exercised). `nse_swing_states` = **0 rows** 🔶 **UNTESTED**.
+
+**`chain_state`** — 19 columns: `id` INTEGER PK AUTOINCREMENT, `template_type` TEXT NOT NULL ('T1'/'T2'/'T3'/'T4'), `user_id`/`asset_id`/`symbol` TEXT NOT NULL, `htf`/`ltf` TEXT NOT NULL (`htf=''` for T4), `direction` TEXT NOT NULL, `state` TEXT NOT NULL, `step1_signal_id`/`step2_signal_id`/`step3_signal_id` TEXT nullable, `fvg_id` INTEGER nullable (FK→fvg_zones.id, not DB-enforced), `htf_candle_open`/`_close` REAL nullable + `_open_time`/`_close_time` TEXT nullable (T2 only), `expires_at`/`created_at` TEXT NOT NULL. Matches schema.sql exactly.
+- Written by: `ebp-worker.js` (Step 1 for T1/T2/T3, via `insertChain`/`initiateT3Chain`); `sweep-cron.js` (Step 2/3 completion for T1/T2/T3/T4, via `advanceT3Chain`/`completeT3Chain`/`completeFvgEntryChain`, and Step 1+2 entirely for T4).
+- Read by: `sweep-cron.js` exclusively (`getChains`, per-cycle chain lookups) — EBP Worker never reads it back after writing Step 1.
+- Forex/crypto only — no NSE equivalent exists; NSE has no T1-T4 template chain machinery (by design, this session's scoping decision).
+- Cleanup: `DELETE FROM chain_state WHERE expires_at < now`, same `tf==='M15'` cleanup branch in `sweep-cron.js`.
+- **Live row count: 1 row** 🔶 **UNTESTED at scale** — the chain-state machine has fired exactly once in production. Combined with `user_templates` currently holding zero T1/T2/T4 rows (only pre-existing T3 configs — see Section 6/7), the T1/T2/T4 code paths have been verified via syntax checks, a local D1 migration dry-run, and confirming surrounding cron cycles execute cleanly against real candles — but have not yet processed a real T1/T2/T4 chain end-to-end on live data.
+
+### Bias / template config tables
+
+**`bias_cache`** — `symbol`/`timeframe` TEXT (composite PK), `bias`/`closure_type` TEXT NOT NULL, `close_pos` REAL, `bar1_time` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL.
+- Written by all three detection workers (`writeBiasCache`, one row per symbol+HTF actually in use that cron cycle). Read by EBP Worker's `/user/bias/:symbol` → frontend `EBPConfigPanel.jsx`/`SweepConfigPanel.jsx` (live bias label per row).
+
+**`user_templates`** — `id` TEXT PK, `user_id`/`asset_id` TEXT NOT NULL FK, `template` TEXT NOT NULL ('t1'/'t2'/'t3'/'t4', lowercase), `enabled` INTEGER DEFAULT 0, `htf`/`ltf` TEXT NOT NULL, `window_mins` INTEGER DEFAULT 60, `step3_enabled` INTEGER DEFAULT 1, `bias_gate` INTEGER DEFAULT 1, `fvg_rule` TEXT DEFAULT '50_percent', `created_at` INTEGER NOT NULL.
+- Written by: EBP Worker (`/user/templates/:assetId`, `/user/template/:id`) ← frontend `AIAlertsPanel.jsx`.
+- Read by: EBP Worker (Step 1 trigger query, `WHERE template=? AND enabled=1 AND htf=?`); Sweep Worker (T4's step-1 trigger query, `WHERE template='t4' AND enabled=1 AND ltf=?`).
+- 🐛 **BUG RISK / dead columns**: `step3_enabled`, `bias_gate`, and `fvg_rule` are defined in the schema, but **no cron code anywhere reads them** from a `user_templates` row (confirmed via grep — only `template`, `enabled`, `htf`, `ltf`, `window_mins` are ever read). No route lets a user set non-default values for these three either. A user cannot actually disable Step 3, disable the bias gate, or change the FVG mitigation rule despite the schema implying these are configurable — silently ignored dead schema.
+
+### Signal ID / append-only signal log
+
+**`signals`** — 13 columns: `signal_id` TEXT PK, `template_type` TEXT NOT NULL ('EBP'/'T1'/'T2'/'T3'/'T4'/'NSE_EBP'/'NSE_SWEEP'/'NSE_MSS'), `symbol` TEXT NOT NULL, `htf_tf`/`ltf_tf`/`direction` TEXT, `fired_at` TEXT NOT NULL (ISO), `traded` INTEGER DEFAULT 0, `expires_at` TEXT, `price_at_signal`/`htf_close` REAL, `htf_bias`/`session` TEXT.
+- Written by: EBP Worker (EBP signals only — not T1/T2/T3 at Step 1, since those aren't "fired" signals yet); Sweep Worker (T1/T2/T3-step3/T4 signals, on chain completion); NSE Worker (NSE_EBP/NSE_SWEEP/NSE_MSS).
+- Read by: EBP Worker's `/signals/:id` and `/signals/:id/traded` routes (X-Journal-Secret — external Trade Journal app, not this repo's frontend).
+- Append-only by design (comment in schema.sql); only `traded` is ever mutated post-insert.
+
+**`signal_counters`** — `template` TEXT PK, `series` TEXT DEFAULT 'A', `count` INTEGER DEFAULT 0.
+- One row per template key: `'EBP-M15'`, `'EBP-1H'`, `'EBP-4H'`, `'EBP-1D'`, `'EBP-1W'`, `'T3'`, `'T1'`, `'T2'`, `'T4'`, `'NSE'`. Format produced: `{template}-{SYMBOL}-{series}{count:03d}` (e.g. `T3-XAUUSD-A001`), except EBP's own generator which additionally embeds the TF: `EBP-{SYMBOL}-{tf}{series}{count:03d}`.
+- Written/read by: `generateSignalId()`/`generateEbpSignalId()`/`generateNseSignalId()` — one near-identical copy in each of `ebp-worker.js`, `sweep-cron.js`, `nse-cron.js`.
+
+### Market Breadth tables
+
+**`market_breadth_cache`** — `tf` TEXT PK, `computed_at` INTEGER, `heatmap`/`strength` TEXT (JSON). **`market_breadth_intraday`** — `tf`+`snapshot_at` composite PK, `strength` TEXT (JSON), pruned to 48h. **`market_breadth_correlation`** — `tf` TEXT PK, `computed_at` INTEGER, `matrix` TEXT (JSON, Pearson).
+- All three written exclusively by EBP Worker's `handleMarketBreadthCron` (hourly native cron, `tf` is always the literal `'1H'` — there is no weekly breadth aggregation anywhere in code, confirmed in this session's earlier "Fix 1 skipped — feature doesn't exist" finding, despite the frontend having a "Weekly Strength — placeholder" UI section).
+- Read by: EBP Worker's `/market/breadth` (admin-gated) → frontend `MarketBreathPage.jsx` (polled every 60s).
+
+### NSE-specific tables
+
+**`nse_candle_cache`** — `symbol`/`timeframe` composite PK, fixed 3-bar columns (`bar_0_open..bar_2_close`, `bar_0_time`, `bar_1_time`), `updated_at` INTEGER — 17 columns total.
+- Written/read exclusively within `nse-cron.js` — completely separate caching mechanism from the forex/crypto `candle_cache`.
+
+**`nse_indicator_candle_cache`** — `symbol`/`timeframe` composite PK, `candles` TEXT (JSON array, up to 60 OHLCV, newest-first), `updated_at` INTEGER NOT NULL.
+- Written/read exclusively within `nse-cron.js`, feeding TDI (RSI(13)/BB(34)) and SMA Cloud, which both need more history than the 3-bar `nse_candle_cache` provides.
+
+**`nse_indicator_configs`** — `id`/`user_id`/`asset_id` TEXT, `indicator` TEXT ('tdi'|'sma'), `timeframe` TEXT, `stack_mode`/`bias_mode`/`htf_timeframe` TEXT (sma only), `day_filter` INTEGER (dead — schema.sql's own comment says "unused since the SMA Cloud corrective patch"), `enabled` INTEGER DEFAULT 1, `created_at` INTEGER NOT NULL.
+- Written by EBP Worker (`/user/nse-indicator-configs/*`) ← frontend `TdiConfigPanel.jsx`/`SmaConfigPanel.jsx`. Read by `nse-cron.js`.
+
+**`user_indicator_settings`** — `user_id` TEXT PK, `sma_forex_hours` TEXT DEFAULT 'session', `updated_at` INTEGER NOT NULL.
+- Documented but not implemented: schema comment states this is "scaffolding... not yet read by any Worker." Confirmed — no read site exists anywhere, and no write route exists either.
+
+**`nse_indicator_chain`** — `id`/`user_id`/`asset_id`/`symbol`/`timeframe` TEXT, `direction` TEXT, `state` INTEGER DEFAULT 1, `created_at`/`expires_at` INTEGER NOT NULL.
+- TDI's 2-state pending mechanism (condition 1-3 met → row created; condition 4 met → row deleted + alert fires). Written/read exclusively in `nse-cron.js`.
+
+**`nse_sma_state`** — `symbol`/`timeframe` composite PK, `direction`/`phase` TEXT nullable, `stack_active`/`consecutive_widening` INTEGER, `separation`/`atr14`/`cloud_top`/`cloud_bottom` REAL, `velocity_label` TEXT, `stack_formed_date`/`last_signal_date` TEXT, `last_signal_time` INTEGER, `updated_at` INTEGER NOT NULL.
+- SMA Cloud's per-symbol+TF phase state, written/read every cron cycle regardless of whether a signal fires. Exclusively `nse-cron.js`.
+
+**`sma_cloud_states`** — `id` INTEGER PK AUTOINCREMENT, `symbol`/`tf` TEXT NOT NULL, `phase` TEXT NOT NULL, `phase_started_at` TEXT NOT NULL, `sma1_last`/`sma9_last`/`atr_last` REAL, `crossovers_in_transition`/`widening_candles` INTEGER DEFAULT 0, `last_signal_date` TEXT, `updated_at` TEXT NOT NULL, UNIQUE(symbol, tf). **Confirmed genuinely orphaned**: live in D1, defined in schema.sql's own trailing comment as "created in the original IM-1 migration but currently unused/orphaned — no worker code reads or writes it," and this session's dead-code/table-usage scan found zero read or write references anywhere in `nse-cron.js` (SMA Cloud's real, actively-used state table is `nse_sma_state`, a differently-named and differently-shaped table — easy to confuse the two by name).
+
+### API key / call-log tables
+
+**`api_keys`** — `id`/`source`/`key_value`/`label` TEXT, `enabled` INTEGER DEFAULT 1, `added_at` INTEGER, `added_by` TEXT.
+- The single admin-managed table for **both** Twelve Data keys (`source='twelvedata'`) and the Upstox token (`source='upstox'`) — despite the schema comment implying it's Twelve-Data-specific. Written by EBP Worker's `/admin/api-keys*`. Read by Watchdog (Twelve Data rotation) and NSE Worker (Upstox token + `/nse/search`, `/nse/status`).
+
+**`api_key_state`** — `key_name` TEXT PK (references `api_keys.id`), `exhausted` INTEGER DEFAULT 0, `exhausted_at` INTEGER, `calls_today` INTEGER DEFAULT 0, `reset_at` INTEGER.
+- Written/read exclusively by Watchdog Worker (key rotation/exhaustion bookkeeping). Not read by any Upstox flow (Upstox has no equivalent state tracking — no rotation, single token only).
+
+**`api_call_log`** — corrected this session to match production exactly: `id` TEXT PK, `source`/`symbol`/`timeframe` TEXT NOT NULL, `called_at` INTEGER NOT NULL, `success` INTEGER DEFAULT 1. Now matches live D1 exactly (verified — no further drift).
+- Written by Watchdog Worker (`logApiCall`, every Twelve Data/Yahoo call), pruned to 2 days old on Watchdog's hourly tick. Read by EBP Worker's `/health/datasources` — 🔶 **UNTESTED/orphaned route**: no page in `frontend/src` calls `/health/datasources` (confirmed via the frontend research pass's full API-call inventory), so this data is only reachable via direct API call, not through any UI.
+
+### Cleanup cycles summary
+
+| Table(s) | Deleted by | Trigger | Rule |
+|---|---|---|---|
+| `fvg_zones`, `nse_fvg_zones` | `sweep-cron.js` / `nse-cron.js` | `tf==='M15'` (forex) / `tf==='M1'` (NSE) cron tick | `expires_at < now` (formed_at + 14 days) |
+| `chain_state` | `sweep-cron.js` | `tf==='M15'` cron tick | `expires_at < now` (T3: now+window_mins at creation; T1/T2/T4: end of UTC month) |
+| `market_breadth_intraday` | `ebp-worker.js` | every `handleMarketBreadthCron` run (hourly) | `snapshot_at < now - 48h` |
+| `signals` (`template_type='EBP'`) | `ebp-worker.js` | `tf==='D'` cron tick (daily) | `expires_at <= now` |
+| `api_call_log` | `watchdog-worker` | `minute===0` (hourly) | `called_at < now - 2 days` |
+| `nse_indicator_chain` | `nse-cron.js` | inline, every TDI evaluation | `expires_at <= now`, deleted individually when checked |
+| `nse_swing_states`, `swing_states`, `bias_cache`, `nse_sma_state`, `candle_cache`, `daily_candle_cache`, `weekly_candle_cache` | never | n/a | Overwritten in place (`INSERT ... ON CONFLICT DO UPDATE` / `INSERT OR REPLACE`), not time-expired — `daily_candle_cache`/`weekly_candle_cache` are instead row-capped by Watchdog itself (130/26 rows per symbol). |
+| `alert_history`, `user_ebp_configs`, `user_sweep_configs`, `user_templates`, `chain_state` (cascade) | `ebp-worker.js` | `DELETE /user/assets/:id` | Cascade-deletes the asset's own config/template/chain rows — see Section 9 for what's *not* cascaded. |
+
+### Foreign key relationships (application-enforced — D1/SQLite does not enforce FKs by default in this schema; no `PRAGMA foreign_keys=ON` found anywhere in worker code)
+
+`user_assets.user_id → users.id` · `user_telegram.user_id → users.id` · `alert_history.user_id → users.id` · `user_ebp_configs.user_id → users.id`, `user_ebp_configs.asset_id → user_assets.id` · `user_sweep_configs` same shape · `user_templates.user_id → users.id`, `user_templates.asset_id → user_assets.id` · `chain_state.user_id → users.id`, `chain_state.asset_id → user_assets.id` (added beyond the original migration spec specifically so the asset-delete cascade and template-lookup joins keep working) · `chain_state.fvg_id → fvg_zones.id` (implicit, JS-only — set from `fvg_zones.id` at chain completion, never validated) · `nse_indicator_configs.user_id/asset_id`, `nse_indicator_chain.user_id/asset_id` same pattern · `api_key_state.key_name → api_keys.id` (implicit, by convention, not a real FK column type match — `api_keys.id` is the UUID, `api_key_state.key_name` is documented as referencing it but the column name doesn't match `id`, an easy point of confusion for a future maintainer).
+
+---
+
+## Section 4 — Signal Detection Engine
+
+Every detection function below is duplicated near-verbatim across the worker files that need it (deliberate "zero cross-package imports" architecture — see Section 9 for the resulting drift risk). Logic shown is quoted directly from `worker/src/ebp-worker.js`; `sweep-worker/src/sweep-cron.js` and `nse-worker/src/nse-cron.js` copies are byte-for-byte identical except where noted.
+
+### EBP (Engulfing Bar Print)
+`worker/src/ebp-worker.js` (`detectEBP`), identical in `nse-worker/src/nse-cron.js`:
+```js
+function detectEBP(candles) {
+  if (!candles || candles.length < 2) return null;
+  const bar0 = candles[0];               // newest, closed candle
+  const bar1 = candles[1];               // previous candle
+  const prevBodyHigh = Math.max(bar1.open, bar1.close);
+  const prevBodyLow  = Math.min(bar1.open, bar1.close);
+  const bullEBP = bar0.low  < bar1.low  && bar0.close > prevBodyHigh;
+  const bearEBP = bar0.high > bar1.high && bar0.close < prevBodyLow;
+  if (!bullEBP && !bearEBP) return null;
+  return { direction: bullEBP ? 'bullish' : 'bearish', candleTime: bar0.time,
+           sweptLevel: bullEBP ? bar1.low : bar1.high, closedLevel: bar0.close };
+}
+```
+Plain English: a **bullish EBP** requires the newest candle to wick below the prior candle's low (a liquidity sweep) *and* close back above the prior candle's real body high (engulfing the body, not just the wick). Bearish is the mirror. Only 2 candles needed — fires from day one on any TF with ≥2 cached candles. Sweep Worker does not run `detectEBP` at all (EBP is exclusively an EBP-Worker/NSE-Worker concept).
+
+### Sweep
+`worker/src/ebp-worker.js` / `sweep-worker/src/sweep-cron.js` (exported) / `nse-worker/src/nse-cron.js`, all identical:
+```js
+function detectSweep(candles) {
+  if (!candles || candles.length < 2) return null;
+  const bar0 = candles[0];
+  const bar1 = candles[1];
+  const bullSweep = bar0.low  < bar1.low  && bar0.close > bar1.low;
+  const bearSweep = bar0.high > bar1.high && bar0.close < bar1.high;
+  if (!bullSweep && !bearSweep) return null;
+  return { direction: bullSweep ? 'bullish' : 'bearish', candleTime: bar0.time,
+           sweptLevel: bullSweep ? bar1.low : bar1.high, closedInsideLevel: bar0.close,
+           prevHigh: bar1.high, prevLow: bar1.low };
+}
+```
+A **bullish sweep** = wick below the prior low, close back *above* the prior low (does not require closing above the prior body, unlike EBP — a materially looser trigger). This is the key structural difference from EBP: Sweep only cares about closing back inside the prior range, EBP requires closing beyond the prior candle's *body*.
+
+### FVG (Fair Value Gap) — Phase 1
+Identical across all three workers (`fvg_zones`/`nse_fvg_zones`, both written via the same `processFVGZones`):
+```js
+function detectFVG(candles) {              // candles: oldest-first, 3-item window
+  if (!candles || candles.length < 3) return null;
+  const barIMinus2 = candles[candles.length - 3];
+  const barI       = candles[candles.length - 1];
+  if (barIMinus2.high < barI.low) {                    // bullish gap
+    const top = barI.low, bottom = barIMinus2.high;
+    return { direction: 'bullish', top, bottom, midpoint: (top+bottom)/2, formed_at: barI.time };
+  }
+  if (barIMinus2.low > barI.high) {                    // bearish gap
+    const top = barIMinus2.low, bottom = barI.high;
+    return { direction: 'bearish', top, bottom, midpoint: (top+bottom)/2, formed_at: barI.time };
+  }
+  return null;
+}
+function checkFVGMitigation(bar, fvgRow) {   // body-close-through-midpoint rule
+  if (fvgRow.direction === 'bullish') return bar.close < fvgRow.midpoint;
+  return bar.close > fvgRow.midpoint;
+}
+function isPriceInFVG(price, fvgRow) {
+  return price >= fvgRow.bottom && price <= fvgRow.top;
+}
+```
+Gap is between the candle 2-back and the current candle — the middle candle (the "impulse" candle) isn't itself compared. Dedup guard on insert: skip if an active (non-mitigated, non-expired) zone of the same direction already overlaps the new zone's price range (`existing.top >= new.bottom AND existing.bottom <= new.top`). Zones expire 14 days after `formed_at`. TFs: forex/crypto M15/M30/1H/4H; NSE M5/M15/1H only (D and W never run FVG detection anywhere — daily/weekly candle history from Watchdog synthesis is too short for a 3-bar gap check to be meaningful this early in the system's life).
+
+### Swing State Machine + MSS — Phase 1.5 / 2
+This is the most structurally involved detector. Full state fields (`swing_states`/`nse_swing_states`): `run_dir` ('bullish'|'bearish'|null), `run_start_time`, `run_candle_count`, `last_confirmed_swing_high`/`_low` (+ `_time`), `pending_swing_high`/`_low` (+ `_time`).
+
+**Doji rule** — a bar is skipped entirely (no state mutation at all, including `run_candle_count`) if its body is smaller than a doji threshold:
+```js
+function isDoji(bar, dojiThreshold) { return Math.abs(bar.close - bar.open) <= dojiThreshold; }
+```
+`dojiThreshold = ATR(14)*0.1` when 14+ bars are available, else `(bar.high - bar.low)*0.1`. 🔶 **UNTESTED in the ATR(14) branch**: the D1 candle cache these functions read from only ever supplies the 3-bar window already used elsewhere in each file, so `calcATR14()` returns `null` in every real invocation today and the fallback branch is what actually runs in production. The ATR(14) branch is real code, not stubbed, but has never executed against live data.
+
+**State transition diagram** (per non-doji bar):
+```
+                    ┌─────────────┐
+                    │ run_dir=null │  (bootstrap — first bar ever seen for symbol+tf)
+                    └──────┬──────┘
+         close > prevBar.high │ close < prevBar.low │ (neither, or no prevBar)
+                    ▼               ▼                      ▼
+              run_dir='bullish'  run_dir='bearish'   run_dir='bullish' (default)
+              run_candle_count=1, run_start_time=bar.time
+
+  ┌─── run_dir === 'bullish' ──────────────────────────────────────────┐
+  │  if bar.high > pending_swing_high (or none set):                  │
+  │      pending_swing_high = bar.high   (tracks the running extreme) │
+  │  if pending_swing_high set AND bar.close < pending_swing_high:    │
+  │      last_confirmed_swing_high = pending_swing_high  (CONFIRMED)  │
+  │      pending_swing_high = null                                    │
+  │  run_candle_count += 1                                             │
+  │  ── MSS check: bearish (see below) ──                              │
+  └──────────────────────────────────────────────────────────────────┘
+
+  ┌─── run_dir === 'bearish' ─── mirror of the above on lows ─────────┐
+  └──────────────────────────────────────────────────────────────────┘
+```
+**MSS (Market Structure Shift)**:
+```js
+function detectMSS(bar, swingState) {
+  if (!swingState || swingState.run_dir == null || (swingState.run_candle_count ?? 0) < 3) return null;
+  if (swingState.run_dir === 'bearish' && swingState.last_confirmed_swing_high != null
+      && bar.close > swingState.last_confirmed_swing_high) {
+    return { direction: 'bullish', level: swingState.last_confirmed_swing_high, candle_time: bar.time };
+  }
+  if (swingState.run_dir === 'bullish' && swingState.last_confirmed_swing_low != null
+      && bar.close < swingState.last_confirmed_swing_low) {
+    return { direction: 'bearish', level: swingState.last_confirmed_swing_low, candle_time: bar.time };
+  }
+  return null;
+}
+```
+Requires a *minimum 3-candle run* before an MSS can fire (prevents rapid-fire whipsaw MSS on a 1-2 candle run). On fire: `run_dir` flips to the MSS direction, both pending fields clear, `run_candle_count` resets to 1, `run_start_time` resets to the firing bar's time — i.e. an MSS is itself the start of a brand-new run in the opposite direction. Only the single newest bar is fed through this state machine per cron cycle (not the whole 3-bar window) — the second-to-last element of the fetched window is used solely as the comparison bar for the bootstrap case.
+
+MSS fires an alert independently of any template chain (any user with a matching EBP-config or Sweep-config TF gets notified) — separately, MSS is also the trigger `sweep-cron.js` checks to advance a T3 chain from `awaiting_mss` → `complete` (Section below).
+
+### TTrades Closure Bias Engine
+```js
+function calcTTradesBias({ bar1, bar2 }) {
+  const c0 = bar1.close, h0 = bar1.high, l0 = bar1.low, prevH = bar2.high, prevL = bar2.low;
+  const sweptH = h0 > prevH && c0 <= prevH;      const sweptL = l0 < prevL && c0 >= prevL;
+  const insideD = h0 <= prevH && l0 >= prevL;    const outsideD = h0 > prevH && l0 < prevL;
+  const aboveH = c0 > prevH;                     const belowL = c0 < prevL;
+  let closure = outsideD ? 'outside_bar' : insideD ? 'inside_bar' : sweptH ? 'swept_high_closed_inside'
+    : sweptL ? 'swept_low_closed_inside' : aboveH ? 'above_prev_high' : belowL ? 'below_prev_low' : 'none';
+  const rng = h0 - l0;
+  const closePos = rng !== 0 ? ((c0 - l0) / rng) * 100 : 50;
+  let bias = (closure === 'above_prev_high' || closure === 'swept_low_closed_inside') ? 'bullish'
+    : (closure === 'below_prev_low' || closure === 'swept_high_closed_inside') ? 'bearish'
+    : closure === 'outside_bar' ? (closePos >= 50 ? 'bullish' : 'bearish') : 'neutral';
+  return { bias, closure, closePos };
+}
+```
+This runs once on the HTF's two most recent candles, cached in `bias_cache`, and read back per-user through the pairing table below plus per-user overrides (`bias_overrides` JSON on `user_assets`, editable via `BiasOverridePanel.jsx`).
+
+**HTF pairing table** (`BIAS_SOURCE`):
+```js
+const BIAS_SOURCE = {
+  ebp:      { M15:'4H', '1H':'D', '4H':'W', D:'W', W:null },
+  sweep:    { M5:'1H', M15:'1H', M30:'4H', '1H':'D', '4H':'W' },
+  template: { W:null, D:'W', '4H':'D', '1H':'4H' },
+};
+```
+NSE has its own separate, simpler pairing map (`NSE_BIAS_SOURCE`, `{ M1:'M15', M5:'M30', M15:'1H', M30:'D', '1H':'D', D:null }`, identical for `ebp`/`sweep`) — cannot reuse the forex map since NSE's TF ladder differs (e.g. NSE M15→1H vs forex M15→4H).
+
+**Override mechanism**: `resolveHTF(signalType, tf, htfOverride)` — if a user's config row has a non-null `htf_override`, it wins outright; otherwise falls back to `BIAS_SOURCE[signalType][tf]`. Only `1H` and `4H` configs are overridable, and only to one of two allowed alternates: `VALID_HTF_OVERRIDES = { '1H': ['4H','D'], '4H': ['D','W'] }`. `getEffectiveBias()` then layers a *further* per-symbol override on top (`bias_overrides` JSON: `'auto'` defers to the computed bias, anything else — `'bullish'`/`'bearish'`/`'neutral'` — is used verbatim, ignoring the cache entirely).
+
+### T1/T2/T3/T4 Template Chains — Phase 3
+
+All four templates share the `chain_state` table (schema in Section 3). `direction` is always `'bullish'`/`'bearish'` throughout (never `'bull'`/`'bear'`) so it can be compared directly against `detectEBP`/`detectSweep`/`detectMSS` output with no translation layer.
+
+**T3 — HTF EBP → LTF Sweep → LTF MSS** (`awaiting_sweep` → `awaiting_mss` → `complete`)
+1. **Step 1** (`ebp-worker.js`, inside the per-user EBP-alert loop, only after that user's plain EBP alert has already passed the dedup check): query `user_templates WHERE template='t3' AND enabled=1 AND htf=?` (the EBP's own TF). If found: `generateSignalId(db, 'T3', symbol)` (ID assigned **here**, at Step 1 — carried through unchanged to Steps 2/3 via `chain_state.step1_signal_id`, never regenerated), then `initiateT3Chain()` inserts a `chain_state` row with `state='awaiting_sweep'`, `expires_at = now + window_mins*60000` (T3's own per-chain timing window, deliberately *not* the generic "end of UTC month" default the other three templates use — window_mins defaults to 60 and is user-configurable, but the config UI to change it doesn't exist — see Section 9). Fires a Telegram alert immediately (Step 1 of 3).
+2. **Step 2** (`sweep-cron.js`, inside the per-user Sweep-alert loop): on every LTF cron cycle where a sweep fires, query active `T3`/`awaiting_sweep` chains for that symbol+user+**same** direction as the sweep (`sweep.direction === chain.direction` — see the code-comment-documented naming-convention resolution below), filtered further to `chain.ltf === tf`. Match → `advanceT3Chain()` sets `state='awaiting_mss'`. Fires Step 2 Telegram alert reusing `chain.step1_signal_id`.
+3. **Step 3** (`sweep-cron.js`, inside the per-user MSS-alert loop): on MSS fire, query active `T3`/`awaiting_mss` chains for that symbol+user+**same** direction as the MSS result, filtered to `chain.ltf === tf`. Match → insert a `signals` row (`template_type='T3'`, reusing `step1_signal_id`), fire the completion Telegram alert, `completeT3Chain()` sets `state='complete'` (chains are never row-deleted on completion, only state-flipped — swept up later by the generic `expires_at` cleanup).
+
+⚠️ **Resolved ambiguity, documented in-code**: the *literal* T3 spec text this session's earlier work was built from said Step 2's sweep direction must be "**opposite**" to the chain's direction ("bull chain expects a sweep of lows"). In this codebase's naming convention, a sweep is named after its *resulting bias* (a "bullish sweep" = a sweep of lows that closes back above — i.e. IS a sweep of lows), so "bull chain expects a sweep of lows" is actually the **same**-direction case, matching what was already live in production before this session's rewrite. The code was written to match same-direction (`sweep.direction === chain.direction`), with an inline comment explaining the resolution — flagging here since it directly contradicts the plain-English phrasing of the original design doc.
+
+**T1 — HTF EBP → LTF FVG Entry** (`awaiting_fvg_entry` → `complete`)
+1. **Step 1** (`ebp-worker.js`, same loop as T3 Step 1, same trigger — one EBP event can spawn a T1, T2, *and* T3 chain simultaneously for the same user if they've enabled all three templates on that htf): query `user_templates WHERE template='t1' AND enabled=1 AND htf=?`. Match → `insertChain()` with `state='awaiting_fvg_entry'`, `step1_signal_id=null` (no signal has fired yet — T1 only gets an ID at completion), `expires_at = end of current UTC month`.
+2. **Step 2** (`sweep-cron.js`, `processTemplateChains()` — a function that runs **independently of `user_sweep_configs`**, once per LTF cron cycle regardless of whether that user has any Sweep alert config at all, since a user might enable a T1 template on an LTF without separately subscribing to plain Sweep alerts on it): for every active T1/T2/T4 chain whose `ltf === tf`, fetch the latest cached close for `chain.symbol`, look up active `fvg_zones` rows matching `chain.symbol`/`chain.ltf`/`chain.direction`, and check `isPriceInFVG(latestClose, fvg)`. Match → `generateSignalId(db, 'T1', symbol)` (ID generated **only now**, at completion — not at Step 1), `completeFvgEntryChain()` sets `state='complete'` + `fvg_id`, inserts a `signals` row, sends the T1 Telegram alert.
+
+**T2 — HTF EBP → LTF FVG Retracement** (`awaiting_retracement` → `complete`) — most complex, built last
+1. **Step 1** (`ebp-worker.js`, same EBP-triggered loop): additionally captures the firing EBP candle's own `open`/`close`/`open_time` into `chain_state.htf_candle_open/_close/_open_time`, plus a *derived* `htf_candle_close_time = open_time + one HTF interval* (the cache only ever stores a candle's open timestamp — this session's implementation approximates the close bound so the Step 2 window check has something real to compare against; this is a disclosed adaptation, not part of any original spec text). `state='awaiting_retracement'`.
+2. **Step 2** (`sweep-cron.js`, same `processTemplateChains()` pass as T1): for each active T2 chain, additionally filters candidate FVGs to those whose `formed_at` falls within `[htf_candle_open_time, htf_candle_close_time]` **and** whose price range sits inside the HTF EBP candle's real body (`fvg.top <= max(open,close) && fvg.bottom >= min(open,close)`) — i.e. the FVG must have literally formed as a retracement *inside* the very candle that triggered the EBP. Only then does `isPriceInFVG` get checked. Completion mechanics identical to T1.
+
+**T4 — LTF Sweep → LTF FVG Entry** (`awaiting_fvg_entry` → `complete`) — no HTF EBP step at all
+1. **Step 1** (`sweep-cron.js` only, `processTemplateChains()`, driven entirely by `user_templates WHERE template='t4' AND enabled=1 AND ltf=?` joined against `user_assets`/`users` — **not** gated by `user_sweep_configs` at all, since T4's own sweep detection is self-contained): for each matching template row, fetch cached candles for that symbol+ltf, run `detectSweep()` directly. On a hit, if no existing `awaiting_fvg_entry` T4 chain already exists for that symbol+direction+user (a lightweight re-fire guard, not a full dedup — see Section 9), `insertChain()` with `htf=''` (T4 has no HTF concept — this is the one template where the column is deliberately empty rather than a real TF), `expires_at = end of current UTC month`.
+2. **Step 2** — runs in the **same cron pass** as Step 1 (T4 chains are eligible for FVG-entry completion the instant they're created, not just on subsequent cycles) via the same shared T1/T2/T4 FVG-entry check described above.
+
+**Signal ID generation** (all templates): `generateSignalId(db, template, symbol)` reads `signal_counters WHERE template=?`, increments `count`, rolls `series` to the next letter past 999, writes back, returns `` `${template}-${symbolNoSlash}-${series}${count.padStart(3,'0')}` `` (e.g. `T1-XAUUSD-A007`). T3 generates at Step 1; T1/T2/T4 generate only at completion.
+
+**Telegram alert format per template** (all built via `formatT3Alert`/`formatFvgEntryAlert`):
+```
+T3 (per step):
+🎯 T3 Chain — {SYMBOL}
+Step: S{n} of 3
+HTF: {htf} EBP → LTF: {ltf} Sweep → LTF: {ltf} MSS
+Direction: {🟢/🔴} {BULL/BEAR}
+Session: {session}
+Price: {price}
+Signal ID: {signalId}/S{n}
+
+T1/T2/T4 (completion only):
+🎯 {T1|T2|T4} Signal — {SYMBOL}
+{flow line: "HTF: {htf} EBP → LTF: {ltf} FVG Entry" (T1) |
+ "HTF: {htf} EBP → LTF: {ltf} Retracement FVG" (T2) |
+ "LTF: {ltf} Sweep → FVG Entry" (T4)}
+Direction: {🟢/🔴} {BULL/BEAR}
+FVG Zone: {bottom} – {top}
+Price: {price}
+Signal ID: {signalId}
+```
+
+### NSE-specific detection differences vs forex/crypto
+`detectEBP`, `detectSweep`, `detectMSS`, and the FVG engine are **byte-for-byte identical** between `nse-cron.js` and the forex/crypto workers — no NSE-specific tuning of any threshold or condition. The only structural differences are: (1) NSE writes to its own `nse_fvg_zones`/`nse_swing_states` tables rather than the shared forex/crypto ones; (2) NSE has **no T1/T2/T3/T4 template-chain machinery at all** — EBP/Sweep/MSS fire as standalone alerts with no multi-step confirmation chain on NSE; (3) NSE has two entirely NSE-only detectors with no forex/crypto equivalent — **TDI** and **SMA Cloud** (both fully detailed in Section 8).
+
+### TF access rules per market
+| | Forex/crypto | NSE |
+|---|---|---|
+| Valid TF set (hard-coded) | `['M5','M15','M30','1H','4H','D','W']` (EBP); `['M5','M15','M30','1H','4H']` (Sweep, enforced in `sweep-worker/src/index.js`) | `['M1','M5','M15','M30','1H','D']`, duplicated as a *second*, separately-maintained literal in `ebp-worker.js` (`ALL_NSE_TF_ACCESS`) and in `nse-cron.js` (`NSE_VALID_TFS`) — 🐛 **BUG RISK**: two independently-maintained copies of the same 6-value array, no shared constant, could silently drift apart on a future edit to one but not the other. |
+| Per-user override column | `users.user_tf_access` (JSON array) | `users.nse_tf_access` (JSON array), added by `migrations/007_nse_worker.sql`, explicitly documented as separate from `user_tf_access` |
+| Admin route | `GET/PATCH /admin/users/:id/tf-access` | `GET/PATCH /admin/users/:id/nse-tf-access` |
+| FVG-specific TF subset | M15/M30/1H/4H | M5/M15/1H only (D/W and M1/M30 never run FVG) |
+| Checked at | config creation (`POST /user/ebp-configs`/`sweep-configs`) and alert delivery time | same pattern, plus TDI/SMA delivery (`deliverNseIndicatorAlert`) |
+
+---
+
+## Section 5 — Alert & Notification System
+
+### Telegram bot setup
+**One shared bot for all user-facing alerts**: `@EbP_Tracker_bot`, token in the `SHARED_BOT_TOKEN` secret, configured identically on `worker`, `sweep-worker`, and `nse-worker` (three separate `wrangler secret put` invocations of the same value — not shared infrastructure, just the same token pasted three times). ⚠️ **DIVERGENCE from README.md's implied architecture** ("Telegram bot (via @BotFather)" singular setup step) — this is accurate, just worth noting there is genuinely one bot for the whole system, not per-alert-type bots.
+
+**Watchdog Worker sends zero Telegram messages** — confirmed via full-file grep, no `SHARED_BOT_TOKEN` reference exists in `watchdog-worker/src/index.js` and it has no secrets configured at all. `DEVELOPER_TELEGRAM_CHAT_ID` is a configured secret on the EBP Worker but **has no live call site anywhere in `ebp-worker.js`** — documented but not implemented (per-code-comment history, it was used for payment-submission notifications that were later removed; the secret was never cleaned up). There is no "Watchdog alert bot" despite the roadmap's "Deferred/Cancelled" list implying a future `@EBP_Watchdog_bot` — that bot does not exist in code; Watchdog's only observability output is the `watchdog_log` D1 table, write-only, no delivery mechanism to a human at all as of this audit (see Section 10's monitoring gaps).
+
+### Per-user bot token vs shared bot — what's actually implemented
+**Shared bot only.** There is no per-user bot token anywhere in the schema or code — `user_telegram` stores only `chat_id` (which chat the shared bot should DM), never a bot token. Linking flow: `POST /user/telegram/initlink` generates a 4-digit code → user DMs `@EbP_Tracker_bot` with `/start` or the code → `POST /telegram/webhook` (public, Telegram-called) resolves the code to a `user_id` and writes `chat_id`+`verified=1` → frontend polls `POST /user/telegram/verify` every 3s until it sees `verified=1`.
+
+### Exact Telegram message format, per alert type
+
+**EBP** (`worker/src/ebp-worker.js`, `formatEBPAlert`):
+```
+{🟢|🔴} <b>{BULLISH|BEARISH} EBP — {SYMBOL}</b>
+⏱ Timeframe: {tf}
+🕐 Candle: {NY time}
+📊 Trend: {trendBias} ({htf bias label}) {✅|⚠️ No Trend Filter}
+━━━━━━━━━━━━━━
+{Low swept|High swept}: {sweptLevel}
+{Closed above body|Closed below body}: {closedLevel}
+━━━━━━━━━━━━━━{if signalId: newline "🔗 Signal ID: {signalId}"}
+<i>EBP Tracker</i>
+```
+
+**Sweep** (`sweep-cron.js`, `formatSweepAlert`) — near-identical to EBP but no Signal ID line at all (Sweep alerts never get a Signal ID — see below) and a 3-way align-mark (`✅` aligned / `📊 Price Action` mode / `⚠️ No Trend Filter`):
+```
+{🟢|🔴} <b>{BULLISH|BEARISH} SWEEP — {SYMBOL}</b>
+⏱ Timeframe: {tf}
+🕐 Candle: {NY time}
+📊 Trend: {trendBias} ({htf bias label}) {✅|📊 Price Action|⚠️ No Trend Filter}
+━━━━━━━━━━━━━━
+{Low swept|High swept}: {sweptLevel}
+Closed inside: {closedInsideLevel}
+━━━━━━━━━━━━━━
+<i>EBP Tracker</i>
+```
+
+**MSS** (`formatMSSAlert`, forex/crypto) — also no Signal ID:
+```
+{🟢|🔴} <b>{BULLISH|BEARISH} MSS — {SYMBOL}</b>
+⏱ Timeframe: {tf}
+🕐 Candle: {NY time}
+📊 Trend: {htfBias} ({htf label}) {✅|⚠️}
+━━━━━━━━━━━━━━
+{Swing high reclaimed|Swing low reclaimed}: {level}
+━━━━━━━━━━━━━━
+<i>EBP Tracker</i>
+```
+
+**T3** (`formatT3Alert`, all 3 steps use the same template, `step` and price vary):
+```
+🎯 T3 Chain — {SYMBOL}
+Step: S{n} of 3
+HTF: {htf} EBP → LTF: {ltf} Sweep → LTF: {ltf} MSS
+Direction: {🟢|🔴} {BULL|BEAR}
+Session: {session}
+Price: {price}
+Signal ID: {signalId}/S{n}
+```
+
+**T1 / T2 / T4** (`formatFvgEntryAlert`, completion only — no Step-1 alert is sent for these three, unlike T3):
+```
+🎯 {T1|T2|T4} Signal — {SYMBOL}
+{HTF: {htf} EBP → LTF: {ltf} FVG Entry             [T1]
+ HTF: {htf} EBP → LTF: {ltf} Retracement FVG        [T2]
+ LTF: {ltf} Sweep → FVG Entry                       [T4]}
+Direction: {🟢|🔴} {BULL|BEAR}
+FVG Zone: {bottom} – {top}
+Price: {price}
+Signal ID: {signalId}
+```
+
+**NSE EBP / Sweep / MSS** (`nse-cron.js`, `formatNseEBPAlert`/`formatNseSweepAlert`/`formatNseMSSAlert`) — same visual structure as their forex/crypto counterparts but IST instead of NY time, and — unlike forex/crypto Sweep/MSS — **always** include a Signal ID line (NSE generates a signal ID for every EBP/Sweep/MSS fire, forex/crypto only does so for EBP):
+```
+{🟢|🔴} <b>{BULLISH|BEARISH} {EBP|SWEEP|MSS} — {SYMBOL}</b>
+⏱ Timeframe: {tf}
+🕐 Candle: {IST time}
+📊 Trend: {trendBias}{ (biasTF bias)} {✅|⚠️ No Trend Filter|blank if neutral}
+━━━━━━━━━━━━━━
+{type-specific level line(s)}
+━━━━━━━━━━━━━━
+🔗 Signal ID: {signalId}
+EBP Tracker
+```
+
+**TDI** (`formatTdiAlert`) — no Signal ID at all (TDI/SMA never write to the `signals` table, only `alert_history`):
+```
+{🟢|🔴} <b>{BUY|SELL} — {SYMBOL}</b>
+⏱ Timeframe: {tf}
+🕐 Candle: {IST time}
+━━━━━━━━━━━━━━
+TDI: RSI exhaustion at {lower|upper} band
+Divergence: Price {LL, RSI HL|HH, RSI LH} confirmed
+Momentum: Red crossed Yellow {↑|↓}
+MSS: {Swing high reclaimed|Swing low broken}: {level}
+{if equity: 📦 Volume: {ratio}× average}
+{if SMA context available: 📊 SMA Context: ...}
+━━━━━━━━━━━━━━
+EBP Tracker
+```
+
+**SMA Cloud** — three distinct alert shapes, also no Signal ID:
+- **Type 1 (trend initiation)**: `SMA Cloud: {Bullish markup|Bearish distribution} — {Sharp⚡|Gradual📉}`, SMA1/SMA9/HTF-SMA9 values, bias line, optional volume line.
+- **Type 2 (cloud rejection re-entry)**: `SMA Cloud: {Bullish|Bearish} re-entry`, `Rejected from {cloud top|cloud bottom}: {value}`, `Close strength: {pct}% — strong ✅`, bias line.
+- **Exhaustion**: `⚠️ {SYMBOL} — SMA Trend Exhausting` (shortest format, timeframe + candle time only, no direction/bias/level detail).
+
+**Watchdog**: documented but not implemented — no Telegram format exists because Watchdog never sends a Telegram message (see above).
+
+### Alert deduplication
+Two independent mechanisms, applied at different layers:
+1. **Telegram-alert dedup** (`isDuplicateAlert`, forex/crypto; same-pattern function in `nse-cron.js`) — before sending, checks `alert_history WHERE user_id=? AND symbol=? AND timeframe=? AND direction=? AND alert_type=? AND fired_at > cutoff`, where `cutoff = now - ALERT_INTERVAL_MS[tf]` (one full TF interval per alert type — e.g. a 1H EBP alert can't re-fire for the same symbol+direction within 1 hour). 🐛 **BUG RISK, explicitly flagged in-code**: `fired_at` is an INTEGER ms epoch in `alert_history`; the cutoff bound must be bound as the same INTEGER type or SQLite's type-affinity comparison rules make the `>` comparison silently always-false, which would make dedup silently do nothing rather than error loudly. Current code binds correctly (`Date.now()` throughout), but this is a landmine for any future refactor that switches `alert_history.fired_at` to ISO text (as `signals.fired_at` already is) without updating every `isDuplicateAlert` call site in lockstep.
+2. **Chain-creation dedup** (Phase 3 templates) — T3's chain creation is implicitly protected by inheriting the *EBP alert's own* dedup check (chain creation code runs strictly after the `if (isDuplicateAlert) continue;` guard in the same loop iteration). T1/T2 inherit the same protection (same loop). T4 has its own explicit, weaker guard: before creating a new `awaiting_fvg_entry` chain, it checks whether one already exists for that exact user+symbol+direction and skips if so — this prevents chain-spam only while a chain is still pending, not across a full spam-detection window like `isDuplicateAlert` provides, so a rapid repeat sweep detection *could* create a second T4 chain shortly after the first one completes. Flagged, not fixed, in Section 9.
+
+### Signal ID system
+`signal_counters(template TEXT PK, series TEXT DEFAULT 'A', count INTEGER DEFAULT 0)` — one row per template key. Format: `` `{TEMPLATE}-{SYMBOL_NO_SLASH_UPPERCASE}-{series}{count:03d}` ``, e.g. `T3-XAUUSD-A001`, except EBP's generator which embeds the TF too: `EBP-{SYMBOL}-{tf}{series}{count:03d}` (e.g. `EBP-XAUUSD-4HA007`). Counter is global per template (shared across all symbols), not per-symbol — confirmed by every generator function's `WHERE template=?` lookup having no symbol filter. Rollover: `count > 999` → `series` advances one letter, `count` resets to 1 (26,000 signals per template before `series` exhausts Z999).
+
+| Alert type | Gets a Signal ID? | Where generated |
+|---|---|---|
+| EBP (forex/crypto) | ✅ | `ebp-worker.js`, once per symbol+TF event (shared across all notified users) |
+| Sweep (forex/crypto) | ❌ | n/a — plain Sweep alerts never carry an ID |
+| MSS (forex/crypto) | ❌ | n/a |
+| T3 | ✅ | Step 1 (`ebp-worker.js`), carried through Steps 2/3 unchanged |
+| T1 / T2 / T4 | ✅ | Only at chain completion (`sweep-cron.js`) — no ID exists during the pending state |
+| NSE EBP / Sweep / MSS | ✅ | Every fire, via `generateNseSignalId` — one shared `'NSE'` counter row across all three alert types and all NSE symbols |
+| TDI / SMA Cloud | ❌ | n/a — never written to `signals`, only `alert_history` |
+
+---
+
+## Section 6 — Frontend
+
+**Stack**: React 18 + Vite, `react-router-dom` v6, `@clerk/clerk-react`, `recharts` (Market Breadth only), `xlsx` (Alerts export only). ⚠️ **DIVERGENCE**: `README.md` claims "React + Vite + MUI" — there is no MUI dependency anywhere in `package.json` and zero `@mui` imports in `src/`; all styling is hand-rolled CSS (`src/styles/tokens.css`, `global.css`).
+
+### Page inventory (`src/App.jsx`)
+| Path | Component | Guard | Purpose |
+|---|---|---|---|
+| `/` | `LandingRoute` → `Landing` | Redirects to `/dashboard` if already signed in (Clerk `useUser`) | Marketing/sign-in page |
+| `/invite/:token` | `LandingRoute` → `Landing` | Same | Same landing page, displays the invite token param (no dedicated API call) |
+| `/dashboard` | `Layout` → `Dashboard` | `ProtectedRoute` (Clerk `SignedIn`/`SignedOut`) | Asset overview (DXY + Forex/Crypto + NSE) |
+| `/assets` | `Layout` → `Assets` | `ProtectedRoute` | Asset picker with slot-limit enforcement |
+| `/alerts` | `Layout` → `Alerts` | `ProtectedRoute` | Alert history + Excel export |
+| `/settings` | `Layout` → `Settings` | `ProtectedRoute` | Account info + Telegram linking |
+| `/admin` | `Layout` → `Admin` | `ProtectedRoute` at router level + **in-component** `is_admin===1` check (renders "Access Denied" otherwise) | Users, invite tokens, API keys, limits, price feed test |
+| `/market` | `Layout` → `MarketBreathPage` | `ProtectedRoute` only — **no admin check at all**, just hidden from the nav sidebar for non-admins | Currency strength/correlation dashboard |
+| `*` | `NotFound` | none | 404 |
+
+🐛 **BUG RISK / access-control gap**: `/market` has zero server-independent admin enforcement at the frontend routing layer — any signed-in user who navigates directly to `/market` sees the page render (the backend `/market/breadth` route itself *is* admin-gated per Section 2's route table, so no data actually loads for a non-admin, but the page shell, loading state, and UI chrome are all visible to any authenticated user).
+
+### Per-page API calls (method, path, auth)
+- **Dashboard**: `GET /user/assets/count` (token); `GET /nse/status` (no token, public).
+- **Assets**: `GET /user/assets/count`; asset add/remove via `useAssets()`'s `POST /user/assets` / `DELETE /user/assets/:id`.
+- **Alerts**: `GET /alerts/history?...`; `GET /alerts/export...` (client builds an `.xlsx` via the `xlsx` package).
+- **Settings**: `GET /user/telegram`; `POST /user/telegram/verify` (polled every 3s while linking); `POST /user/telegram/initlink`; `POST /user/telegram/test`; `DELETE /user/telegram`.
+- **Admin** (heaviest page, 549 lines): `GET /user/me`, `/admin/users`, `/admin/tokens`, `/admin/api-keys`; `POST /admin/invite`, `/admin/expire/:userId`, `/admin/api-keys` (both generic keys and the Upstox token, same route, `source` field differs); `PATCH /admin/api-keys/:id`, `/admin/users/:userId/asset-limit`, `/admin/users/:userId/tf-access`, `/admin/users/:userId/nse-tf-access`; `DELETE /admin/api-keys/:id`; `GET /admin/users/:userId/assets`, `/tf-access`, `/nse-tf-access`.
+- **MarketBreathPage**: `GET /market/breadth`, polled every 60s.
+
+### Hook inventory (`src/hooks/`, only 2 files exist)
+- **`useAssets.js`**: `{ assets, loading, error, addAsset, removeAsset, refetch, lastUpdated }`. Fetches `GET /user/assets` once on mount/auth-state change (no polling). `addAsset`/`removeAsset` call the respective REST routes then refetch.
+- **`useUser.js`**: `{ user, loading, error, refetch }`. Fetches `GET /user/me`, **polls every 120s** (`setInterval`) "to pick up plan changes" per inline comment — the only polling hook in the app.
+
+### Component inventory (`src/components/`, 11 files)
+| Component | Purpose |
+|---|---|
+| `AIAlertsPanel.jsx` | T1-T4 template config UI (full detail below) |
+| `ApiErrorAlert.jsx` | Trivial error banner + optional Retry button |
+| `AssetCard.jsx` (134 lines) | Per-asset dashboard card — aggregates 5 config types via `Promise.allSettled`, polls its own summary every 60s, expands into the panels below |
+| `BiasOverridePanel.jsx` | 4-TF (W/D/4H/1H) bias-override select rows, no own API calls |
+| `EBPConfigPanel.jsx` | EBP alert-TF CRUD per asset, filters TF options by `allowedTfs` |
+| `ExpiryBanner.jsx` | Expiry warning (≤7 days) / error (≤2 days) banner; "Renew" button links to a nonexistent `/upgrade` route (dead link) |
+| `Layout.jsx` | App shell — topbar (health datasource timestamp, polled 60s), sidebar nav (Market/Admin links only for `is_admin===1`), `ExpiryBanner`, page children |
+| `NseSearchModal.jsx` | Debounced (400ms) NSE symbol search modal |
+| `PriceFeedPanel.jsx` (403 lines) | Admin-only diagnostic tool — connects **directly from the browser** to Twelve Data's WebSocket using a manually pasted API key, bypassing the worker entirely |
+| `SmaConfigPanel.jsx` | NSE SMA Cloud config CRUD |
+| `SweepConfigPanel.jsx` | Structurally identical to `EBPConfigPanel.jsx`, for Sweep configs |
+| `TdiConfigPanel.jsx` | NSE TDI config CRUD |
+
+### Auth flow
+`main.jsx` wraps the app in `ClerkProvider publishableKey={VITE_CLERK_PUBLISHABLE_KEY || 'pk_test_placeholder'}` (silent fallback to a placeholder key on misconfiguration, rather than a loud error). `isLoaded`/`isSignedIn` gate every data-fetching hook and the router's `LandingRoute`/`ProtectedRoute`. **Admin detection is entirely app-level, not Clerk-level**: `Admin.jsx` fetches `GET /user/me` and checks `me.is_admin === 1`; `Layout.jsx` does the same to decide whether to render the Market/Admin nav links.
+
+### Subscription / tier system — what's actually enforced
+There is **no generic tier-gating framework**. The only real enforcement mechanism is a hardcoded **forex/crypto asset-slot limit** (`user.asset_limit`, default 5 at the app-INSERT level — see Section 3's note on the live column default drifting to 3), computed server-side and enforced client-side by disabling/locking unowned asset checkboxes once `forex_crypto_count >= forex_crypto_limit`:
+```jsx
+const limitReached = assetCount.forex_crypto_count >= assetCount.forex_crypto_limit;
+const isLocked = limitReached && !isOwned;
+```
+NSE assets are explicitly **unlimited** (`nse_limit: 'unlimited'`), DXY is exempt from the slot count entirely (`asset_type==='system'`). `user.plan` (a free-text string) is read only for **display** — `Layout.jsx`'s account dropdown ("Free · N days left") and one dead prop-pass (`Dashboard.jsx` passes `tier={user?.plan}` into `AssetCard`, which never destructures or reads it). The real per-user gating axis that actually restricts *feature access* (not just asset count) is **timeframe access** (`user_tf_access`/`nse_tf_access`, admin-set JSON arrays), which filter the selectable-TF option lists inside `EBPConfigPanel`/`SweepConfigPanel`. Payment is manual/out-of-band — a static "Pay $30.00 to unlock more assets" banner with no checkout flow, plus a UPI QR code image asset (`public/upi-qr.png`) referenced nowhere in the render tree found — the payment story is entirely outside this codebase (manual verification, per README).
+
+Account-level (not tier-level) expiry: `user.active`/`user.expires_at` drive a full-screen "Plan Expired" overlay on `Dashboard.jsx` when `active===0`, and `ExpiryBanner.jsx`'s warning/error banner in the final 7/2 days.
+
+### `AIAlertsPanel.jsx` in detail
+Full 120-line component (unchanged since this session's earlier "remove Coming Soon from T1/T2/T4" fix). `TEMPLATES` is a static 4-entry array (`t1`-`t4`, labels, descriptions); T3 still carries an explicit `comingSoon: false` field (harmless — the render condition is simply never true for any of the four now). Read: `GET /user/templates/${assetId}` on mount/assetId-change, stored as an array of `{id, template, enabled, htf, ltf, window_mins}` rows. Write:
+- **Create** (checkbox toggled on, no existing row): `POST /user/templates/${assetId}` with a fully hardcoded default payload `{template, enabled:1, htf:'4H', ltf:'M15', window_mins:60}` — a user has no way to pick a different starting HTF/LTF at creation time; they must create then immediately edit.
+- **Toggle enable/disable** (row exists): `PATCH /user/template/${id}` with just `{enabled}`.
+- **HTF/LTF edits**: `PATCH /user/template/${id}` with both `htf` and `ltf` together (even on an LTF-only change, it re-sends the existing `htf`). HTF change auto-resets LTF to the highest valid option below the new HTF via `templateLtfOptions()`.
+Checkbox state: `checked={!!active?.enabled}`; the HTF/LTF config sub-row only renders when `active?.enabled` is true (not merely when a row exists). A "Saved ✓" flash (1.5s `setTimeout`) confirms HTF/LTF writes.
+
+---
+
+## Section 7 — Subscription & User Management
+
+### Tier definitions (from actual code/DB — no separate tier docs are authoritative)
+There is effectively **one implicit tier** (all signed-up users), differentiated only by two independently-set numeric/list fields on `users`, both admin-editable per-user rather than derived from any named plan:
+- `asset_limit` (INTEGER, default 5 at app-insert time, live column default 3 — see Section 3) — caps forex/crypto asset count only; NSE is always unlimited.
+- `user_tf_access` / `nse_tf_access` (JSON arrays) — cap which timeframes a user can configure alerts on, independently for forex/crypto vs NSE.
+`plan` (TEXT, default `'free'`) exists on `users` but — confirmed in Section 6 — is never read anywhere to branch behavior; it is purely a display label. ⚠️ **DIVERGENCE**: `EBP_Tracker_Roadmap.md`'s "Closed Decisions" table states "Tier model | Dropped. Flat model: 5 forex/crypto slots, unlimited NSE. Closed." — this matches the code exactly (confirms the roadmap is accurate on this specific point, not a contradiction, but worth citing since it explains *why* `plan` is vestigial rather than a bug).
+
+### Admin panel — every action available, role detection
+Role detection: **not** a Clerk role/metadata field — a plain `users.is_admin` INTEGER column, checked via `GET /user/me` both client-side (`Admin.jsx`, `Layout.jsx`) and server-side (`requireAdmin()` gate on every `/admin/*` route, so the client-side check is UX-only, not the real security boundary).
+
+Admin actions (all from `Admin.jsx`'s 5 tabs, all backed by real routes in `worker/src/ebp-worker.js`):
+1. **Users tab**: view all users (assets, alert configs, Telegram status); expand a user to see their assets and per-TF access checkboxes (forex/crypto and NSE, independently); grant `+3 Slots` (asset-limit bump); toggle per-TF access; "Expire Account" (soft-deactivate, `active=0`).
+2. **Invite Tokens tab**: generate a new invite token; list all tokens with used/unused status.
+3. **API Keys tab**: a dedicated "Upstox Analytics Token" card (single-slot, `source='upstox'`, shows an expiry countdown) plus a generic multi-key list (Twelve Data keys) with per-key enable/disable, delete, add-new-key form, and live usage/credit progress bars (sourced from `api_key_state`).
+4. **User Limits tab**: per-user numeric asset-limit editor (duplicate UI surface for the same action as the Users tab's "+3 Slots" button, via a different route pattern).
+5. **Price Feed tab**: renders `PriceFeedPanel` — the direct-to-browser Twelve Data WebSocket diagnostic tool (Section 6).
+
+No self-service downgrade/upgrade exists anywhere — every limit change is admin-initiated via the panel above; there is no automated tier-transition logic anywhere in the codebase.
+
+---
+
+## Section 8 — NSE Module
+
+### NSE Worker — entry file, routes, cron
+`nse-worker/src/index.js` (62 lines): `GET /health` (public), `POST /cron/nse` (X-Cron-Secret; `tf` from JSON body or `?tf=` query fallback). No native Cloudflare cron trigger — `nse-worker/wrangler.toml` has no `[triggers]` block; scheduling is 100% cron-job.org, one job per TF in `NSE_VALID_TFS`.
+
+### NSE data source — what's actually wired
+**Upstox (conditional) → Yahoo Finance (fallback)**, gated purely on whether an enabled `api_keys` row with `source='upstox'` exists:
+```js
+async function fetchNseCandles(symbol, tf, env) {
+  const upstoxKey = await env.DB.prepare(
+    "SELECT key_value FROM api_keys WHERE source='upstox' AND enabled=1 LIMIT 1"
+  ).first();
+  if (upstoxKey) {
+    try {
+      const raw = await fetchUpstoxNse(symbol, tf, upstoxKey.key_value);
+      const candles = raw ? getClosedCandles(raw, INTERVAL_MS[tf]) : null;
+      if (candles && candles.length >= 3) return candles;
+    } catch (e) { /* fall through to Yahoo */ }
+  }
+  try { return getClosedCandles(await fetchYahooFinanceNse(symbol, tf), INTERVAL_MS[tf]); }
+  catch (e) { return null; }
+}
+```
+No seed row exists for `source='upstox'` in any migration — an admin must paste it via the "Upstox Analytics Token" card in `Admin.jsx` (`POST /admin/api-keys`, `source:'upstox'`). Until that happens, **the entire NSE pipeline (EBP/Sweep/MSS/TDI/SMA) silently runs on Yahoo Finance only, forever**, with the only visible signal being the public `GET /nse/status` badge ("~15 min delayed") — no error is ever surfaced to an admin that Upstox isn't configured. Yahoo itself is an undocumented free endpoint scraped with a spoofed `User-Agent: Mozilla/5.0` header and no auth — the more fragile of the two paths, and the default one.
+
+### NSE symbol list — storage and search
+Stored in the shared `user_assets` table with `asset_type='nse'` (no dedicated NSE-symbols table, no `CHECK` constraint on `asset_type`). Search: `GET /nse/search` lives in **`worker/src/ebp-worker.js`, not `nse-worker`** — fans out to Upstox `instruments/search` (equities, returns `[]` silently if no token configured) and Yahoo `finance/search` (indices, always works) in parallel via `Promise.allSettled`.
+
+### NSE TF constraints
+`NSE_VALID_TFS = ['M1','M5','M15','M30','1H','D']` (`nse-cron.js`), enforced at cron entry. 🐛 **BUG RISK**: `worker/src/ebp-worker.js` independently maintains its own identical literal, `ALL_NSE_TF_ACCESS = ['M1','M5','M15','M30','1H','D']` — two hand-copied arrays with no shared constant, could silently drift if one file is edited without the other. Per-user override: `users.nse_tf_access` (JSON, default all 6), separate column from forex/crypto's `user_tf_access`, admin-editable via `GET/PATCH /admin/users/:id/nse-tf-access`. FVG detection further narrows to `['M5','M15','1H']` only, enforced inline in `handleNseCron` (not in the shared TF-list constants).
+
+### NSE signal detection differences vs forex/crypto
+`detectEBP`/`detectSweep`/`detectMSS` and the FVG engine are **byte-for-byte identical** to the forex/crypto copies — no NSE-specific threshold tuning anywhere. The only NSE-specific *detection* logic is two indicators with zero forex/crypto equivalent:
+
+**TDI (Traders Dynamic Index)** — 4-condition gate, State-1-pending-chain pattern (`nse_indicator_chain`, expires after 4 candles):
+1. RSI(13) exhaustion at a Bollinger Band(34, 1.6185) computed *on the RSI series itself*: `cond1Bull = redNow <= bbLowerNow` (red = SMA(2) of RSI).
+2. Divergence (`checkTdiDivergence`) — current RSI/price vs a reference extreme sourced from the live `nse_swing_states.pending_swing_high/low` for the opposite-direction run, falling back to a 20-candle lookback extreme if unavailable.
+3. Momentum crossover: Red SMA(2) crossing Yellow SMA(7) of RSI.
+4. (checked on later cron cycles against the pending chain) MSS confirmation (`close` beyond `last_confirmed_swing_high/low`) **plus** a volume gate (1.5× 20-candle average volume) — skipped entirely for index symbols.
+
+**SMA Cloud** — phase state machine (`accumulation` → `transition` → `distribution` → back to `accumulation` via `exhaustion`), driven by the gap between SMA1 (raw close) and SMA9 (9-period SMA), ATR-relative thresholds throughout:
+```js
+const stillAccumulating   = m.crossover20 >= 3 || m.separationNow < (m.atr14 * 0.15);
+const transitionCondition = m.crossover5 === 0 && m.widening && m.sameSide3 === 3;
+const distributionActive  = m.crossover10 === 0 && m.separationNow > (m.atr14 * 0.15) && m.sameSide5 >= 4;
+const exhaustionCondition = m.separationNow < (m.atr14 * 0.15) && m.crossover5 >= 1 && m.sameSide5 <= 3;
+```
+Fires two distinct signal types: **Type 1** (trend initiation, on entering `distribution`) — requires price beyond the cloud, a stack check (strict/loose per-user config), an SMA-bias-gate pass, and (equities only) a volume gate. **Type 2** (cloud-rejection re-entry, on a later distribution-phase session) — price enters the cloud and is rejected, 50%-candle-strength check, same bias gate, cooldown-gated (daily for M15, hourly for M5). A separate **Exhaustion** alert fires on distribution→accumulation and explicitly precludes a Type1/Type2 firing the same run.
+
+Neither TDI nor SMA Cloud has any forex/crypto counterpart — these are 100% NSE-exclusive detectors, and NSE in turn has **no T1-T4 template chain machinery** (the inverse asymmetry — forex/crypto gets multi-step chains, NSE gets these two standalone multi-condition indicators instead).
+
+### NSE alert delivery
+Same shared bot/infrastructure as forex/crypto — `SHARED_BOT_TOKEN`, resolved via the same `user_telegram` table, no NSE-specific bot or linkage mechanism. Two delivery paths inside `nse-cron.js`: `tryDeliverNseAlert` (EBP/Sweep/MSS) and `deliverNseIndicatorAlert` (TDI/SMA), both gated on `nse_tf_access` and a verified Telegram chat.
+
+### What works today vs infrastructure-only
+**Fully wired end-to-end** (fetch → detect → deliver, actively exercised): EBP/Sweep/MSS on NSE (`swing_states`/`fvg_zones` row counts confirm forex/crypto side is live, but see below), TDI, SMA Cloud, the Upstox admin token flow, `/nse/search`.
+
+🔶 **UNTESTED on live NSE data specifically**: this session's live D1 query found **`nse_fvg_zones` = 0 rows** and **`nse_swing_states` = 0 rows** in production — despite the FVG/swing code paths for NSE being deployed and syntax-verified, they have not actually written a single row on real NSE market data as of this audit (forex/crypto's equivalent tables *do* have real data — 18 and 22 rows respectively — so this is specifically an NSE-side gap, not a general Phase-1-3 gap). Possible causes not distinguishable from code alone: no NSE symbols currently configured with EBP/Sweep alerts on the FVG-eligible TFs (M5/M15/1H), or NSE market hours (`isNseMarketOpen()` gate) simply haven't overlapped with a verification window since deploy.
+
+**Documented but incomplete/dead**, per in-code comments (not this audit's own inference): `nse_indicator_configs.day_filter` ("unused since the SMA Cloud corrective patch"), `user_indicator_settings.sma_forex_hours` ("not yet read by any Worker"), `fetchAndCacheNSECandles()` (dead wrapper, "kept for any standalone/manual-test call path" — confirmed as one of the 3 genuinely-dead top-level functions in `nse-cron.js`, Section 9).
+
+---
+
+## Section 9 — Known Issues & Technical Debt
+
+### TODO/FIXME/HACK/XXX comments
+**Zero matches.** A case-insensitive grep for `TODO|FIXME|HACK|XXX` across all four workers' `src/` and `frontend/src` found no occurrences anywhere. The codebase's "known incomplete" items are instead documented as ordinary prose comments (several of which are quoted throughout this report, e.g. the `day_filter`/`sma_forex_hours` schema comments) rather than tagged markers — meaning a simple grep-for-TODO audit process would find *nothing* in this repo even though real known-incomplete items exist; anyone auditing this codebase in the future needs to read comments, not just grep for tags.
+
+### Dead code — functions defined but never called
+Confirmed via whole-file call-count analysis (excluding `export`ed functions, which are legitimately called from a sibling file):
+
+| Function | File | Line | Note |
+|---|---|---|---|
+| `getHTFForTF(tf)` | `worker/src/ebp-worker.js` | 134 | Superseded by `BIAS_SOURCE.ebp`, defined right below it |
+| `loadBiasCache(db, symbol, biasTF)` | `worker/src/ebp-worker.js` | 186 | Dead read-side of `writeBiasCache` — no caller anywhere |
+| `isPriceInFVG(price, fvgRow)` | `worker/src/ebp-worker.js` | 582 | Only used in `sweep-cron.js`'s `checkFvgEntryChain` — the `ebp-worker.js` copy has no local caller (EBP Worker never checks FVG entry itself, only creates T1/T2 chains at Step 1) |
+| `getHTFForSweepTF(tf)` | `sweep-worker/src/sweep-cron.js` | 49 | Same pattern — superseded by `BIAS_SOURCE.sweep` |
+| `loadBiasCache(db, symbol, biasTF)` | `sweep-worker/src/sweep-cron.js` | 102 | Same dead helper, independently duplicated into this file too |
+| `oppositeDirection(direction)` | `sweep-worker/src/sweep-cron.js` | 116 | Defined for the T3 same-vs-opposite-direction resolution work this session, ended up unused once the resolution landed on same-direction matching — genuinely dead as of the current code |
+| `fetchAndCacheNSECandles(symbol, timeframe, env)` | `nse-worker/src/nse-cron.js` | 240 | Self-documented as dead ("kept for any standalone/manual-test call path") |
+
+Notably, `loadBiasCache` is dead in **both** `ebp-worker.js` and `sweep-cron.js` — the same abandoned helper was independently copy-pasted into both bundles (consistent with the "zero cross-file imports" architecture) and neither copy is used. All 7 are small and low-risk to delete.
+
+**Dead code beyond individual functions**:
+- **`packages/core/`** (`datafeed.js`, `ttrades.js`, `telegram.js`, `package.json`, `@ebp-tracker/core`) — an entire legacy shared-package directory. Confirmed via repo-wide grep: **zero live source files import from it.** The only references anywhere are (a) explanatory comments in `sweep-cron.js` noting logic was "inlined from packages/core/X," and (b) a stale, gitignored `sweep-worker/dist/` build artifact from before the inlining migration. This predates the current "every worker is a fully self-contained bundle" convention and can be deleted outright.
+- **`sweep-worker/dist/`** and **`frontend/dist/`** — local Vite/build output directories, `.gitignore`'d (`dist/` is in `.gitignore`), not tracked in git, so not a real repo hygiene issue, just noting they exist on disk from a prior local build.
+
+### Dead / orphaned secrets and env vars
+- **`worker`**: `DEVELOPER_TELEGRAM_CHAT_ID` and `TWELVE_DATA_API_KEY_1/2/3` are configured Cloudflare secrets with **zero references** in `ebp-worker.js`. Live Twelve Data keys are D1 `api_keys` rows now, not Worker secrets — these three secrets are pre-Watchdog-migration leftovers.
+- **`sweep-worker`**: `CLERK_SECRET_KEY` and `TWELVE_DATA_API_KEY_1/2/3` configured but unreferenced (Sweep Worker does no Clerk auth — it's cron-only — and no longer calls Twelve Data directly).
+- **`nse-worker`**: `CLERK_SECRET_KEY` configured but unreferenced (same reason — cron-only, no Clerk auth). `ENVIRONMENT="production"` `[vars]` entry has no code consumer anywhere.
+- **`worker` code**: `env.TWELVE_DATA_API_KEY` (singular, no `_1/2/3` suffix) is referenced once, passed into `validateSymbol()` — but that function's `apiKey` parameter is never actually used inside the function body (it's Yahoo-only), and no secret named exactly `TWELVE_DATA_API_KEY` even exists in the configured list. Dead parameter, dead reference, no functional impact since it's never read.
+- **Frontend**: `VITE_SWEEP_WORKER_URL` is defined in both `.env.example` and `.env.local` but never read anywhere in `src/` — `api.js` only ever reads `VITE_WORKER_URL`. All frontend↔backend traffic, including the routes historically owned by Sweep Worker, goes through the EBP Worker URL only (consistent with the IM-3 route migration in Section 2).
+
+### schema.sql vs D1 mismatches (post `api_call_log` fix)
+Full detail in Section 3; summary:
+- `users.asset_limit` live default is `3`, schema.sql says `DEFAULT 5` (app-level INSERT hardcodes 5 regardless, masking the drift in practice for new users created through the app).
+- `alert_history.details TEXT DEFAULT '{}'` exists live (10th column) but is missing from schema.sql's CREATE TABLE block — only referenced in a stray `ALTER TABLE` comment lower in the file.
+- `daily_candle_cache`, `weekly_candle_cache`, `watchdog_log` exist live with real, non-trivial column shapes but have **no CREATE TABLE statement anywhere in schema.sql** — only a bottom-of-file comment acknowledging their existence without documenting their columns.
+- `sma_cloud_states` exists live, is defined in schema.sql, but is **confirmed genuinely orphaned** — no worker code reads or writes it (SMA Cloud's real, active state table is the differently-named `nse_sma_state`). schema.sql's own comment already flags this; this audit independently confirmed it via a dead-code/table-usage scan.
+- A stray schema.sql comment (`-- UPDATE user_assets SET combined_enabled=0;`) references a `combined_enabled` column that exists in neither live D1 nor schema.sql — leftover documentation from an abandoned "combined alerts" feature (correctly noted as deprecated/superseded-by-T3 in the roadmap).
+- Every other table's columns match schema.sql exactly, column-for-column, name/type/nullability/default/order.
+
+### Hardcoded values that should probably be config
+- **Two independently-maintained copies** of `NSE_VALID_TFS`/`ALL_NSE_TF_ACCESS` (`nse-cron.js` and `ebp-worker.js` respectively) — identical today, no shared source of truth, drift risk on any future edit to one but not the other.
+- `ALLOWED_ORIGINS` (CORS allowlist) is a hardcoded 2-entry array (`localhost:5173`, `ebp-tracker.pages.dev`) duplicated independently in `worker/src/ebp-worker.js` and `sweep-worker/src/index.js` — a staging/preview domain would require editing both files.
+- `MAJOR_PAIRS` (the 28-pair Market Breadth cross list) is duplicated between `watchdog-worker/src/index.js` (fetch side) and `worker/src/ebp-worker.js` (aggregation side) — explicitly noted in-code as "copied verbatim... only the pair string is needed here," a deliberate but real duplication.
+- `CHUNK_SIZE = 7` (Watchdog's Twelve Data symbols-per-key batching) and `NY_4H_BOUNDARIES = [17,21,1,5,9,13]` are magic numbers with no named-config surface — reasonable as constants, but any change to Twelve Data's rate limits or the forex 4H boundary convention requires a code deploy, not a config change.
+- Cron-job.org's actual schedule (which TFs, what cadence) lives entirely outside this repo, in the cron-job.org dashboard — there is no way to audit or reconstruct the live cron schedule from source code alone (Section 2's cron table is inferred from what each `/cron/*` route *accepts*, not what's actually scheduled).
+
+### Error handling gaps / silent failure risks
+- **Watchdog Worker → Yahoo fallback for signal symbols**: if all Twelve Data keys are exhausted *and* Yahoo also fails for a given symbol, that symbol's candle simply isn't written this cycle — no alert, no escalation beyond a `watchdog_log` row, and (per Section 10) nothing currently delivers `watchdog_log` contents to a human.
+- **`/nse/search`'s Upstox branch** silently returns `[]` (not an error) when no Upstox token is configured — indistinguishable in the UI from "no equities matched your search," which could mislead a user into thinking equity search doesn't work at all rather than realizing NSE data isn't fully configured.
+- **T4's chain-creation dedup guard** (Section 5) is weaker than the `isDuplicateAlert` window used everywhere else — a rapid repeat sweep on the same symbol+direction could spawn a second T4 chain shortly after the first completes, with no time-window guard, only a "does an `awaiting_fvg_entry` row already exist" check.
+- **`user_templates`'s `step3_enabled`/`bias_gate`/`fvg_rule` columns** are silently ignored by every cron code path (Section 3) — a user (or future developer) editing these values via direct D1 access would see no effect whatsoever, with no error or warning anywhere.
+- **`GET /health/datasources`** has no known frontend caller (confirmed via the full frontend API-call inventory) — either an intentionally admin-curl-only diagnostic route, or an abandoned UI feature; either way, the per-source Twelve Data/Yahoo call-success data it exposes is not visible to anyone through the app itself.
+- **Clerk JWT verification** (`verifyClerkToken`) fetches Clerk's JWKS **on every single authenticated request** with no caching (`fetch('https://api.clerk.com/v1/jwks', ...)` inline in the hot path) — not a silent-failure risk, but a real latency/reliability dependency: if Clerk's JWKS endpoint is slow or briefly unavailable, every authenticated route in the entire app fails simultaneously, with no fallback or cached-key grace period.
+
+### Routes/features described in comments/docs but not implemented
+- **Watchdog Telegram alerting** (`@EBP_Watchdog_bot`, per the roadmap's Phase H spec) — does not exist; Watchdog sends zero Telegram messages, `DEVELOPER_TELEGRAM_CHAT_ID` is configured but dead.
+- **`user_indicator_settings.sma_forex_hours`** (forex SMA Cloud working-hours gate) — schema-only, no read site, no write route, no UI.
+- **`nse_indicator_configs.day_filter`** — schema-only remnant, explicitly dead per its own column comment.
+- **`/upgrade` route** — `ExpiryBanner.jsx`'s "Renew" button navigates to `/upgrade`, which doesn't exist in `App.jsx`'s router (falls through to `NotFound`) — a dead link in a user-facing banner.
+- **Weekly Market Breadth aggregation** — the frontend (`MarketBreathPage.jsx`) has a "Weekly Strength" UI section explicitly labeled as a placeholder pending Friday 5pm NY close data, but **no backend code anywhere computes or stores weekly breadth** — confirmed exhaustively earlier this session (all three `market_breadth_*` tables are written exclusively with `tf='1H'`). This is the clearest present-day "documented but not implemented" gap in the whole system — the UI describes a feature the backend has never had.
+- **`README.md`** is broadly stale end-to-end (⚠️ DIVERGENCE, several distinct claims): describes deploying via "worker-bundle-v4.js... Cloudflare dashboard editor" (actual deployment is `npx wrangler deploy` from each worker's own source directory, Section 10); lists 5 native Cloudflare cron triggers on fixed schedules (actual scheduling is the cron-job.org HTTP-trigger architecture described in Section 2, adopted specifically to work around free-tier native-cron limits); claims "MUI" (Section 6); doesn't mention Sweep Worker, NSE Worker, or Watchdog Worker at all — reads as documentation for an earlier, single-worker version of the system that predates most of what's now deployed.
+
+---
+
+## Section 10 — Deployment & Operations
+
+### Deploying each worker (exact commands — confirmed working, used live this session)
+```powershell
+cd worker;          npx wrangler deploy   # ebp-tracker-worker
+cd sweep-worker;     npx wrangler deploy   # sweep-detector
+cd nse-worker;       npx wrangler deploy   # nse-tracker
+cd watchdog-worker;  npx wrangler deploy   # ebp-watchdog
+```
+No CI/CD pipeline exists in-repo for the workers (no `.github/workflows/`, no Cloudflare "Workers Builds" GitHub-integration config found) — every deploy is a manual `wrangler deploy` invocation from a developer's machine (or an AI coding assistant's, as in this session). All four share one D1 database, so deploying one worker never requires redeploying the others *unless* the D1 schema itself changed underneath them (see the migration ordering note below).
+
+### Running a migration
+```powershell
+npx wrangler d1 execute ebp-tracker-db --file=<migration>.sql --remote
+```
+Must be run from a directory containing a `wrangler.toml` with the `ebp-tracker-db` D1 binding (any of the four worker directories works — they share the same binding). ⚠️ **Deployment-ordering note, established explicitly this session**: when a migration changes tables that live worker code already depends on, deploy the **new code first, then run the migration** — old code hitting dropped/renamed tables mid-deploy is worse than new code briefly erroring against not-yet-migrated tables, since the deploy window is short and scripted back-to-back. This is a judgment call made explicitly during this session's Phase 1-3 migration, not an automated safeguard — nothing in the repo enforces this ordering.
+
+Numbered migrations (`migrations/003` through `migrations/012`) are historical and already applied; `migration_phase1_to_3.sql` (repo root) was applied this session. There is no migration-tracking table (no `schema_migrations` or similar) — whether a given numbered migration has been applied to production is not queryable, only inferable from the live schema matching its expected end-state.
+
+### cron-job.org configuration
+Not queryable from this repo — cron-job.org's own dashboard is the source of truth for actual schedules, credentials, and job status; nothing in the codebase mirrors or exports that configuration. Inferred job set, based on what each `/cron/*` route accepts (Section 2):
+- `POST https://ebp-tracker-worker.aicube-apps.workers.dev/cron/ebp` — one job per `{tf: "M15"|"1H"|"4H"|"D"|"W"}` (5 jobs), each with header `X-Cron-Secret: <worker's CRON_SECRET>`.
+- `POST https://sweep-detector.aicube-apps.workers.dev/cron/sweep` — one job per `{tf: "M15"|"M30"|"1H"|"4H"}` (4 jobs).
+- `POST https://nse-tracker.aicube-apps.workers.dev/cron/nse` — one job per `{tf: "M1"|"M5"|"M15"|"M30"|"1H"|"D"}` (6 jobs).
+This inference cannot confirm actual cadence (e.g. whether the M15 job really fires every 15 minutes) or whether all inferred jobs are actually configured — only that these are the TF values each route is prepared to accept without erroring.
+
+### Verifying a deployment worked
+**Health checks** (all public, no auth):
+```
+GET https://ebp-tracker-worker.aicube-apps.workers.dev/health
+GET https://sweep-detector.aicube-apps.workers.dev/health
+GET https://nse-tracker.aicube-apps.workers.dev/health
+GET https://<watchdog-worker-url>/health
+```
+**Manual cron trigger** (requires the real `CRON_SECRET` value — a write-only Cloudflare secret, must be retrieved from wherever it was originally generated/stored, not from `wrangler secret list` which only lists names):
+```powershell
+curl -X POST https://ebp-tracker-worker.aicube-apps.workers.dev/cron/ebp -H "X-Cron-Secret: <secret>" -H "Content-Type: application/json" -d '{\"tf\":\"1H\"}'
+```
+The JSON response's `debug` array shows a per-symbol trace of what the cron cycle actually did (candles fetched, FVG/swing/MSS results, sweep detection, skip reasons) — this was used extensively this session to confirm the Phase 1-3 migration's new code paths ran cleanly against real production data immediately after deploy.
+
+**D1 query patterns for verification**:
+```powershell
+npx wrangler d1 execute ebp-tracker-db --command="SELECT name FROM sqlite_master WHERE type='table' ORDER BY name" --remote
+npx wrangler d1 execute ebp-tracker-db --command="PRAGMA table_info(<table>)" --remote
+npx wrangler d1 execute ebp-tracker-db --command="SELECT COUNT(*) FROM <table>" --remote
+```
+`--remote` is required for production; omitting it targets a local Miniflare-backed SQLite emulation under `.wrangler/state/v3/d1` (used this session to dry-run the Phase 1-3 migration safely before touching production — a reusable pattern for validating future migrations: seed a local DB with the pre-migration table shapes, run the migration file against it, confirm success and inspect the resulting schema, *then* run `--remote`).
+
+### Cloudflare Pages (frontend) deployment
+No `wrangler.toml`/`vercel.json`/`netlify.toml` exists inside `frontend/` — deployment is GitHub-integration-based, not CLI-triggered. Per `README.md` (the one part of it confirmed still accurate): connect the GitHub repo to Cloudflare Pages, build command `npm run build`, output directory `dist`, root directory `frontend`, env vars `VITE_CLERK_PUBLISHABLE_KEY` + `VITE_WORKER_URL` (`VITE_SWEEP_WORKER_URL` is also typically set per `.env.example` but is dead — Section 9). Trigger: a push to whichever branch Cloudflare Pages is configured to track (not confirmable from this repo alone — Cloudflare Pages' own dashboard owns that setting). The root `package.json`'s single script (`npm ci --prefix frontend && npm run build --prefix frontend`) is what Cloudflare Pages most likely invokes as its build command if configured to use the repo root rather than `frontend/` directly — the exact configured root is a Cloudflare Pages dashboard setting, not stored in this repo.
+
+### Monitoring — what Watchdog covers, what it doesn't, observability gaps
+**Covered**: Watchdog's `watchdog_log` table records failures/warnings (not successes, by design) for its own fetch/synthesis/key-rotation operations. `api_call_log` (also Watchdog-written) gives a raw per-call success/failure record for every Twelve Data/Yahoo call, queryable via `/health/datasources`.
+
+**Not covered — real gaps**:
+- 🐛 **No delivery mechanism for `watchdog_log` contents to a human.** The table is written but never read by any route, any cron, or any alert path found in this audit. An admin would have to manually query D1 to discover a Watchdog failure — there is no push notification, no dashboard widget, no periodic digest. This directly contradicts the roadmap's Phase H spec ("Consolidated Telegram alert to `@EBP_Watchdog_bot`"), which was never built (Section 9).
+- **`/health/datasources`** (the one UI-adjacent visibility into data-source health) has no confirmed frontend caller — effectively invisible unless queried directly.
+- **No alerting on stale `candle_cache`** beyond each individual EBP/Sweep/NSE cron's own per-request staleness check (`getCandlesFromCache`'s 2×/1.25× TF-interval age gate) — a systemic Watchdog outage (e.g. all Twelve Data keys exhausted *and* Yahoo down) degrades silently: EBP/Sweep Workers just log `"SKIP: insufficient candles in cache"` per symbol and move on, with no aggregate "N consecutive cron cycles have had 0 fresh candles" signal anywhere.
+- **No uptime/synthetic monitoring** of the four workers' `/health` endpoints found in-repo — if such monitoring exists, it's entirely external (e.g. a third-party uptime checker hitting `/health`), not configured or referenced anywhere in this codebase.
+- **NSE-specific**: no visibility into whether the Yahoo-fallback-only mode (Upstox never configured) is currently active, beyond the passive `/nse/status` badge a regular user might see on the Dashboard — nothing alerts an admin that NSE has been running on the more fragile unauthenticated Yahoo scrape this whole time.
+
+---
