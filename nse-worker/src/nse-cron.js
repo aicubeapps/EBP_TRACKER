@@ -12,6 +12,9 @@ const NSE_BIAS_SOURCE = {
   sweep: { 'M1': 'M15', 'M5': 'M30', 'M15': '1H', 'M30': 'D', '1H': 'D', 'D': null },
 };
 
+// NSE_VALID_TFS — SYNC NOTICE: this array is duplicated in worker/src/ebp-worker.js
+// as ALL_NSE_TF_ACCESS. Both must be kept identical. No shared import is possible
+// across Cloudflare Workers. If you change one, change the other in the same commit.
 const NSE_VALID_TFS = ['M1', 'M5', 'M15', 'M30', '1H', 'D'];
 
 const INTERVAL_MS = {
@@ -634,7 +637,7 @@ async function deliverNseIndicatorAlert(env, { userId, symbol, timeframe, direct
     (id, user_id, symbol, timeframe, direction, trend_bias, candle_time, fired_at, alert_type)
     VALUES (?,?,?,?,?,?,?,?,?)
   `).bind(
-    crypto.randomUUID(), userId, symbol, timeframe, direction, trendBias, candleTime, Date.now(), alertType
+    crypto.randomUUID(), userId, symbol, timeframe, direction, trendBias, candleTime, new Date().toISOString(), alertType
   ).run();
 }
 
@@ -1513,7 +1516,7 @@ async function tryDeliverNseAlert(env, row, { symbol, tf, alertType, direction, 
     VALUES (?,?,?,?,?,?,?,?,?)
   `).bind(
     crypto.randomUUID(), row.user_id, symbol, tf,
-    direction, effectiveBias, candleTime, Date.now(), alertType
+    direction, effectiveBias, candleTime, new Date().toISOString(), alertType
   ).run();
 }
 

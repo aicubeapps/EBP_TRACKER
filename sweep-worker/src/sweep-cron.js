@@ -317,13 +317,14 @@ const ALERT_INTERVAL_MS = {
   W:   7  * 24 * 60 * 60 * 1000,
 };
 
-// fired_at is stored as an INTEGER ms epoch (Date.now(), never
-// toISOString()) — the cutoff bound here must match that type, or SQLite's
-// NULL < INTEGER/REAL < TEXT affinity rule makes every comparison against
-// an INTEGER column silently false regardless of the TEXT value.
+// fired_at is stored as a TEXT ISO 8601 string (migration 013, 2026-08-06 —
+// was an INTEGER ms epoch before) — the cutoff bound here must match that
+// type, or SQLite's storage-class comparison rules (TEXT always compares
+// greater than INTEGER/REAL regardless of content) make every comparison
+// against this column silently true instead of silently false.
 async function isDuplicateAlert(db, userId, symbol, tf, direction, alertType) {
   const windowMs = ALERT_INTERVAL_MS[tf] || 60 * 60 * 1000;
-  const cutoff = Date.now() - windowMs;
+  const cutoff = new Date(Date.now() - windowMs).toISOString();
 
   const existing = await db.prepare(`
     SELECT id FROM alert_history
@@ -723,7 +724,7 @@ async function processTemplateChains(tf, env, log) {
   // this is driven by user_templates directly rather than the EBP flow
   // T1/T2/T3 use.
   const { results: t4Templates } = await env.DB.prepare(
-    `SELECT ut.user_id, ut.asset_id, ut.bias_gate, ua.symbol FROM user_templates ut
+    `SELECT ut.user_id, ut.asset_id, ut.bias_gate, ut.window_mins, ua.symbol FROM user_templates ut
      JOIN user_assets ua ON ut.asset_id = ua.id
      JOIN users u ON ut.user_id = u.id
      WHERE ut.template='t4' AND ut.enabled=1 AND ut.ltf=? AND u.active=1 AND ua.asset_type != 'nse'`
@@ -753,10 +754,26 @@ async function processTemplateChains(tf, env, log) {
         if (bias !== sweep.direction) continue;
       }
 
-      const existing = await getChains(env.DB, {
-        templateTypes: 'T4', state: 'awaiting_fvg_entry', symbol: t.symbol, direction: sweep.direction, userId: t.user_id,
-      });
-      if (!existing.some(c => c.ltf === tf)) {
+      // Time-window dedup, matching isDuplicateAlert's intent — not just "is
+      // one still pending" but "did one fire recently" (any state, including
+      // complete). window_mins is T3's own field, reused here as the dedup
+      // window since T4 has no other per-template timing config.
+      const recentChain = await env.DB.prepare(`
+        SELECT id FROM chain_state
+        WHERE template_type = 'T4'
+          AND user_id = ?
+          AND symbol = ?
+          AND direction = ?
+          AND created_at > ?
+        LIMIT 1
+      `).bind(
+        t.user_id,
+        t.symbol,
+        sweep.direction,
+        new Date(Date.now() - (t.window_mins || 60) * 60 * 1000).toISOString()
+      ).first();
+
+      if (!recentChain) {
         await insertChain(env.DB, {
           templateType: 'T4', userId: t.user_id, assetId: t.asset_id, symbol: t.symbol,
           htf: '', ltf: tf, direction: sweep.direction, state: 'awaiting_fvg_entry',
@@ -946,7 +963,7 @@ export async function handleSweepCron(tf, env, debugLog = null) {
                VALUES (?,?,?,?,?,?,?,?,'mss')`
             ).bind(
               crypto.randomUUID(), row.user_id, symbol, tf,
-              mssResult.direction, effectiveBias, mssResult.candle_time, Date.now()
+              mssResult.direction, effectiveBias, mssResult.candle_time, new Date().toISOString()
             ).run();
 
             // T3 step 3 — MSS completes the chain. MSS direction must match
@@ -996,7 +1013,7 @@ export async function handleSweepCron(tf, env, debugLog = null) {
               `).bind(
                 crypto.randomUUID(), row.user_id, symbol,
                 `${chain.htf}+${tf}`,
-                mssResult.direction, effectiveBias, mssResult.candle_time, Date.now()
+                mssResult.direction, effectiveBias, mssResult.candle_time, new Date().toISOString()
               ).run();
               await completeT3Chain(env.DB, chain.id);
             }
@@ -1069,7 +1086,7 @@ export async function handleSweepCron(tf, env, debugLog = null) {
           VALUES (?,?,?,?,?,?,?,?,'sweep')
         `).bind(
           crypto.randomUUID(), row.user_id, symbol, tf,
-          sweep.direction, effectiveBias, sweep.candleTime, Date.now()
+          sweep.direction, effectiveBias, sweep.candleTime, new Date().toISOString()
         ).run();
 
         // T3 step 2 — sweep advances an active chain. Same-direction match
@@ -1118,7 +1135,7 @@ export async function handleSweepCron(tf, env, debugLog = null) {
               VALUES (?,?,?,?,?,?,?,?,'t3')
             `).bind(
               crypto.randomUUID(), row.user_id, symbol, `${chain.htf}+${tf}`,
-              sweep.direction, effectiveBias, sweep.candleTime, Date.now()
+              sweep.direction, effectiveBias, sweep.candleTime, new Date().toISOString()
             ).run();
 
             await completeT3Chain(env.DB, chain.id);
@@ -1362,7 +1379,7 @@ async function deliverForexSmaAlert(env, { userId, chatId, symbol, timeframe, di
     INSERT INTO alert_history (id, user_id, symbol, timeframe, direction, trend_bias, candle_time, fired_at, alert_type)
     VALUES (?,?,?,?,?,?,?,?,?)
   `).bind(
-    crypto.randomUUID(), userId, symbol, timeframe, direction, trendBias ?? 'neutral', candleTime, Date.now(), alertType
+    crypto.randomUUID(), userId, symbol, timeframe, direction, trendBias ?? 'neutral', candleTime, new Date().toISOString(), alertType
   ).run();
   return true;
 }

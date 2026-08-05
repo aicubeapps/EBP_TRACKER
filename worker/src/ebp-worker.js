@@ -431,13 +431,14 @@ const ALERT_INTERVAL_MS = {
   W:   7  * 24 * 60 * 60 * 1000,
 };
 
-// fired_at is stored as an INTEGER ms epoch (Date.now(), never
-// toISOString()) — the cutoff bound here must match that type, or SQLite's
-// NULL < INTEGER/REAL < TEXT affinity rule makes every comparison against
-// an INTEGER column silently false regardless of the TEXT value.
+// fired_at is stored as a TEXT ISO 8601 string (migration 013, 2026-08-06 —
+// was an INTEGER ms epoch before) — the cutoff bound here must match that
+// type, or SQLite's storage-class comparison rules (TEXT always compares
+// greater than INTEGER/REAL regardless of content) make every comparison
+// against this column silently true instead of silently false.
 async function isDuplicateAlert(db, userId, symbol, tf, direction, alertType) {
   const windowMs = ALERT_INTERVAL_MS[tf] || 60 * 60 * 1000;
-  const cutoff = Date.now() - windowMs;
+  const cutoff = new Date(Date.now() - windowMs).toISOString();
 
   const existing = await db.prepare(`
     SELECT id FROM alert_history
@@ -972,7 +973,7 @@ async function handleEBPCron(tf, env, debugLog = null) {
              VALUES (?,?,?,?,?,?,?,?,'mss')`
           ).bind(
             crypto.randomUUID(), row.user_id, symbol, tf,
-            mssResult.direction, userHtfBias, mssResult.candle_time, Date.now()
+            mssResult.direction, userHtfBias, mssResult.candle_time, new Date().toISOString()
           ).run();
         }
       }
@@ -1053,7 +1054,7 @@ async function handleEBPCron(tf, env, debugLog = null) {
               VALUES (?,?,?,?,?,?,?,?,'ebp')
             `).bind(
               crypto.randomUUID(), row.user_id, symbol, tf,
-              ebp.direction, effectiveBias, ebp.candleTime, Date.now()
+              ebp.direction, effectiveBias, ebp.candleTime, new Date().toISOString()
             ).run();
           }
         }
@@ -2415,6 +2416,33 @@ async function handleWatchdogHealthCheck(env) {
     }
   }
 
+  // ── Check 1b: recent Watchdog internal errors/warnings ────────────────────
+  // Complements Check 1 above — that one catches Watchdog going silent
+  // entirely; this one catches Watchdog still running but actively logging
+  // failures (e.g. a Yahoo/Twelve Data fetch failure) that would otherwise
+  // only be visible via a direct D1 query.
+  {
+    const thirtyMinsAgo = new Date(now - 30 * 60 * 1000).toISOString();
+    const { results: watchdogErrors } = await env.DB.prepare(`
+      SELECT event_type, message, created_at
+      FROM watchdog_log
+      WHERE event_type IN ('error', 'warning')
+        AND created_at > ?
+      ORDER BY created_at DESC
+      LIMIT 5
+    `).bind(thirtyMinsAgo).all();
+
+    if (watchdogErrors?.length > 0) {
+      checks.watchdog_internal = `${watchdogErrors.length} error/warning(s) in the last 30 min`;
+      failures.push(
+        `Watchdog internal errors:\n` +
+        watchdogErrors.map(r => `  [${r.event_type.toUpperCase()}] ${r.message}`).join('\n')
+      );
+    } else {
+      checks.watchdog_internal = 'no errors/warnings in the last 30 min';
+    }
+  }
+
   // ── Check 2: Forex/crypto candle cache freshness ──────────────────────────
   if (forexMarketOpen) {
     const row = await env.DB.prepare(
@@ -2951,6 +2979,9 @@ router.patch('/admin/users/:id/tf-access', async (req, env) => {
   return json({ ok: true }, 200, origin);
 });
 
+// ALL_NSE_TF_ACCESS — SYNC NOTICE: this array is duplicated in nse-worker/src/nse-cron.js
+// as NSE_VALID_TFS. Both must be kept identical. No shared import is possible
+// across Cloudflare Workers. If you change one, change the other in the same commit.
 const ALL_NSE_TF_ACCESS = ['M1', 'M5', 'M15', 'M30', '1H', 'D'];
 
 router.get('/admin/users/:id/nse-tf-access', async (req, env) => {

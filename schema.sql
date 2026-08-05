@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS users (
   email          TEXT NOT NULL,
   name           TEXT,
   plan           TEXT DEFAULT 'free',
-  asset_limit    INTEGER DEFAULT 5,
+  asset_limit    INTEGER DEFAULT 3,
   created_at     INTEGER NOT NULL,
   expires_at     INTEGER NOT NULL,
   active         INTEGER DEFAULT 1,
@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS user_telegram (
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
+-- fired_at is TEXT ISO 8601, not an INTEGER ms epoch (migration 013,
+-- 2026-08-06) — matches signals.fired_at's format, eliminating the
+-- cross-table type-mismatch landmine that existed when this was INTEGER.
 CREATE TABLE IF NOT EXISTS alert_history (
   id          TEXT PRIMARY KEY,
   user_id     TEXT NOT NULL,
@@ -43,8 +46,9 @@ CREATE TABLE IF NOT EXISTS alert_history (
   direction   TEXT NOT NULL,
   trend_bias  TEXT NOT NULL,
   candle_time INTEGER NOT NULL,
-  fired_at    INTEGER NOT NULL,
+  fired_at    TEXT NOT NULL,
   alert_type  TEXT DEFAULT 'ebp',
+  details     TEXT DEFAULT '{}',
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
@@ -59,6 +63,67 @@ CREATE TABLE IF NOT EXISTS candle_cache (
   candles_json TEXT NOT NULL,
   fetched_at   TEXT NOT NULL,
   UNIQUE (symbol, tf)
+);
+
+-- Watchdog-synthesized daily/weekly OHLC per symbol, read by EBP/Sweep for
+-- D/W-timeframe HTF bias. Row-capped by Watchdog itself (130/26 rows per
+-- symbol), not time-expired. Added 2026-08-06: previously live in
+-- production with no CREATE TABLE statement anywhere in this file.
+CREATE TABLE IF NOT EXISTS daily_candle_cache (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol         TEXT NOT NULL,
+  date_ny        TEXT NOT NULL,
+  open           REAL NOT NULL,
+  high           REAL NOT NULL,
+  low            REAL NOT NULL,
+  close          REAL NOT NULL,
+  synthesised_at TEXT NOT NULL,
+  UNIQUE(symbol, date_ny)
+);
+
+CREATE TABLE IF NOT EXISTS weekly_candle_cache (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol         TEXT NOT NULL,
+  week_start_ny  TEXT NOT NULL,
+  week_end_ny    TEXT NOT NULL,
+  open           REAL NOT NULL,
+  high           REAL NOT NULL,
+  low            REAL NOT NULL,
+  close          REAL NOT NULL,
+  synthesised_at TEXT NOT NULL,
+  UNIQUE(symbol, week_start_ny)
+);
+
+-- Watchdog Worker's own event/error log (info/warning/error rows from
+-- logWatchdog()) — failures/warnings only, by design; successful writes
+-- are not logged. Write-only from every worker's perspective except the
+-- new POST /health/watchdog-check route on the EBP Worker, which reads
+-- recent error/warning rows here and relays them to Telegram (Section 5
+-- of the architecture report). Added 2026-08-06, same as above.
+CREATE TABLE IF NOT EXISTS watchdog_log (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_type TEXT NOT NULL,
+  message    TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+-- ORPHANED TABLE: sma_cloud_states exists in production D1 but is never read or written
+-- by any worker code. The active SMA Cloud state table is nse_sma_state (different name,
+-- different schema). Do not use this table. Do not drop it without a migration.
+CREATE TABLE IF NOT EXISTS sma_cloud_states (
+  id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol                    TEXT NOT NULL,
+  tf                        TEXT NOT NULL,
+  phase                     TEXT NOT NULL,
+  phase_started_at          TEXT NOT NULL,
+  sma1_last                 REAL,
+  sma9_last                 REAL,
+  atr_last                  REAL,
+  crossovers_in_transition  INTEGER DEFAULT 0,
+  widening_candles          INTEGER DEFAULT 0,
+  last_signal_date          TEXT,
+  updated_at                TEXT NOT NULL,
+  UNIQUE(symbol, tf)
 );
 
 CREATE TABLE IF NOT EXISTS invite_tokens (
@@ -182,8 +247,6 @@ CREATE INDEX IF NOT EXISTS idx_chain_state_asset ON chain_state(asset_id);
 -- UPDATE user_assets SET combined_enabled=0;
 
 -- ── Phase 4 ──────────────────────────────────────────────────
-
--- ALTER TABLE alert_history ADD COLUMN details TEXT DEFAULT '{}';
 
 -- Per-asset EBP alert configs (replaces user_assets.timeframes)
 CREATE TABLE IF NOT EXISTS user_ebp_configs (
@@ -501,14 +564,7 @@ CREATE TABLE IF NOT EXISTS market_breadth_correlation (
   PRIMARY KEY (tf)
 );
 
--- ── Live tables not yet in schema ────────────────────────────
--- The following tables exist in production D1 but are not fully
--- defined here. Added via ALTER TABLE or ad-hoc migration.
--- daily_candle_cache:  Watchdog-synthesized daily OHLC per symbol,
---   read by EBP/Sweep for D-timeframe HTF bias.
--- weekly_candle_cache: Watchdog-synthesized weekly OHLC per symbol,
---   read by EBP/Sweep for W-timeframe HTF bias.
--- watchdog_log:        Watchdog Worker's own event/error log
---   (info/warning/error rows from logWatchdog()).
--- sma_cloud_states:    created in the original IM-1 migration but
---   currently unused/orphaned — no worker code reads or writes it.
+-- (daily_candle_cache, weekly_candle_cache, watchdog_log, and
+-- sma_cloud_states — previously undocumented here, "live but not in
+-- schema" — now have proper CREATE TABLE statements above, after
+-- candle_cache. Reconciled 2026-08-06.)
