@@ -44,3 +44,13 @@ export const TEMPLATE_ALL_TFS     = ['M5', 'M15', 'M30', '1H', '4H', 'D'];
 export function templateLtfOptions(htf) {
   return TEMPLATE_ALL_TFS.filter(tf => TEMPLATE_TF_RANK[tf] < TEMPLATE_TF_RANK[htf]);
 }
+
+// Forex/Crypto SMA Cloud (2026-08-05) — matches sweep-worker's
+// FOREX_SMA_VALID_TFS / FOREX_SMA_HTF_OPTIONS.
+export const FOREX_SMA_TFS = ['M15', 'M30', '1H', '4H'];
+export const FOREX_SMA_HTF_OPTIONS = {
+  'M15': ['4H'],
+  'M30': ['4H'],
+  '1H':  ['4H', 'D'],
+  '4H':  ['D'],
+};

@@ -215,6 +215,51 @@ CREATE TABLE IF NOT EXISTS user_sweep_configs (
 );
 CREATE INDEX IF NOT EXISTS idx_sweep_configs_lookup ON user_sweep_configs(user_id, asset_id, enabled);
 
+-- Forex/crypto SMA Cloud (2026-08-05, migration_forex_sma.sql) — runs in
+-- Sweep Worker (handleForexSmaCron), phase machine ported from the NSE SMA
+-- Cloud revamp. forex_indicator_configs.indicator is always 'sma' today —
+-- kept for parity with nse_indicator_configs in case TDI is ever added here.
+CREATE TABLE IF NOT EXISTS forex_indicator_configs (
+  id                TEXT PRIMARY KEY,
+  user_id           TEXT NOT NULL,
+  asset_id          TEXT NOT NULL,
+  indicator         TEXT NOT NULL DEFAULT 'sma',
+  timeframe         TEXT NOT NULL,      -- 'M15' | 'M30' | '1H' | '4H'
+  bias_mode         TEXT DEFAULT 'ttrades',  -- 'ttrades' | 'htf_sma' | 'none'
+  htf_timeframe     TEXT DEFAULT '4H',       -- valid options depend on timeframe — see FOREX_SMA_HTF_OPTIONS
+  confirmation_mode TEXT DEFAULT 'either',   -- 'mss' | 'cisd' | 'either'
+  enabled           INTEGER DEFAULT 1,
+  created_at        INTEGER NOT NULL
+);
+
+-- SMA Cloud phase state — one row per (symbol, timeframe), shared across
+-- every user configured on that symbol+TF, read/written every cron run
+-- regardless of whether a signal fires. Same shape as nse_sma_state.
+CREATE TABLE IF NOT EXISTS forex_sma_state (
+  symbol                  TEXT NOT NULL,
+  timeframe               TEXT NOT NULL,
+  direction               TEXT,          -- 'bullish' | 'bearish' | null
+  phase                   TEXT,          -- 'accumulation' | 'distribution' | null
+  stack_active            INTEGER DEFAULT 0,
+  consecutive_widening    INTEGER DEFAULT 0,  -- retired — always written as 0
+  separation              REAL,
+  velocity_label          TEXT,          -- 'Sharp⚡' | 'Gradual📉'
+  atr14                   REAL,
+  cloud_top               REAL,
+  cloud_bottom            REAL,
+  sma1_last               REAL,          -- prior run's SMA1, for fresh-cross detection
+  sma9_last               REAL,          -- prior run's SMA9, for fresh-cross detection
+  distribution_started_at TEXT,          -- ISO time — set on Type 1, cleared on exhaustion
+  last_signal_date        TEXT,
+  last_signal_time        INTEGER,       -- Unix ms — Type 2 cooldown
+  cisd_watch_active       INTEGER DEFAULT 0,  -- Type 2 arm/confirm chain
+  cisd_watch_direction    TEXT,
+  cisd_pullback_start     TEXT,          -- ISO time — swing_states.run_start_time at arm
+  cisd_watch_armed_at     TEXT,          -- ISO time — watch expiry reference
+  updated_at              TEXT NOT NULL,
+  PRIMARY KEY (symbol, timeframe)
+);
+
 -- Note: this table was created ad hoc in D1 before schema.sql existed.
 -- Production schema reflects actual D1 columns (verified 2026-08-02 via PRAGMA table_info).
 -- key_id column from original spec does not exist in production and has been removed.
@@ -335,13 +380,13 @@ CREATE TABLE IF NOT EXISTS nse_indicator_configs (
   user_id       TEXT NOT NULL,
   asset_id      TEXT NOT NULL,
   indicator     TEXT NOT NULL,      -- 'tdi' | 'sma'
-  timeframe     TEXT NOT NULL,      -- 'M15' | 'M30' for tdi; 'M15' | 'M5' for sma
-  stack_mode    TEXT DEFAULT NULL,  -- 'strict' | 'loose' — sma only
+  timeframe     TEXT NOT NULL,      -- 'M15' | 'M30' for tdi; 'M15' | 'M5' | 'M30' for sma
+  confirmation_mode TEXT DEFAULT 'either',  -- 'mss' | 'cisd' | 'either' — sma Type 2 confirmation (renamed from stack_mode; old 'strict'/'loose' rows fall back to 'either' at read time)
   day_filter    INTEGER DEFAULT NULL, -- 1 | 0 — sma only, unused since the SMA Cloud corrective patch (column kept, code no longer reads it)
   enabled       INTEGER DEFAULT 1,
   created_at    INTEGER NOT NULL,
-  bias_mode     TEXT DEFAULT 'ttrades',  -- 'ttrades' | 'htf_sma' — sma only
-  htf_timeframe TEXT DEFAULT '1H'        -- 'M30' | '1H' — sma only, HTF bias reference leg
+  bias_mode     TEXT DEFAULT 'ttrades',  -- 'ttrades' | 'htf_sma' | 'none' — sma only
+  htf_timeframe TEXT DEFAULT '1H'        -- '1H' | 'D' — sma only, HTF bias reference leg (paired to signal TF via SMA_HTF_PAIRING)
 );
 
 -- Per-user indicator settings not tied to a specific asset config.
@@ -373,18 +418,24 @@ CREATE TABLE IF NOT EXISTS nse_sma_state (
   symbol                TEXT NOT NULL,
   timeframe             TEXT NOT NULL,
   direction             TEXT,          -- 'bullish' | 'bearish' | null
-  phase                 TEXT,          -- 'accumulation' | 'transition' | 'distribution' | 'exhaustion' | null
+  phase                 TEXT,          -- 'accumulation' | 'distribution' | null
   stack_active          INTEGER DEFAULT 0,
-  consecutive_widening  INTEGER DEFAULT 0,
+  consecutive_widening  INTEGER DEFAULT 0,  -- retired — always written as 0
   separation            REAL,
-  velocity_label        TEXT,          -- 'Sharp' | 'Gradual'
+  velocity_label        TEXT,          -- 'Sharp⚡' | 'Gradual📉'
   atr14                 REAL,
   cloud_top             REAL,
   cloud_bottom          REAL,
+  sma1_last             REAL,          -- prior run's SMA1, for fresh-cross detection
+  sma9_last             REAL,          -- prior run's SMA9, for fresh-cross detection
   stack_formed_date     TEXT,          -- IST date 'YYYY-MM-DD'
   last_signal_date      TEXT,          -- IST date — M15 session gate
-  last_signal_time      INTEGER,       -- Unix ms — M5 cooldown
-  updated_at            INTEGER NOT NULL,
+  last_signal_time      INTEGER,       -- Unix ms — Type 2 cooldown
+  cisd_watch_active     INTEGER DEFAULT 0,  -- Type 2 arm/confirm chain
+  cisd_watch_direction  TEXT,          -- 'bullish' | 'bearish' | null
+  cisd_pullback_start   TEXT,          -- ISO time — nse_swing_states.run_start_time at arm
+  cisd_watch_armed_at   TEXT,          -- ISO time — watch expiry reference
+  updated_at            TEXT NOT NULL, -- ISO string (written via toISOString(), despite legacy INTEGER-affinity declaration)
   PRIMARY KEY (symbol, timeframe)
 );
 

@@ -9,11 +9,13 @@ import AIAlertsPanel from './AIAlertsPanel';
 import BiasOverridePanel from './BiasOverridePanel';
 import TdiConfigPanel from './TdiConfigPanel';
 import SmaConfigPanel from './SmaConfigPanel';
+import ForexSmaConfigPanel from './ForexSmaConfigPanel';
 
 export default function AssetCard({ asset, allowedTfs, onRemove }) {
   const { getToken } = useAuth();
   const navigate     = useNavigate();
   const isNse        = asset.asset_type === 'nse';
+  const isForex      = ['forex', 'crypto', 'commodity'].includes(asset.asset_type);
 
   const [ebpEnabled,   setEbpEnabled]   = useState(false);
   const [sweepEnabled, setSweepEnabled] = useState(false);
@@ -29,13 +31,14 @@ export default function AssetCard({ asset, allowedTfs, onRemove }) {
 
   const fetchSummary = useCallback(async () => {
     const token = await getToken();
-    const [ebp, swp, tmpl, hist, bias, ind] = await Promise.allSettled([
+    const [ebp, swp, tmpl, hist, bias, ind, forexSma] = await Promise.allSettled([
       api.get(`/user/ebp-configs/${asset.id}`, token),
       api.get(`/user/sweep-configs/${asset.id}`, token),
       api.get(`/user/templates/${asset.id}`, token),
       api.get(`/alerts/history?assetId=${asset.id}&days=2&limit=1`, token),
       api.get(`/user/bias/${encodeURIComponent(asset.symbol)}`, token),
       isNse ? api.get(`/user/nse-indicator-configs/${asset.id}`, token) : Promise.resolve([]),
+      isForex ? api.get(`/user/forex-indicator-configs/${asset.id}`, token) : Promise.resolve([]),
     ]);
     if (ebp.status === 'fulfilled')  setEbpEnabled(Array.isArray(ebp.value) && ebp.value.length > 0);
     if (swp.status === 'fulfilled')  setSweepEnabled(Array.isArray(swp.value) && swp.value.length > 0);
@@ -47,7 +50,10 @@ export default function AssetCard({ asset, allowedTfs, onRemove }) {
       setTdiEnabled(ind.value.some(c => c.indicator === 'tdi'));
       setSmaEnabled(ind.value.some(c => c.indicator === 'sma'));
     }
-  }, [asset.id, asset.symbol, isNse, getToken]);
+    if (forexSma.status === 'fulfilled' && Array.isArray(forexSma.value)) {
+      setSmaEnabled(forexSma.value.length > 0);
+    }
+  }, [asset.id, asset.symbol, isNse, isForex, getToken]);
 
   useEffect(() => {
     fetchSummary();
@@ -127,6 +133,18 @@ export default function AssetCard({ asset, allowedTfs, onRemove }) {
             <label htmlFor={`sma-${asset.id}`}>SMA Cloud Alerts</label>
           </div>
           {smaEnabled && <SmaConfigPanel assetId={asset.id} />}
+        </>
+      )}
+
+      {isForex && (
+        <>
+          {/* SMA Cloud Alerts */}
+          <div className="check-row">
+            <input type="checkbox" id={`sma-${asset.id}`}
+              checked={smaEnabled} onChange={e => setSmaEnabled(e.target.checked)} />
+            <label htmlFor={`sma-${asset.id}`}>SMA Cloud Alerts</label>
+          </div>
+          {smaEnabled && <ForexSmaConfigPanel assetId={asset.id} allowedTfs={allowedTfs} />}
         </>
       )}
     </div>

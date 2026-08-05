@@ -12,7 +12,7 @@
 // worker is now cron-only; any other path returns 404.
 // ============================================================
 
-import { handleSweepCron } from './sweep-cron.js';
+import { handleSweepCron, handleForexSmaCron } from './sweep-cron.js';
 
 // ── CORS ─────────────────────────────────────────────────────
 
@@ -90,6 +90,38 @@ async function handleFetch(request, env) {
       }, 200, origin);
     } catch (err) {
       console.error(`Cron trigger error TF=${tf}:`, err.message);
+      return json({ error: err.message, stack: err.stack }, 500, origin);
+    }
+  }
+
+  // ── Forex/Crypto SMA Cloud cron trigger — secured by X-Cron-Secret ───
+  if (pathname === '/cron/sma' && request.method === 'POST') {
+    const secret = request.headers.get('X-Cron-Secret');
+    if (!secret || secret !== env.CRON_SECRET) {
+      return json({ error: 'Forbidden' }, 403, origin);
+    }
+
+    let body = {};
+    try { body = await request.json(); } catch {}
+
+    const tf       = body.tf;
+    const validTFs = ['M15', 'M30', '1H', '4H'];
+
+    if (!validTFs.includes(tf)) {
+      return json({ error: `Invalid TF: ${tf}. Must be one of ${validTFs.join(', ')}` }, 400, origin);
+    }
+
+    try {
+      const debugLog = [];
+      await handleForexSmaCron(tf, env, debugLog);
+      return json({
+        ok: true,
+        tf,
+        fired_at: new Date().toISOString(),
+        debug: debugLog,
+      }, 200, origin);
+    } catch (err) {
+      console.error(`SMA cron trigger error TF=${tf}:`, err.message);
       return json({ error: err.message, stack: err.stack }, 500, origin);
     }
   }

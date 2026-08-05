@@ -1626,7 +1626,7 @@ router.get('/user/nse-indicator-configs/:assetId', async (req, env) => {
 router.post('/user/nse-indicator-configs/:assetId', async (req, env) => {
   const { user: clerkUser, origin, error, params } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const { indicator, timeframe, stack_mode, day_filter, bias_mode, htf_timeframe } = await req.json();
+  const { indicator, timeframe, confirmation_mode, day_filter, bias_mode, htf_timeframe } = await req.json();
 
   if (indicator !== 'tdi' && indicator !== 'sma') {
     return json({ error: "indicator must be 'tdi' or 'sma'" }, 400, origin);
@@ -1637,11 +1637,11 @@ router.post('/user/nse-indicator-configs/:assetId', async (req, env) => {
     return json({ error: `timeframe must be one of: ${validTfs.join(', ')}` }, 400, origin);
   }
 
-  if (indicator === 'sma' && bias_mode !== undefined && !['ttrades', 'htf_sma'].includes(bias_mode)) {
-    return json({ error: "bias_mode must be 'ttrades' or 'htf_sma'" }, 400, origin);
+  if (indicator === 'sma' && bias_mode !== undefined && !['ttrades', 'htf_sma', 'none'].includes(bias_mode)) {
+    return json({ error: "bias_mode must be 'ttrades', 'htf_sma', or 'none'" }, 400, origin);
   }
-  if (indicator === 'sma' && htf_timeframe !== undefined && !['M30', '1H'].includes(htf_timeframe)) {
-    return json({ error: "htf_timeframe must be 'M30' or '1H'" }, 400, origin);
+  if (indicator === 'sma' && htf_timeframe !== undefined && !['1H', 'D'].includes(htf_timeframe)) {
+    return json({ error: "htf_timeframe must be '1H' or 'D'" }, 400, origin);
   }
 
   const existing = await env.DB.prepare(
@@ -1651,19 +1651,19 @@ router.post('/user/nse-indicator-configs/:assetId', async (req, env) => {
     return json({ error: 'Config already exists for this indicator/timeframe on this asset.' }, 400, origin);
   }
 
-  const finalStackMode    = indicator === 'sma' ? (stack_mode === 'loose' ? 'loose' : 'strict') : null;
+  const finalConfirmationMode = indicator === 'sma' ? (['mss', 'cisd', 'either'].includes(confirmation_mode) ? confirmation_mode : 'either') : null;
   const finalDayFilter    = indicator === 'sma' ? (day_filter === 0 ? 0 : 1) : null;
-  const finalBiasMode     = indicator === 'sma' ? (bias_mode === 'htf_sma' ? 'htf_sma' : 'ttrades') : null;
-  const finalHtfTimeframe = indicator === 'sma' ? (htf_timeframe === 'M30' ? 'M30' : '1H') : null;
+  const finalBiasMode     = indicator === 'sma' ? (['htf_sma', 'none'].includes(bias_mode) ? bias_mode : 'ttrades') : null;
+  const finalHtfTimeframe = indicator === 'sma' ? (htf_timeframe === 'D' ? 'D' : '1H') : null;
 
   const id = crypto.randomUUID();
   await env.DB.prepare(`
-    INSERT INTO nse_indicator_configs (id, user_id, asset_id, indicator, timeframe, stack_mode, day_filter, enabled, created_at, bias_mode, htf_timeframe)
+    INSERT INTO nse_indicator_configs (id, user_id, asset_id, indicator, timeframe, confirmation_mode, day_filter, enabled, created_at, bias_mode, htf_timeframe)
     VALUES (?,?,?,?,?,?,?,1,?,?,?)
-  `).bind(id, clerkUser.id, params.assetId, indicator, timeframe, finalStackMode, finalDayFilter, Date.now(), finalBiasMode, finalHtfTimeframe).run();
+  `).bind(id, clerkUser.id, params.assetId, indicator, timeframe, finalConfirmationMode, finalDayFilter, Date.now(), finalBiasMode, finalHtfTimeframe).run();
 
   return json({
-    id, indicator, timeframe, stack_mode: finalStackMode, day_filter: finalDayFilter,
+    id, indicator, timeframe, confirmation_mode: finalConfirmationMode, day_filter: finalDayFilter,
     bias_mode: finalBiasMode, htf_timeframe: finalHtfTimeframe, enabled: 1,
   }, 201, origin);
 });
@@ -1673,16 +1673,19 @@ router.patch('/user/nse-indicator-configs/:id', async (req, env) => {
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
   const body = await req.json();
 
-  if (body.bias_mode !== undefined && !['ttrades', 'htf_sma'].includes(body.bias_mode)) {
-    return json({ error: "bias_mode must be 'ttrades' or 'htf_sma'" }, 400, origin);
+  if (body.bias_mode !== undefined && !['ttrades', 'htf_sma', 'none'].includes(body.bias_mode)) {
+    return json({ error: "bias_mode must be 'ttrades', 'htf_sma', or 'none'" }, 400, origin);
   }
-  if (body.htf_timeframe !== undefined && !['M30', '1H'].includes(body.htf_timeframe)) {
-    return json({ error: "htf_timeframe must be 'M30' or '1H'" }, 400, origin);
+  if (body.htf_timeframe !== undefined && !['1H', 'D'].includes(body.htf_timeframe)) {
+    return json({ error: "htf_timeframe must be '1H' or 'D'" }, 400, origin);
+  }
+  if (body.confirmation_mode !== undefined && !['mss', 'cisd', 'either'].includes(body.confirmation_mode)) {
+    return json({ error: "confirmation_mode must be 'mss', 'cisd', or 'either'" }, 400, origin);
   }
 
   const sets = []; const vals = [];
   if (body.enabled !== undefined)       { sets.push('enabled = ?');       vals.push(body.enabled ? 1 : 0); }
-  if (body.stack_mode !== undefined)    { sets.push('stack_mode = ?');    vals.push(body.stack_mode === 'loose' ? 'loose' : 'strict'); }
+  if (body.confirmation_mode !== undefined) { sets.push('confirmation_mode = ?'); vals.push(body.confirmation_mode); }
   if (body.day_filter !== undefined)    { sets.push('day_filter = ?');    vals.push(body.day_filter ? 1 : 0); }
   if (body.bias_mode !== undefined)     { sets.push('bias_mode = ?');     vals.push(body.bias_mode); }
   if (body.htf_timeframe !== undefined) { sets.push('htf_timeframe = ?'); vals.push(body.htf_timeframe); }
@@ -1724,6 +1727,145 @@ router.delete('/user/nse-indicator-configs/:id', async (req, env) => {
             'DELETE FROM nse_sma_state WHERE symbol = ? AND timeframe = ?'
           ).bind(asset.symbol, config.timeframe).run();
         }
+      }
+    }
+  }
+
+  return json({ ok: true }, 200, origin);
+});
+
+// ── Forex/Crypto SMA Cloud Configs (2026-08-05) ─────────────────
+// Cron logic lives in Sweep Worker (handleForexSmaCron) — this worker only
+// owns the CRUD routes, same split as EBP Worker owning NSE indicator
+// config routes while nse-worker owns the NSE cron logic.
+
+const FOREX_SMA_TFS = ['M15', 'M30', '1H', '4H'];
+const FOREX_SMA_HTF_OPTIONS = {
+  'M15': ['4H'],
+  'M30': ['4H'],
+  '1H':  ['4H', 'D'],
+  '4H':  ['D'],
+};
+
+router.get('/user/forex-indicator-configs/:assetId', async (req, env) => {
+  const { user: clerkUser, origin, error, params } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  const { results } = await env.DB.prepare(
+    'SELECT * FROM forex_indicator_configs WHERE asset_id=? AND user_id=? ORDER BY created_at ASC'
+  ).bind(params.assetId, clerkUser.id).all();
+  return json(results ?? [], 200, origin);
+});
+
+router.post('/user/forex-indicator-configs/:assetId', async (req, env) => {
+  const { user: clerkUser, origin, error, params } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  const { timeframe, bias_mode, htf_timeframe, confirmation_mode } = await req.json();
+
+  if (!FOREX_SMA_TFS.includes(timeframe)) {
+    return json({ error: `timeframe must be one of: ${FOREX_SMA_TFS.join(', ')}` }, 400, origin);
+  }
+  if (bias_mode !== undefined && !['ttrades', 'htf_sma', 'none'].includes(bias_mode)) {
+    return json({ error: "bias_mode must be 'ttrades', 'htf_sma', or 'none'" }, 400, origin);
+  }
+  const validHtfs = FOREX_SMA_HTF_OPTIONS[timeframe];
+  if (htf_timeframe !== undefined && !validHtfs.includes(htf_timeframe)) {
+    return json({ error: `htf_timeframe for ${timeframe} must be one of: ${validHtfs.join(', ')}` }, 400, origin);
+  }
+  if (confirmation_mode !== undefined && !['mss', 'cisd', 'either'].includes(confirmation_mode)) {
+    return json({ error: "confirmation_mode must be 'mss', 'cisd', or 'either'" }, 400, origin);
+  }
+
+  const asset = await env.DB.prepare(
+    'SELECT asset_type FROM user_assets WHERE id=? AND user_id=?'
+  ).bind(params.assetId, clerkUser.id).first();
+  if (!asset || !['forex', 'crypto', 'commodity'].includes(asset.asset_type)) {
+    return json({ error: 'Asset must be forex, crypto, or commodity.' }, 400, origin);
+  }
+
+  const existing = await env.DB.prepare(
+    'SELECT id FROM forex_indicator_configs WHERE user_id=? AND asset_id=? AND timeframe=?'
+  ).bind(clerkUser.id, params.assetId, timeframe).first();
+  if (existing) {
+    return json({ error: 'Config already exists for this timeframe on this asset.' }, 400, origin);
+  }
+
+  const finalBiasMode         = ['htf_sma', 'none'].includes(bias_mode) ? bias_mode : 'ttrades';
+  const finalHtfTimeframe     = validHtfs.includes(htf_timeframe) ? htf_timeframe : validHtfs[0];
+  const finalConfirmationMode = ['mss', 'cisd', 'either'].includes(confirmation_mode) ? confirmation_mode : 'either';
+
+  const id = crypto.randomUUID();
+  await env.DB.prepare(`
+    INSERT INTO forex_indicator_configs (id, user_id, asset_id, indicator, timeframe, bias_mode, htf_timeframe, confirmation_mode, enabled, created_at)
+    VALUES (?,?,?,'sma',?,?,?,?,1,?)
+  `).bind(id, clerkUser.id, params.assetId, timeframe, finalBiasMode, finalHtfTimeframe, finalConfirmationMode, Date.now()).run();
+
+  return json({
+    id, indicator: 'sma', timeframe,
+    bias_mode: finalBiasMode, htf_timeframe: finalHtfTimeframe, confirmation_mode: finalConfirmationMode, enabled: 1,
+  }, 201, origin);
+});
+
+router.patch('/user/forex-indicator-configs/:id', async (req, env) => {
+  const { user: clerkUser, origin, error, params } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  const body = await req.json();
+
+  if (body.bias_mode !== undefined && !['ttrades', 'htf_sma', 'none'].includes(body.bias_mode)) {
+    return json({ error: "bias_mode must be 'ttrades', 'htf_sma', or 'none'" }, 400, origin);
+  }
+  if (body.confirmation_mode !== undefined && !['mss', 'cisd', 'either'].includes(body.confirmation_mode)) {
+    return json({ error: "confirmation_mode must be 'mss', 'cisd', or 'either'" }, 400, origin);
+  }
+
+  // htf_timeframe validity depends on the config's timeframe, which isn't
+  // itself patchable here — look it up rather than trusting the client.
+  if (body.htf_timeframe !== undefined) {
+    const existing = await env.DB.prepare(
+      'SELECT timeframe FROM forex_indicator_configs WHERE id=? AND user_id=?'
+    ).bind(params.id, clerkUser.id).first();
+    if (!existing) return json({ error: 'Config not found.' }, 404, origin);
+    const validHtfs = FOREX_SMA_HTF_OPTIONS[existing.timeframe] ?? [];
+    if (!validHtfs.includes(body.htf_timeframe)) {
+      return json({ error: `htf_timeframe must be one of: ${validHtfs.join(', ')}` }, 400, origin);
+    }
+  }
+
+  const sets = []; const vals = [];
+  if (body.enabled !== undefined)           { sets.push('enabled = ?');           vals.push(body.enabled ? 1 : 0); }
+  if (body.bias_mode !== undefined)         { sets.push('bias_mode = ?');         vals.push(body.bias_mode); }
+  if (body.htf_timeframe !== undefined)     { sets.push('htf_timeframe = ?');     vals.push(body.htf_timeframe); }
+  if (body.confirmation_mode !== undefined) { sets.push('confirmation_mode = ?'); vals.push(body.confirmation_mode); }
+  if (!sets.length) return json({ ok: true }, 200, origin);
+  vals.push(clerkUser.id, params.id);
+  await env.DB.prepare(`UPDATE forex_indicator_configs SET ${sets.join(', ')} WHERE user_id = ? AND id = ?`).bind(...vals).run();
+  return json({ ok: true }, 200, origin);
+});
+
+router.delete('/user/forex-indicator-configs/:id', async (req, env) => {
+  const { user: clerkUser, origin, error, params } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+
+  const config = await env.DB.prepare(
+    'SELECT * FROM forex_indicator_configs WHERE id = ? AND user_id = ?'
+  ).bind(params.id, clerkUser.id).first();
+
+  await env.DB.prepare('DELETE FROM forex_indicator_configs WHERE id = ? AND user_id = ?').bind(params.id, clerkUser.id).run();
+
+  if (config) {
+    // forex_sma_state has no user_id — it's shared symbol+TF-level state.
+    // Only clear it once no other user still has an active config on this
+    // same symbol+TF, otherwise this would wipe their phase tracking too.
+    const asset = await env.DB.prepare('SELECT symbol FROM user_assets WHERE id = ?').bind(config.asset_id).first();
+    if (asset?.symbol) {
+      const stillUsed = await env.DB.prepare(`
+        SELECT COUNT(*) as cnt FROM forex_indicator_configs fic
+        JOIN user_assets ua ON fic.asset_id = ua.id
+        WHERE ua.symbol = ? AND fic.timeframe = ?
+      `).bind(asset.symbol, config.timeframe).first();
+      if ((stillUsed?.cnt ?? 0) === 0) {
+        await env.DB.prepare(
+          'DELETE FROM forex_sma_state WHERE symbol = ? AND timeframe = ?'
+        ).bind(asset.symbol, config.timeframe).run();
       }
     }
   }
