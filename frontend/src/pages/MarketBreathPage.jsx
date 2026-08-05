@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import {
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, Cell,
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, Cell, LabelList,
 } from 'recharts';
 import api from '../lib/api';
 
@@ -87,28 +87,33 @@ function DeltaLabel(props) {
   );
 }
 
-function IntradayLabel(props) {
-  const { x, y, width, height, value } = props;
-  if (!value) return null;
-
-  const isPositive = value >= 0;
-  const zeroX = isPositive ? x : x + width;
-  const labelX = isPositive ? zeroX - GAP : zeroX + GAP;
-  const labelAnchor = isPositive ? 'end' : 'start';
-
-  return (
-    <text
-      x={labelX}
-      y={y + height / 2}
-      textAnchor={labelAnchor}
-      dominantBaseline="middle"
-      fontSize={10}
-      fill={value >= 0 ? 'var(--bull)' : 'var(--bear)'}
-    >
-      {value.toFixed(3)}
-    </text>
-  );
-}
+// Strength value labels — positioned outside the bar's own tip (far end
+// from the zero line), never inside the bar body. Recharts always passes a
+// non-negative `width` for horizontal bars, with `x` shifted to the correct
+// left edge for negative values (x = tip for negative, x = zero for
+// positive) — so the tip is x+width for positive values, x for negative.
+const makeStrengthLabel = (opacity = 1, fontWeight = 600) =>
+  ({ x, y, width, height, value }) => {
+    if (value == null || value === 0) return null;
+    const isPositive = value >= 0;
+    const tipX    = isPositive ? x + width : x;
+    const labelX  = isPositive ? tipX + GAP : tipX - GAP;
+    const anchor  = isPositive ? 'start' : 'end';
+    return (
+      <text
+        x={labelX}
+        y={y + height / 2}
+        dy="0.35em"
+        textAnchor={anchor}
+        fontSize={11}
+        fontWeight={fontWeight}
+        opacity={opacity}
+        fill="currentColor"
+      >
+        {value >= 0 ? '+' : ''}{value.toFixed(3)}
+      </text>
+    );
+  };
 
 export default function MarketBreathPage() {
   const { getToken } = useAuth();
@@ -240,13 +245,14 @@ export default function MarketBreathPage() {
                   contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 11 }}
                   formatter={val => val.toFixed(4)}
                 />
-                <Bar dataKey="value" name="Strength" radius={[0, 3, 3, 0]} label={<IntradayLabel />}>
+                <Bar dataKey="value" name="Strength" radius={[0, 3, 3, 0]}>
                   {intradayChartData.map((entry) => (
                     <Cell
                       key={entry.currency}
                       fill={CCY_COLORS[entry.currency] || '#888'}
                     />
                   ))}
+                  <LabelList dataKey="value" content={makeStrengthLabel(1, 600)} />
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
@@ -314,6 +320,7 @@ export default function MarketBreathPage() {
                       fill={CCY_COLORS[entry.currency] || '#888'}
                     />
                   ))}
+                  <LabelList dataKey="today" content={makeStrengthLabel(1, 600)} />
                 </Bar>
                 <Bar dataKey="yesterday" name="Yesterday" barSize={10} opacity={0.35}>
                   {dailyChartData.map((entry) => (
@@ -322,6 +329,7 @@ export default function MarketBreathPage() {
                       fill={CCY_COLORS[entry.currency] || '#888'}
                     />
                   ))}
+                  <LabelList dataKey="yesterday" content={makeStrengthLabel(0.5, 400)} />
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
