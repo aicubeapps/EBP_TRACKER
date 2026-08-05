@@ -935,71 +935,47 @@ Same shared bot/infrastructure as forex/crypto — `SHARED_BOT_TOKEN`, resolved 
 ### Cleanup applied 2026-08-06
 Migration 013 applied (`alert_history.fired_at` INTEGER→TEXT ISO 8601; caught
 and fixed a format bug in the migration itself — `datetime()` produces
-space-separated non-ISO output — before it could affect dedup comparisons).
-T4 chain dedup strengthened to a time-window guard. `NSE_VALID_TFS`/
-`ALL_NSE_TF_ACCESS` given sync-notice comments (duplication itself is
-structural, not removable — see below). `watchdog_log` errors/warnings now
-delivered via Telegram through `POST /health/watchdog-check`. `schema.sql`
-reconciled with live D1 (4 divergences fixed). `README.md` rewritten for
-the current 4-worker architecture. 3 superseded audit `.md` files deleted
-from the repo root.
-
-Not done by this session, despite being listed as targets going in — found
-**already resolved** by an earlier cleanup (commit `c7e4b8b`) before this
-session started, confirmed via fresh verification rather than assumed: the
-7 "dead functions," `packages/core/`, and the 9 "dead secrets" originally
-flagged in the 2026-08-02 audit no longer exist. Verifying before deleting
-avoided both wasted no-op delete commands and misreporting who removed them.
+space-separated non-ISO output, not `strftime('%Y-%m-%dT%H:%M:%fZ',...)`'s
+proper ISO output — before it could affect dedup comparisons; `%f` support
+in D1's SQLite build independently confirmed live). T4 chain dedup
+strengthened to a time-window guard. `NSE_VALID_TFS`/`ALL_NSE_TF_ACCESS`
+given sync-notice comments (see below — duplication itself is structural,
+not removable). `watchdog_log` errors/warnings now delivered via Telegram
+through `POST /health/watchdog-check`. `schema.sql` reconciled with live D1
+(4 divergences fixed, Section 3). `README.md` rewritten for the current
+4-worker architecture. 3 superseded audit `.md` files deleted from the repo
+root. Confirmed already resolved before this session (commit `c7e4b8b`,
+not this one — verified via fresh checks rather than assumed): the 7 "dead
+functions," `packages/core/`, and 9 "dead secrets" originally flagged in
+the 2026-08-02 audit (Section 1).
 
 ### TODO/FIXME/HACK/XXX comments
-**Zero matches.** A case-insensitive grep for `TODO|FIXME|HACK|XXX` across all four workers' `src/` and `frontend/src` found no occurrences anywhere. The codebase's "known incomplete" items are instead documented as ordinary prose comments (several of which are quoted throughout this report, e.g. the `day_filter`/`sma_forex_hours` schema comments) rather than tagged markers — meaning a simple grep-for-TODO audit process would find *nothing* in this repo even though real known-incomplete items exist; anyone auditing this codebase in the future needs to read comments, not just grep for tags.
+Zero matches — unchanged finding. Known-incomplete items are documented as ordinary prose comments, not tagged markers.
 
-### Dead code — functions defined but never called
-⚠️ **Resolved — already gone as of the 2026-08-06 cleanup session's Phase 1 verification, before that session made any edits.** All 7 functions below (`getHTFForTF`, `loadBiasCache` ×2, `isPriceInFVG`'s local copy in `ebp-worker.js`, `getHTFForSweepTF`, `oppositeDirection`, `fetchAndCacheNSECandles`) returned zero matches on a fresh repo-wide grep — not deleted by that session's own work, but already removed by an earlier commit already in this repo's history (`c7e4b8b`, titled in part "dead code/secrets cleanup") that predates it. Originally documented here for reference:
+### NSE_VALID_TFS duplication
+`NSE_VALID_TFS` in `nse-cron.js` and `ALL_NSE_TF_ACCESS` in `ebp-worker.js` remain two independently-maintained copies (no shared import possible across Cloudflare Workers). Both are identical and, as of 2026-08-06, both carry a sync-notice comment ("if you change one, change the other in the same commit"). Risk is mitigated, not eliminated — any future edit to the NSE TF set must still touch both files by hand.
 
-| Function | File | Note (as of 2026-08-02) |
-|---|---|---|
-| `getHTFForTF(tf)` | `worker/src/ebp-worker.js` | Superseded by `BIAS_SOURCE.ebp`, defined right below it |
-| `loadBiasCache(db, symbol, biasTF)` | `worker/src/ebp-worker.js` | Dead read-side of `writeBiasCache` — no caller anywhere |
-| `isPriceInFVG(price, fvgRow)` | `worker/src/ebp-worker.js` | Local copy unused — the `sweep-cron.js` copy is the one actually called |
-| `getHTFForSweepTF(tf)` | `sweep-worker/src/sweep-cron.js` | Superseded by `BIAS_SOURCE.sweep` |
-| `loadBiasCache(db, symbol, biasTF)` | `sweep-worker/src/sweep-cron.js` | Same dead helper, independently duplicated |
-| `oppositeDirection(direction)` | `sweep-worker/src/sweep-cron.js` | Left over from an earlier T3 direction-resolution approach |
-| `fetchAndCacheNSECandles(symbol, timeframe, env)` | `nse-worker/src/nse-cron.js` | Self-documented as dead |
+### Hardcoded values
+- `ALLOWED_ORIGINS` duplicated in `ebp-worker.js` and `sweep-worker/src/index.js` — a staging domain requires editing both.
+- `MAJOR_PAIRS` duplicated between Watchdog and EBP Worker — deliberate, documented in-code.
+- `CHUNK_SIZE = 7` and `NY_4H_BOUNDARIES` are magic numbers — require a code deploy to change.
+- cron-job.org's schedule lives outside the repo — not reconstructable from source alone.
 
-**Dead code beyond individual functions**:
-- **`packages/core/`** — ⚠️ **resolved, same finding as above**: the directory doesn't exist at all as of 2026-08-06 (`ls packages/` → no such file or directory). Already removed before the 2026-08-06 session began, not by it.
-- **`sweep-worker/dist/`** and **`frontend/dist/`** — local Vite/build output directories, `.gitignore`'d, not a real repo hygiene issue.
+### Remaining silent failure risks
+- Watchdog Yahoo fallback failure: if all Twelve Data keys exhaust AND Yahoo fails, a candle simply isn't written — logged to `watchdog_log` (now Telegram-delivered via the 2026-08-06 health check) but there's still no aggregate "N consecutive misses" signal.
+- `/nse/search`'s Upstox branch silently returns `[]` when no token is configured — UI-indistinguishable from "no results."
+- `GET /health/datasources` has no frontend caller — admin-curl-only.
+- `nse-worker`'s `ENVIRONMENT="production"` `[vars]` entry has no code consumer.
+- `worker` code: `env.TWELVE_DATA_API_KEY` (singular, no `_1/2/3` suffix) is referenced once, passed into `validateSymbol()`, but that function's `apiKey` parameter is never used inside the function body and no secret by that exact name exists — dead parameter, no functional impact. **Not touched by the 2026-08-06 cleanup** (Section 1's secret cleanup was Cloudflare secrets only, not this in-code reference).
+- Frontend: `VITE_SWEEP_WORKER_URL` is still defined in `frontend/.env.local` (confirmed live 2026-08-06 — `.env.example` no longer has it, but `.env.local` does) and still never read anywhere in `src/` — `api.js` only reads `VITE_WORKER_URL`. **Also not touched by the 2026-08-06 cleanup**, despite being adjacent to the secrets that were.
+- Clerk JWT verification (`verifyClerkToken`) fetches Clerk's JWKS on every single authenticated request with no caching — not a silent-failure risk, but a real latency/reliability dependency: a slow or briefly-unavailable Clerk JWKS endpoint fails every authenticated route in the app simultaneously, with no cached-key grace period. Unaffected by this cleanup.
 
-### Dead / orphaned secrets and env vars
-⚠️ **Resolved — same pattern as the dead functions above.** A fresh `wrangler secret list` per worker on 2026-08-06 found `DEVELOPER_TELEGRAM_CHAT_ID`/`TWELVE_DATA_API_KEY_1/2/3` absent from `worker`, `CLERK_SECRET_KEY`/`TWELVE_DATA_API_KEY_1/2/3` absent from `sweep-worker`, and `CLERK_SECRET_KEY` absent from `nse-worker` — already removed by that same earlier `c7e4b8b`-era cleanup, not by the 2026-08-06 session (see Section 1). Two items in this original list are unaffected by that cleanup and remain accurate:
-- **`worker` code**: `env.TWELVE_DATA_API_KEY` (singular, no `_1/2/3` suffix) is referenced once, passed into `validateSymbol()` — but that function's `apiKey` parameter is never actually used inside the function body (it's Yahoo-only), and no secret named exactly `TWELVE_DATA_API_KEY` even exists in the configured list. Dead parameter, dead reference, no functional impact since it's never read.
-- **Frontend**: `VITE_SWEEP_WORKER_URL` is defined in both `.env.example` and `.env.local` but never read anywhere in `src/` — `api.js` only ever reads `VITE_WORKER_URL`.
-- `nse-worker`'s `ENVIRONMENT="production"` `[vars]` entry still has no code consumer anywhere.
-
-### schema.sql vs D1 mismatches
-⚠️ **All 4 resolved 2026-08-06.** Full detail in Section 3; summary:
-- `users.asset_limit` schema.sql default changed `5`→`3` to match the live column default. (The app-level `getOrCreateUser` INSERT still hardcodes `5` for new users regardless — that's an application-code behavior, not a schema.sql drift, and was out of scope for this fix.)
-- `alert_history.details TEXT DEFAULT '{}'` added to schema.sql's CREATE TABLE block (was previously only in a stray `ALTER TABLE` comment); that comment removed as redundant. `fired_at` also updated `INTEGER`→`TEXT` in the same block (migration 013, Section 3/5).
-- `daily_candle_cache`, `weekly_candle_cache`, `watchdog_log` now have real `CREATE TABLE IF NOT EXISTS` statements in schema.sql (placed after `candle_cache`), matching their live column shapes exactly — previously only a bottom-of-file comment acknowledged their existence.
-- `sma_cloud_states` — rather than leave it as a bare comment while its three siblings above gained real definitions, it now also has a full `CREATE TABLE IF NOT EXISTS` statement, with a prominent "ORPHANED TABLE — do not use, do not drop without a migration" comment directly above it (unchanged conclusion: still genuinely orphaned, `nse_sma_state` is the real active table).
-- The stray `-- UPDATE user_assets SET combined_enabled=0;` comment (referencing a column that exists in neither live D1 nor schema.sql) was **not** in this cleanup's explicit scope and was left as-is — flagging here in case a future pass wants it gone too.
-- Every other table's columns match schema.sql exactly, column-for-column, name/type/nullability/default/order.
-
-### Hardcoded values that should probably be config
-- **Two independently-maintained copies** of `NSE_VALID_TFS`/`ALL_NSE_TF_ACCESS` (`nse-cron.js` and `ebp-worker.js` respectively) — identical today, no shared source of truth possible (Cloudflare Workers can't import across independently-deployed bundles). ⚠️ **Mitigated 2026-08-06**: both now carry an explicit sync-notice comment ("if you change one, change the other in the same commit") — the duplication remains, but an editor is far less likely to miss the other copy.
-- `ALLOWED_ORIGINS` (CORS allowlist) is a hardcoded 2-entry array (`localhost:5173`, `ebp-tracker.pages.dev`) duplicated independently in `worker/src/ebp-worker.js` and `sweep-worker/src/index.js` — a staging/preview domain would require editing both files.
-- `MAJOR_PAIRS` (the 28-pair Market Breadth cross list) is duplicated between `watchdog-worker/src/index.js` (fetch side) and `worker/src/ebp-worker.js` (aggregation side) — explicitly noted in-code as "copied verbatim... only the pair string is needed here," a deliberate but real duplication.
-- `CHUNK_SIZE = 7` (Watchdog's Twelve Data symbols-per-key batching) and `NY_4H_BOUNDARIES = [17,21,1,5,9,13]` are magic numbers with no named-config surface — reasonable as constants, but any change to Twelve Data's rate limits or the forex 4H boundary convention requires a code deploy, not a config change.
-- Cron-job.org's actual schedule (which TFs, what cadence) lives entirely outside this repo, in the cron-job.org dashboard — there is no way to audit or reconstruct the live cron schedule from source code alone (Section 2's cron table is inferred from what each `/cron/*` route *accepts*, not what's actually scheduled).
-
-### Error handling gaps / silent failure risks
-- **Watchdog Worker → Yahoo fallback for signal symbols**: if all Twelve Data keys are exhausted *and* Yahoo also fails for a given symbol, that symbol's candle simply isn't written this cycle — no alert beyond a `watchdog_log` row. ⚠️ **Escalation gap closed 2026-08-06** (Section 5/10) — `POST /health/watchdog-check` now surfaces recent `watchdog_log` error/warning rows via Telegram.
-- **`/nse/search`'s Upstox branch** silently returns `[]` (not an error) when no Upstox token is configured — indistinguishable in the UI from "no equities matched your search," which could mislead a user into thinking equity search doesn't work at all rather than realizing NSE data isn't fully configured.
-- ⚠️ **T4's chain-creation dedup guard — fixed 2026-08-06** (Section 5): previously weaker than the `isDuplicateAlert` window used everywhere else (only checked "does an `awaiting_fvg_entry` row already exist," no time bound). Now queries for any T4 chain in any state created within the template's `window_mins`, closing the "rapid repeat sweep spawns a second chain shortly after the first completes" gap.
-- ⚠️ **`user_templates`'s `step3_enabled`/`bias_gate`/`fvg_rule` columns — fixed 2026-08-06** (Section 3/6): all three are now read and applied by cron code, and settable via `TemplateCard.jsx`/`PATCH /user/template/:id`.
-- **`GET /health/datasources`** has no known frontend caller (confirmed via the full frontend API-call inventory) — either an intentionally admin-curl-only diagnostic route, or an abandoned UI feature; either way, the per-source Twelve Data/Yahoo call-success data it exposes is not visible to anyone through the app itself.
-- **Clerk JWT verification** (`verifyClerkToken`) fetches Clerk's JWKS **on every single authenticated request** with no caching (`fetch('https://api.clerk.com/v1/jwks', ...)` inline in the hot path) — not a silent-failure risk, but a real latency/reliability dependency: if Clerk's JWKS endpoint is slow or briefly unavailable, every authenticated route in the entire app fails simultaneously, with no fallback or cached-key grace period.
+### Documented but not implemented
+- `user_indicator_settings.sma_forex_hours` — schema only, no read site, no write route, no UI.
+- `nse_indicator_configs.day_filter` — schema column, explicitly dead per its own comment.
+- `/upgrade` route — `ExpiryBanner.jsx`'s "Renew" button dead-links here (falls through to `NotFound`).
+- Weekly Strength UI — backend computes a `tf='1W'` row (`computeWeeklyBreadth`), but `GET /market/breadth` only ever queries `tf='1H'`; `MarketBreathPage.jsx`'s "Weekly Strength" section is still a static placeholder that never fetches it.
+- `sma_cloud_states` — orphaned in D1, now properly marked in schema.sql (Section 3). Never read or written by any worker.
 
 ### Routes/features described in comments/docs but not implemented
 - **Watchdog Telegram alerting** (`@EBP_Watchdog_bot`, per the roadmap's Phase H spec) — a literal bot of that name still doesn't exist, and Watchdog itself still sends zero Telegram messages (`DEVELOPER_TELEGRAM_CHAT_ID` remains configured but dead). ⚠️ **Resolved differently since 2026-08-02**: the underlying need (a human gets told when Watchdog is failing) is now met by an external `POST /health/watchdog-check` heartbeat on the EBP Worker instead — see Section 5's corrected entry and Section 10 below.
