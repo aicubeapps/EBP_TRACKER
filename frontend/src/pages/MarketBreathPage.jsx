@@ -14,8 +14,8 @@ const CCY_COLORS = {
 
 function fmtTime(ts) {
   return new Date(ts).toLocaleTimeString('en-US', {
-    hour: '2-digit', minute: '2-digit', timeZone: 'UTC', hour12: false,
-  }) + ' UTC';
+    hour: '2-digit', minute: '2-digit', timeZone: 'America/New_York', hour12: false,
+  }) + ' NY';
 }
 
 function getNYOffset(epochMs) {
@@ -88,16 +88,17 @@ function DeltaLabel(props) {
 }
 
 // Strength value labels — positioned outside the bar's own tip (far end
-// from the zero line), never inside the bar body. Recharts always passes a
-// non-negative `width` for horizontal bars, with `x` shifted to the correct
-// left edge for negative values (x = tip for negative, x = zero for
-// positive) — so the tip is x+width for positive values, x for negative.
+// from the zero line), never inside the bar body. Verified against
+// Recharts 3.8.1 source (Bar.js horizontal-bar branch + getBaseValueOfBar):
+// x is ALWAYS the zero-axis pixel (baseValue's scale position, for every
+// bar regardless of sign) and width is SIGNED (negative for negative
+// values) — so x+width is the tip in both cases, no branching on x itself.
 const makeStrengthLabel = (opacity = 1, fontWeight = 600) =>
   ({ x, y, width, height, value }) => {
     if (value == null || value === 0) return null;
     const isPositive = value >= 0;
-    const tipX    = isPositive ? x + width : x;
-    const labelX  = isPositive ? tipX + GAP : tipX - GAP;
+    const tip     = x + width;
+    const labelX  = isPositive ? tip + GAP : tip - GAP;
     const anchor  = isPositive ? 'start' : 'end';
     return (
       <text
