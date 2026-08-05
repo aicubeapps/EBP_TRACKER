@@ -143,20 +143,13 @@ export default function MarketBreathPage() {
 
   // ── Session boundary ─────────────────────────────────────────────
   const sessionStart = getCurrentSessionStart();
-  console.log('[Breadth Debug] sessionStart:', sessionStart, new Date(sessionStart).toISOString());
 
   const sessionSnapshots = (intraday ?? [])
     .filter(s => s.t >= sessionStart)
     .sort((a, b) => a.t - b.t);
-  console.log('[Breadth Debug] intraday length:', (intraday ?? []).length, 'sessionSnapshots length:', sessionSnapshots.length);
 
   // ── Chart 1: latest session snapshot → single CCY_COLORS bar ────
   const latestSessionSnap = sessionSnapshots[sessionSnapshots.length - 1] ?? null;
-  console.log('[Breadth Debug] latestSessionSnap:', latestSessionSnap);
-  console.log('[Breadth Debug] todayStrength will be:', intraday && intraday.length > 0 ? 'computed' : 'null');
-  console.log('[Breadth Debug] strength sample:', JSON.stringify(latestSessionSnap?.strength));
-  console.log('[Breadth Debug] CURRENCIES:', CURRENCIES);
-  console.log('[Breadth Debug] CCY_COLORS keys:', Object.keys(CCY_COLORS));
 
   const intradayChartData = latestSessionSnap
     ? Object.entries(latestSessionSnap.strength)
