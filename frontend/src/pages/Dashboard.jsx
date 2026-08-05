@@ -126,7 +126,8 @@ export default function Dashboard() {
         <AssetCard
           key={asset.id}
           asset={asset}
-          tier={user?.plan ?? 'free'}
+          allowedTfs={userNseTfAccess}
+          userNseTfAccess={userNseTfAccess}
           onRemove={async (id) => { await removeAsset(id); fetchAssetCount(); }}
         />
       ))}

@@ -1,10 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import api from '../lib/api';
+import { TDI_TFS } from '../lib/constants';
 
-const TDI_TFS = ['M15', 'M30'];
-
-export default function TdiConfigPanel({ assetId }) {
+export default function TdiConfigPanel({ assetId, allowedTfs, onUpdate }) {
   const { getToken } = useAuth();
   const [configs, setConfigs]         = useState([]);
   const [loading, setLoading]         = useState(true);
@@ -21,7 +20,10 @@ export default function TdiConfigPanel({ assetId }) {
 
   useEffect(() => { fetchConfigs(); }, [fetchConfigs]);
 
-  const availableTfs = TDI_TFS.filter(tf => !configs.some(c => c.timeframe === tf));
+  // allowedTfs is null while /user/me hasn't resolved yet — skip filtering
+  // rather than showing a false "no timeframes enabled" state.
+  const visibleTfs   = TDI_TFS.filter(tf => !allowedTfs || allowedTfs.includes(tf));
+  const availableTfs = visibleTfs.filter(tf => !configs.some(c => c.timeframe === tf));
 
   async function addConfig() {
     setError(null);
@@ -30,6 +32,7 @@ export default function TdiConfigPanel({ assetId }) {
       const res   = await api.post(`/user/nse-indicator-configs/${assetId}`, { indicator: 'tdi', timeframe: pendingTf }, token);
       setConfigs(prev => [...prev, { id: res.id, indicator: 'tdi', timeframe: pendingTf, enabled: 1 }]);
       setShowAddForm(false);
+      onUpdate?.();
     } catch (e) {
       setError(e.message || 'Could not add TDI alert.');
     }
@@ -39,12 +42,14 @@ export default function TdiConfigPanel({ assetId }) {
     const token = await getToken();
     await api.patch(`/user/nse-indicator-configs/${id}`, { [field]: value }, token);
     setConfigs(prev => prev.map(c => c.id === id ? { ...c, [field]: value } : c));
+    onUpdate?.();
   }
 
   async function deleteConfig(id) {
     const token = await getToken();
     await api.delete(`/user/nse-indicator-configs/${id}`, token);
     setConfigs(prev => prev.filter(c => c.id !== id));
+    onUpdate?.();
   }
 
   if (loading) return <div className="config-panel"><span className="spinner" /></div>;

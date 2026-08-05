@@ -726,7 +726,7 @@ async function processTemplateChains(tf, env, log) {
     `SELECT ut.user_id, ut.asset_id, ut.bias_gate, ua.symbol FROM user_templates ut
      JOIN user_assets ua ON ut.asset_id = ua.id
      JOIN users u ON ut.user_id = u.id
-     WHERE ut.template='t4' AND ut.enabled=1 AND ut.ltf=? AND u.active=1`
+     WHERE ut.template='t4' AND ut.enabled=1 AND ut.ltf=? AND u.active=1 AND ua.asset_type != 'nse'`
   ).bind(tf).all();
 
   for (const t of t4Templates ?? []) {

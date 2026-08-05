@@ -1,8 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import {
-  LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  Legend, ResponsiveContainer, ReferenceLine, Cell,
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, Cell,
 } from 'recharts';
 import api from '../lib/api';
 
@@ -12,11 +11,6 @@ const CCY_COLORS = {
   EUR: '#3b82f6', GBP: '#8b5cf6', USD: '#10b981', JPY: '#f59e0b',
   CHF: '#ef4444', CAD: '#f97316', AUD: '#ec4899', NZD: '#06b6d4',
 };
-
-function fmtScore(v) {
-  if (v == null || isNaN(v)) return '—';
-  return (v >= 0 ? '+' : '') + v.toFixed(4);
-}
 
 function fmtTime(ts) {
   return new Date(ts).toLocaleTimeString('en-US', {
@@ -54,17 +48,6 @@ function getCurrentSessionStart() {
   }
   const offset = getNYOffset(sessionStart.getTime());
   return sessionStart.getTime() - offset * 3600000;
-}
-
-// ── Correlation cell background ──────────────────────────────────
-
-function corrStyle(r, isDiag) {
-  if (isDiag) return { background: 'var(--surface)', fontWeight: 700 };
-  const abs = Math.abs(r);
-  const alpha = abs * 0.5;
-  return r > 0
-    ? { background: `rgba(16,185,129,${alpha})` }
-    : { background: `rgba(239,68,68,${alpha})` };
 }
 
 // ── Bar labels — positioned near the zero line, opposite side from the
@@ -156,7 +139,7 @@ export default function MarketBreathPage() {
   if (error)   return <div className="shell"><p style={{ color: 'var(--bear)' }}>{error}</p></div>;
   if (!data)   return null;
 
-  const { intraday, correlation, computed_at } = data;
+  const { intraday, computed_at } = data;
 
   // ── Session boundary ─────────────────────────────────────────────
   const sessionStart = getCurrentSessionStart();
@@ -200,18 +183,6 @@ export default function MarketBreathPage() {
             : null,
         }))
     : [];
-
-  // ── Line chart (48h history) ──────────────────────────────────────
-  const OUTLIER_THRESHOLD = 0.3;
-  const filteredIntraday = (intraday ?? []).filter(snap => {
-    const vals = Object.values(snap.strength);
-    return vals.every(v => Math.abs(v) <= OUTLIER_THRESHOLD);
-  });
-
-  const lineChartData = filteredIntraday.map(row => ({
-    t: row.t,
-    ...row.strength,
-  }));
 
   const cardStyle = {
     background: 'var(--surface)',
@@ -439,113 +410,6 @@ export default function MarketBreathPage() {
         </div>
       </section>
 
-      {/* ── Correlation matrix (heatmap removed) ─────────────────── */}
-      <div className="breadth-grid">
-        <section className="card">
-          <div className="card-header">
-            <span className="card-title">Strength Correlation</span>
-            <span className="text-mono text-muted" style={{ fontSize: 11 }}>Pearson r, 10-candle series</span>
-          </div>
-          {!correlation ? (
-            <p className="text-muted" style={{ padding: '16px 0', fontSize: 13 }}>
-              No correlation data yet — needs ≥2 hourly runs.
-            </p>
-          ) : (
-            <div style={{ position: 'relative', overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
-              <table className="breadth-heatmap" style={{ minWidth: 480 }}>
-                <thead>
-                  <tr>
-                    <th></th>
-                    {CURRENCIES.map(c => <th key={c}>{c}</th>)}
-                  </tr>
-                </thead>
-                <tbody>
-                  {CURRENCIES.map(a => (
-                    <tr key={a}>
-                      <th>{a}</th>
-                      {CURRENCIES.map(b => {
-                        const r = correlation?.[a]?.[b];
-                        const diag = a === b;
-                        return (
-                          <td key={b} style={corrStyle(r ?? 0, diag)} className="text-mono"
-                            title={`${a}/${b}: ${r?.toFixed(3) ?? '—'}`}
-                          >
-                            {diag ? '1.0' : (r != null ? r.toFixed(2) : '—')}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <div style={{
-                position: 'absolute',
-                right: 0,
-                top: 0,
-                bottom: 0,
-                width: 24,
-                background: 'linear-gradient(to right, transparent, rgba(243,237,227,0.8))',
-                pointerEvents: 'none',
-                borderRadius: '0 8px 8px 0',
-              }} />
-            </div>
-          )}
-        </section>
-      </div>
-
-      {/* ── Strength History line chart (48h) ────────────────────── */}
-      <section className="card">
-        <div className="card-header">
-          <span className="card-title">Strength History (48h)</span>
-          <span className="text-mono text-muted" style={{ fontSize: 11 }}>hourly snapshots</span>
-        </div>
-        {lineChartData.length < 2 ? (
-          <p className="text-muted" style={{ padding: '16px 0', fontSize: 13 }}>
-            Collecting data — chart appears after ≥2 hourly runs.
-          </p>
-        ) : (
-          <ResponsiveContainer width="100%" height={280}>
-            <LineChart data={lineChartData} margin={{ top: 8, right: 16, bottom: 8, left: 40 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-              <XAxis
-                dataKey="t"
-                type="number"
-                scale="time"
-                domain={['dataMin', 'dataMax']}
-                tickFormatter={(ms) => {
-                  const d = new Date(ms);
-                  return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')} UTC`;
-                }}
-                tick={{ fontSize: 10, fontFamily: 'var(--font-mono)', fill: 'var(--muted)' }}
-                interval="preserveStartEnd"
-                minTickGap={60}
-              />
-              <YAxis
-                width={40}
-                tick={{ fontSize: 10, fontFamily: 'var(--font-mono)', fill: 'var(--muted)' }}
-                tickFormatter={v => v.toFixed(3)}
-              />
-              <Tooltip
-                contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 11 }}
-                formatter={(v, name) => [fmtScore(v), name]}
-                labelFormatter={fmtTime}
-              />
-              <Legend wrapperStyle={{ fontSize: 11 }} />
-              {CURRENCIES.map(ccy => (
-                <Line
-                  key={ccy}
-                  type="monotone"
-                  dataKey={ccy}
-                  stroke={CCY_COLORS[ccy]}
-                  strokeWidth={1.5}
-                  dot={false}
-                  activeDot={{ r: 3 }}
-                />
-              ))}
-            </LineChart>
-          </ResponsiveContainer>
-        )}
-      </section>
     </div>
   );
 }

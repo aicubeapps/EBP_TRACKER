@@ -1,19 +1,17 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import api from '../lib/api';
+import { NSE_SMA_TFS, NSE_SMA_HTF_TFS } from '../lib/constants';
 
-const SMA_TFS = ['M15', 'M5'];
-const HTF_TFS = ['1H', 'D'];
-
-export default function SmaConfigPanel({ assetId }) {
+export default function SmaConfigPanel({ assetId, allowedTfs, onUpdate }) {
   const { getToken } = useAuth();
   const [configs, setConfigs]         = useState([]);
   const [loading, setLoading]         = useState(true);
   const [error, setError]             = useState(null);
   const [showAddForm, setShowAddForm] = useState(false);
-  const [pendingTf, setPendingTf]                     = useState(SMA_TFS[0]);
+  const [pendingTf, setPendingTf]                     = useState(NSE_SMA_TFS[0]);
   const [pendingConfirmationMode, setPendingConfirmationMode] = useState('either');
-  const [pendingHtfTf, setPendingHtfTf]               = useState('1H');
+  const [pendingHtfTf, setPendingHtfTf]               = useState(NSE_SMA_HTF_TFS[0]);
   const [pendingBiasMode, setPendingBiasMode]         = useState('ttrades');
 
   const fetchConfigs = useCallback(async () => {
@@ -25,7 +23,10 @@ export default function SmaConfigPanel({ assetId }) {
 
   useEffect(() => { fetchConfigs(); }, [fetchConfigs]);
 
-  const availableTfs = SMA_TFS.filter(tf => !configs.some(c => c.timeframe === tf));
+  // allowedTfs is null while /user/me hasn't resolved yet — skip filtering
+  // rather than showing a false "no timeframes enabled" state.
+  const visibleTfs   = NSE_SMA_TFS.filter(tf => !allowedTfs || allowedTfs.includes(tf));
+  const availableTfs = visibleTfs.filter(tf => !configs.some(c => c.timeframe === tf));
 
   async function addConfig() {
     setError(null);
@@ -40,6 +41,7 @@ export default function SmaConfigPanel({ assetId }) {
         confirmation_mode: pendingConfirmationMode, bias_mode: pendingBiasMode, htf_timeframe: pendingHtfTf, enabled: 1,
       }]);
       setShowAddForm(false);
+      onUpdate?.();
     } catch (e) {
       setError(e.message || 'Could not add SMA alert.');
     }
@@ -49,12 +51,14 @@ export default function SmaConfigPanel({ assetId }) {
     const token = await getToken();
     await api.patch(`/user/nse-indicator-configs/${id}`, { [field]: value }, token);
     setConfigs(prev => prev.map(c => c.id === id ? { ...c, [field]: value } : c));
+    onUpdate?.();
   }
 
   async function deleteConfig(id) {
     const token = await getToken();
     await api.delete(`/user/nse-indicator-configs/${id}`, token);
     setConfigs(prev => prev.filter(c => c.id !== id));
+    onUpdate?.();
   }
 
   if (loading) return <div className="config-panel"><span className="spinner" /></div>;
@@ -75,9 +79,9 @@ export default function SmaConfigPanel({ assetId }) {
             <option value="none">Same TF momentum only</option>
           </select>
           {cfg.bias_mode !== 'none' && (
-            <select className="select-sm" value={cfg.htf_timeframe ?? '1H'}
+            <select className="select-sm" value={cfg.htf_timeframe ?? NSE_SMA_HTF_TFS[0]}
               onChange={e => updateConfig(cfg.id, 'htf_timeframe', e.target.value)}>
-              {HTF_TFS.map(tf => <option key={tf} value={tf}>HTF: {tf === 'D' ? 'Daily' : tf}</option>)}
+              {NSE_SMA_HTF_TFS.map(tf => <option key={tf} value={tf}>HTF: {tf === 'D' ? 'Daily' : tf}</option>)}
             </select>
           )}
           <select className="select-sm" value={cfg.confirmation_mode ?? 'either'}
@@ -107,7 +111,7 @@ export default function SmaConfigPanel({ assetId }) {
             </select>
             {pendingBiasMode !== 'none' && (
               <select className="select-sm" value={pendingHtfTf} onChange={e => setPendingHtfTf(e.target.value)}>
-                {HTF_TFS.map(tf => <option key={tf} value={tf}>HTF: {tf === 'D' ? 'Daily' : tf}</option>)}
+                {NSE_SMA_HTF_TFS.map(tf => <option key={tf} value={tf}>HTF: {tf === 'D' ? 'Daily' : tf}</option>)}
               </select>
             )}
             <select className="select-sm" value={pendingConfirmationMode} onChange={e => setPendingConfirmationMode(e.target.value)}>

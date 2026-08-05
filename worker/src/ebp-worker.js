@@ -147,12 +147,15 @@ function getHTFBiasLabel(biasTF) {
   return map[biasTF] ?? `${biasTF} HTF bias`;
 }
 
-// User-configurable HTF bias pairing. M15/M30/D/W stay fixed to
-// BIAS_SOURCE's default; only 1H and 4H can be overridden, and only to one
-// of two allowed alternates.
+// User-configurable HTF bias pairing — must match frontend/src/lib/constants.js's
+// HTF_OVERRIDE_OPTIONS exactly, or the PATCH below 400s on every attempt to
+// set an override for a TF the frontend offers but this list doesn't.
 const VALID_HTF_OVERRIDES = {
-  '1H': ['4H', 'D'],
-  '4H': ['D', 'W'],
+  'M15': ['4H', '1H'],
+  'M30': ['4H'],
+  '1H':  ['4H', 'D'],
+  '4H':  ['D', 'W'],
+  'D':   ['W'],
 };
 
 function resolveHTF(signalType, tf, htfOverride) {
@@ -855,6 +858,7 @@ async function handleEBPCron(tf, env, debugLog = null) {
     JOIN users u ON ec.user_id = u.id
     WHERE ec.timeframe=? AND ec.enabled=1
     AND u.active=1
+    AND ua.asset_type != 'nse'
   `).bind(tf).all();
   if (!filtered?.length) {
     log(`No enabled EBP configs for TF ${tf}`);
@@ -1484,13 +1488,23 @@ const TEMPLATE_TF_RANK = { 'M5': 1, 'M15': 2, 'M30': 3, '1H': 4, '4H': 5, 'D': 6
 router.patch('/user/template/:id', async (req, env) => {
   const { user: clerkUser, origin, error, params } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const { enabled, htf, ltf, window_mins } = await req.json();
+  const { enabled, htf, ltf, window_mins, bias_gate, fvg_rule, step3_enabled } = await req.json();
   if (htf && ltf && TEMPLATE_TF_RANK[ltf] >= TEMPLATE_TF_RANK[htf]) {
     return json({ error: 'LTF must be strictly lower than HTF' }, 400, origin);
   }
+  if (fvg_rule !== undefined && !['50_percent', 'any_touch', 'full_fill'].includes(fvg_rule)) {
+    return json({ error: "fvg_rule must be '50_percent', 'any_touch', or 'full_fill'" }, 400, origin);
+  }
+  if (window_mins !== undefined && (window_mins < 15 || window_mins > 240)) {
+    return json({ error: 'window_mins must be between 15 and 240' }, 400, origin);
+  }
   await env.DB.prepare(
-    'UPDATE user_templates SET enabled=COALESCE(?,enabled), htf=COALESCE(?,htf), ltf=COALESCE(?,ltf), window_mins=COALESCE(?,window_mins) WHERE id=? AND user_id=?'
-  ).bind(enabled ?? null, htf ?? null, ltf ?? null, window_mins ?? null, params.id, clerkUser.id).run();
+    'UPDATE user_templates SET enabled=COALESCE(?,enabled), htf=COALESCE(?,htf), ltf=COALESCE(?,ltf), window_mins=COALESCE(?,window_mins), bias_gate=COALESCE(?,bias_gate), fvg_rule=COALESCE(?,fvg_rule), step3_enabled=COALESCE(?,step3_enabled) WHERE id=? AND user_id=?'
+  ).bind(
+    enabled ?? null, htf ?? null, ltf ?? null, window_mins ?? null,
+    bias_gate ?? null, fvg_rule ?? null, step3_enabled ?? null,
+    params.id, clerkUser.id
+  ).run();
   return json({ ok: true }, 200, origin);
 });
 
@@ -1501,6 +1515,75 @@ router.delete('/user/template/:id', async (req, env) => {
     'DELETE FROM user_templates WHERE id=? AND user_id=?'
   ).bind(params.id, clerkUser.id).run();
   return json({ ok: true }, 200, origin);
+});
+
+// ── Chain State (Phase 4 Prompt A) ──────────────────────────────
+// Active T1/T2/T3/T4 chain progress for a given asset, for display only —
+// no mutation route; chains are written exclusively by the cron workers.
+
+router.get('/user/chain-state/:assetId', async (req, env) => {
+  const { user: clerkUser, origin, error, params } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+
+  const asset = await env.DB.prepare(
+    'SELECT id FROM user_assets WHERE id = ? AND user_id = ?'
+  ).bind(params.assetId, clerkUser.id).first();
+  if (!asset) return json({ error: 'Asset not found' }, 404, origin);
+
+  const { results } = await env.DB.prepare(`
+    SELECT id, template_type, direction, state, htf, ltf,
+           step1_signal_id, step2_signal_id, step3_signal_id,
+           fvg_id, created_at, expires_at
+    FROM chain_state
+    WHERE user_id = ? AND asset_id = ?
+      AND state != 'complete'
+      AND expires_at > ?
+    ORDER BY created_at DESC
+  `).bind(clerkUser.id, params.assetId, new Date().toISOString()).all();
+
+  return json(results ?? [], 200, origin);
+});
+
+// ── FVG Zones (Phase 4 Prompt A) ─────────────────────────────────
+// Active + recently-mitigated fvg_zones for the asset's own configured
+// EBP/Sweep signal TFs only — not every TF that happens to have a zone.
+
+router.get('/user/fvg-zones/:assetId', async (req, env) => {
+  const { user: clerkUser, origin, error, params } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+
+  const { results: configTfRows } = await env.DB.prepare(`
+    SELECT DISTINCT timeframe FROM user_ebp_configs WHERE asset_id = ? AND user_id = ?
+    UNION
+    SELECT DISTINCT timeframe FROM user_sweep_configs WHERE asset_id = ? AND user_id = ?
+  `).bind(params.assetId, clerkUser.id, params.assetId, clerkUser.id).all();
+
+  const tfs = (configTfRows ?? []).map(r => r.timeframe);
+  if (tfs.length === 0) return json([], 200, origin);
+
+  const asset = await env.DB.prepare(
+    'SELECT symbol FROM user_assets WHERE id = ? AND user_id = ?'
+  ).bind(params.assetId, clerkUser.id).first();
+  if (!asset) return json([], 200, origin);
+
+  const placeholders = tfs.map(() => '?').join(',');
+  const cutoff24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const nowIso = new Date().toISOString();
+
+  const { results: zones } = await env.DB.prepare(`
+    SELECT id, tf, direction, top, bottom, midpoint,
+           formed_at, expires_at, mitigated_at, mitigated_by_tf
+    FROM fvg_zones
+    WHERE symbol = ?
+      AND tf IN (${placeholders})
+      AND expires_at > ?
+      AND (mitigated_at IS NULL OR mitigated_at > ?)
+    ORDER BY
+      CASE WHEN mitigated_at IS NULL THEN 0 ELSE 1 END ASC,
+      formed_at DESC
+  `).bind(asset.symbol, ...tfs, nowIso, cutoff24h).all();
+
+  return json(zones ?? [], 200, origin);
 });
 
 // ── Dashboard ─────────────────────────────────────────────────
@@ -1632,7 +1715,7 @@ router.post('/user/nse-indicator-configs/:assetId', async (req, env) => {
     return json({ error: "indicator must be 'tdi' or 'sma'" }, 400, origin);
   }
 
-  const validTfs = indicator === 'tdi' ? ['M15', 'M30'] : ['M15', 'M5'];
+  const validTfs = indicator === 'tdi' ? ['M15', 'M30'] : ['M15', 'M5', 'M30'];
   if (!validTfs.includes(timeframe)) {
     return json({ error: `timeframe must be one of: ${validTfs.join(', ')}` }, 400, origin);
   }

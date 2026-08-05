@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import api from '../lib/api';
-import { EBP_TFS, NSE_EBP_TFS, BIAS_SOURCE_FRONTEND, NSE_BIAS_SOURCE_FRONTEND } from '../lib/constants';
+import { EBP_TFS, NSE_EBP_TFS, BIAS_SOURCE_FRONTEND, NSE_BIAS_SOURCE_FRONTEND, HTF_OVERRIDE_OPTIONS } from '../lib/constants';
 import { capitalise } from '../lib/utils';
 
 const ALERT_MODES = [
@@ -10,15 +10,19 @@ const ALERT_MODES = [
   { value: 'all',          label: 'All' },
 ];
 
-// Only 1H and 4H get a user-choosable HTF — M15/M30/D/W stay fixed to
-// BIAS_SOURCE_FRONTEND's default. Values match the bias_cache key
-// convention ('D'/'W'), same as biasSource's own values.
-const HTF_OVERRIDE_OPTIONS = {
-  '1H': [{ value: '4H', label: '4H' }, { value: 'D', label: 'Daily' }],
-  '4H': [{ value: 'D',  label: 'Daily' }, { value: 'W', label: 'Weekly' }],
-};
+// override-or-raw chooser, mirrors the backend's getEffectiveBias but
+// against biasCache — the object GET /user/bias/:symbol returns, keyed by
+// timeframe ({ [tf]: { bias, updated_at } }) — not a {timeframe,bias}[] array.
+function getEffectiveBiasDisplay(htfTf, biasCache, biasOverrides) {
+  const override = biasOverrides?.[htfTf];
+  const raw = biasCache?.[htfTf]?.bias ?? '—';
+  if (override && override !== 'auto') {
+    return { label: override, isOverridden: true, raw };
+  }
+  return { label: raw, isOverridden: false, raw: null };
+}
 
-export default function EBPConfigPanel({ assetId, assetType, allowedTfs, biasCache }) {
+export default function EBPConfigPanel({ assetId, assetType, allowedTfs, biasCache, biasOverrides, onUpdate }) {
   const { getToken } = useAuth();
   const [configs, setConfigs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -47,6 +51,7 @@ export default function EBPConfigPanel({ assetId, assetType, allowedTfs, biasCac
       const token = await getToken();
       const res   = await api.post(`/user/ebp-configs/${assetId}`, { timeframe: tf, alert_mode: 'aligned' }, token);
       setConfigs(prev => [...prev, { id: res.id, timeframe: tf, alert_mode: 'aligned', enabled: 1 }]);
+      onUpdate?.();
     } catch (e) {
       setError(e.message || 'Could not add EBP alert.');
     }
@@ -56,6 +61,7 @@ export default function EBPConfigPanel({ assetId, assetType, allowedTfs, biasCac
     const token = await getToken();
     await api.patch(`/user/ebp-configs/${id}`, { [field]: value }, token);
     setConfigs(prev => prev.map(c => c.id === id ? { ...c, [field]: value } : c));
+    onUpdate?.();
   }
 
   // TF change resets htf_override to null server-side (falls back to the
@@ -65,12 +71,14 @@ export default function EBPConfigPanel({ assetId, assetType, allowedTfs, biasCac
     const token = await getToken();
     await api.patch(`/user/ebp-configs/${id}`, { timeframe: newTf }, token);
     setConfigs(prev => prev.map(c => c.id === id ? { ...c, timeframe: newTf, htf_override: null } : c));
+    onUpdate?.();
   }
 
   async function deleteConfig(id) {
     const token = await getToken();
     await api.delete(`/user/ebp-configs/${id}`, token);
     setConfigs(prev => prev.filter(c => c.id !== id));
+    onUpdate?.();
   }
 
   if (loading) return <div className="config-panel"><span className="spinner" /></div>;
@@ -85,9 +93,8 @@ export default function EBPConfigPanel({ assetId, assetType, allowedTfs, biasCac
         // htf_override, when set, is the TF actually in effect — not the
         // BIAS_SOURCE default. Both the label below and the HTF select's
         // pre-selected value must reflect whichever one is really active.
-        const biasTF   = cfg.htf_override || (biasSource[cfg.timeframe] ?? null);
-        const biasData = biasTF ? biasCache?.[biasTF] : null;
-        const bias     = biasData?.bias ?? 'neutral';
+        const biasTF      = cfg.htf_override || (biasSource[cfg.timeframe] ?? null);
+        const biasDisplay = biasTF ? getEffectiveBiasDisplay(biasTF, biasCache, biasOverrides) : null;
 
         return (
           <div key={cfg.id} className="config-row">
@@ -102,12 +109,24 @@ export default function EBPConfigPanel({ assetId, assetType, allowedTfs, biasCac
             {HTF_OVERRIDE_OPTIONS[cfg.timeframe] && (
               <select className="select-sm" value={biasTF}
                 onChange={e => updateConfig(cfg.id, 'htf_override', e.target.value)}>
-                {HTF_OVERRIDE_OPTIONS[cfg.timeframe].map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                {HTF_OVERRIDE_OPTIONS[cfg.timeframe].map(tf => (
+                  <option key={tf} value={tf}>{tf === 'D' ? 'Daily' : tf === 'W' ? 'Weekly' : tf}</option>
+                ))}
               </select>
             )}
-            {biasTF && (
-              <span className="bias-label">Bias: {capitalise(bias)} ({biasTF})</span>
+            {biasDisplay && (
+              <span className={biasDisplay.isOverridden ? 'bias-overridden' : 'bias-auto'}>
+                Bias: {capitalise(biasDisplay.label)} ({biasTF})
+                {biasDisplay.isOverridden && (
+                  <span className="bias-raw"> · Market: {capitalise(biasDisplay.raw)}</span>
+                )}
+              </span>
             )}
+            <select className="select-sm" value={cfg.enabled ? '1' : '0'}
+              onChange={e => updateConfig(cfg.id, 'enabled', e.target.value === '1' ? 1 : 0)}>
+              <option value="1">Enabled</option>
+              <option value="0">Disabled</option>
+            </select>
             <button className="icon-btn" onClick={() => deleteConfig(cfg.id)}>✕</button>
           </div>
         );

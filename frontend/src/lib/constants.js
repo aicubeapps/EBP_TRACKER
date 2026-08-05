@@ -54,3 +54,48 @@ export const FOREX_SMA_HTF_OPTIONS = {
   '1H':  ['4H', 'D'],
   '4H':  ['D'],
 };
+
+// Phase 4 Prompt A — shared exports across config panels.
+
+// Bias override TFs per asset type (BiasOverridePanel).
+export const FOREX_BIAS_TFS = ['W', 'D', '4H', '1H'];
+export const NSE_BIAS_TFS   = ['D', '1H', 'M30', 'M15'];
+
+// HTF override options — shared between EBP and Sweep panels. Must match
+// worker/src/ebp-worker.js's VALID_HTF_OVERRIDES exactly, or the PATCH
+// that sets htf_override 400s for any TF listed here that the backend
+// doesn't also allow.
+export const HTF_OVERRIDE_OPTIONS = {
+  'M15': ['4H', '1H'],
+  'M30': ['4H'],
+  '1H':  ['D', '4H'],
+  '4H':  ['W', 'D'],
+  'D':   ['W'],
+};
+
+// NSE indicator TFs (TdiConfigPanel / SmaConfigPanel).
+export const TDI_TFS         = ['M15', 'M30'];
+export const NSE_SMA_TFS     = ['M5', 'M15', 'M30'];
+export const NSE_SMA_HTF_TFS = ['1H', 'D'];
+
+// Same shape as FOREX_SMA_HTF_OPTIONS above, kept as a separate named
+// export per Prompt A's spec rather than renaming the existing one (which
+// ForexSmaConfigPanel.jsx already imports and is out of scope here).
+export const FOREX_SMA_HTF_TFS = {
+  'M15': ['4H'],
+  'M30': ['4H'],
+  '1H':  ['4H', 'D'],
+  '4H':  ['D'],
+};
+
+// FVG rule options (T1/T2/T4 template config).
+export const FVG_RULE_OPTIONS = [
+  { value: '50_percent', label: '50% Fill' },
+  { value: 'any_touch',  label: 'Any Touch' },
+  { value: 'full_fill',  label: 'Full Fill' },
+];
+
+// Template window_mins bounds (T3) — must match ebp-worker.js's
+// PATCH /user/template/:id validation.
+export const TEMPLATE_WINDOW_MINS_MIN = 15;
+export const TEMPLATE_WINDOW_MINS_MAX = 240;
