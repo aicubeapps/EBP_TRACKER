@@ -154,6 +154,9 @@ export default function MarketBreathPage() {
   const latestSessionSnap = sessionSnapshots[sessionSnapshots.length - 1] ?? null;
   console.log('[Breadth Debug] latestSessionSnap:', latestSessionSnap);
   console.log('[Breadth Debug] todayStrength will be:', intraday && intraday.length > 0 ? 'computed' : 'null');
+  console.log('[Breadth Debug] strength sample:', JSON.stringify(latestSessionSnap?.strength));
+  console.log('[Breadth Debug] CURRENCIES:', CURRENCIES);
+  console.log('[Breadth Debug] CCY_COLORS keys:', Object.keys(CCY_COLORS));
 
   const intradayChartData = latestSessionSnap
     ? Object.entries(latestSessionSnap.strength)
