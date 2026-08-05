@@ -2581,6 +2581,21 @@ async function handleWatchdogHealthCheck(env) {
   // EOD report: first 15-min tick after NY 5PM (DST-safe via nyHour above).
   const isEodWindow = nyHour === 17 && nyMinute < 15;
 
+  // ── Human-readable NY/IST timestamp for Telegram text ───────────────────
+  // nyWallClock/istClock are synthetic Date objects whose UTC-getter fields
+  // already equal the target timezone's wall-clock fields (same trick used
+  // for nyHour/nyMinute/istHour above) — read only via getUTC*, never
+  // toLocaleString/timeZone formatting, or it would double-convert.
+  function fmtWallClock(d) {
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const h24  = d.getUTCHours();
+    const h12  = h24 % 12 === 0 ? 12 : h24 % 12;
+    const ampm = h24 < 12 ? 'AM' : 'PM';
+    const mins = String(d.getUTCMinutes()).padStart(2, '0');
+    return `${months[d.getUTCMonth()]} ${d.getUTCDate()}, ${h12}:${mins} ${ampm}`;
+  }
+  const tsDisplay = `NY ${fmtWallClock(nyWallClock)} · IST ${fmtWallClock(istClock)}`;
+
   // ── Send Telegram ─────────────────────────────────────────────────────────
   const botToken = env.WATCHDOG_BOT_TOKEN;
   const chatId   = env.WATCHDOG_ADMIN_CHAT_ID;
@@ -2605,7 +2620,7 @@ async function handleWatchdogHealthCheck(env) {
     const failureLines = failures.map(f => `• ${f}`).join('\n');
     await sendTelegram(
       `🚨 <b>EBP Watchdog — Health Alert</b>\n` +
-      `🕐 ${nowISO}\n\n` +
+      `🕐 ${tsDisplay}\n\n` +
       `<b>Failed checks (${failures.length}):</b>\n` +
       `${failureLines}\n\n` +
       `System may be partially or fully offline.`
@@ -2615,7 +2630,7 @@ async function handleWatchdogHealthCheck(env) {
     const nseStatus     = nseMarketOpen ? '📈 NSE: open' : '💤 NSE: closed';
     await sendTelegram(
       `✅ <b>EBP Watchdog — All Systems OK</b>\n` +
-      `🕐 ${nowISO}\n\n` +
+      `🕐 ${tsDisplay}\n\n` +
       `${marketStatus} · ${nseStatus}\n` +
       `All ${Object.keys(checks).length} checks passed.`
     );
@@ -2625,7 +2640,7 @@ async function handleWatchdogHealthCheck(env) {
     const status = failures.length === 0 ? '✅ All clear' : `⚠️ ${failures.length} issue(s) detected`;
     await sendTelegram(
       `📊 <b>EBP Watchdog — EOD Report (NY 5PM)</b>\n` +
-      `🕐 ${nowISO}\n\n` +
+      `🕐 ${tsDisplay}\n\n` +
       `Status: ${status}\n\n` +
       `<b>System checks:</b>\n` +
       `${checksText}`
