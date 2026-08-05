@@ -87,19 +87,19 @@ function DeltaLabel(props) {
   );
 }
 
-// Strength value labels — positioned outside the bar's own tip (far end
-// from the zero line), never inside the bar body. Verified against
-// Recharts 3.8.1 source (Bar.js horizontal-bar branch + getBaseValueOfBar):
-// x is ALWAYS the zero-axis pixel (baseValue's scale position, for every
-// bar regardless of sign) and width is SIGNED (negative for negative
-// values) — so x+width is the tip in both cases, no branching on x itself.
+// Strength value labels — hug the zero axis, on the side opposite the
+// bar's own direction (positive bar extends right → label sits just left
+// of zero; negative bar extends left → label sits just right of zero).
+// Verified against Recharts 3.8.1 source (Bar.js horizontal-bar branch +
+// getBaseValueOfBar): x is ALWAYS the zero-axis pixel (baseValue's scale
+// position) regardless of bar sign — width is signed and irrelevant here;
+// only needed if referencing the tip, which this design doesn't.
 const makeStrengthLabel = (opacity = 1, fontWeight = 600) =>
-  ({ x, y, width, height, value }) => {
+  ({ x, y, height, value }) => {
     if (value == null || value === 0) return null;
     const isPositive = value >= 0;
-    const tip     = x + width;
-    const labelX  = isPositive ? tip + GAP : tip - GAP;
-    const anchor  = isPositive ? 'start' : 'end';
+    const labelX  = isPositive ? x - GAP : x + GAP;
+    const anchor  = isPositive ? 'end' : 'start';
     return (
       <text
         x={labelX}
