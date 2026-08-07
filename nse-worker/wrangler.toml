@@ -9,3 +9,8 @@ database_id = "b93b206a-5537-4d12-8c86-a4b2372aae7f"
 
 [vars]
 ENVIRONMENT = "production"
+
+# Secrets (set via `wrangler secret put`, not stored here):
+#   CRON_SECRET       — guards POST /cron/nse
+#   CLERK_SECRET_KEY  — guards the Clerk JWT routes (/nse/search,
+#                        /user/nse-indicator-configs/*)

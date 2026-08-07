@@ -131,7 +131,7 @@ function calcTTradesBias({ bar1, bar2 }) {
   return { bias, closure, closePos };
 }
 
-// ── Phase 3 — Bias Source Map ─────────────────────────────────
+// ── Bias Source Map ─────────────────────────────────
 const BIAS_SOURCE = {
   ebp:      { 'M15': '4H', '1H': 'D', '4H': 'W', 'D': 'W', 'W': null },
   sweep:    { 'M5': '1H', 'M15': '1H', 'M30': '4H', '1H': 'D', '4H': 'W' },
@@ -181,13 +181,12 @@ async function writeBiasCache(db, symbol, biasTF, biasResult) {
   ).run();
 }
 
-// ── Phase 3 — Chain State Machine (T1/T2/T3/T4) ───────────────
-// chain_state schema (post Phase-1-to-3 migration): template_type/state
-// (TEXT state machine, not the old current_step INTEGER), asset_id (kept
-// beyond the original spec — user_templates and the asset-delete cascade
-// at DELETE /user/assets/:id are both asset_id-keyed), direction always
-// 'bullish'/'bearish' (never 'bull'/'bear' — matches every detector in this
-// codebase so cross-table direction comparisons need no translation layer).
+// ── Chain State Machine (T1/T2/T3/T4) ───────────────
+// chain_state schema: template_type/state (TEXT state machine), asset_id
+// (user_templates and the asset-delete cascade at DELETE /user/assets/:id
+// are both asset_id-keyed), direction always 'bullish'/'bearish' (never
+// 'bull'/'bear' — matches every detector in this codebase so cross-table
+// direction comparisons need no translation layer).
 
 function endOfUTCMonthISO() {
   const now = new Date();
@@ -227,7 +226,7 @@ async function initiateT3Chain(db, userId, assetId, symbol, direction, htfTf, lt
   });
 }
 
-// IM-4/5 — shared alert format across ebp-worker.js and sweep-cron.js; the
+// Shared alert format across ebp-worker.js and sweep-cron.js; the
 // Signal ID is assigned once at Step 1 (initiateT3Chain) and reused
 // verbatim at Steps 2/3 via chain_state.step1_signal_id.
 function formatT3Alert(symbol, htf, ltf, direction, session, price, signalId, step) {
@@ -461,7 +460,7 @@ function fmtNY(ts) {
   });
 }
 
-// ── Phase I addendum — trading session at signal fire time ─────
+// ── Trading session at signal fire time ─────
 function deriveSession(firedAtISO) {
   const date = new Date(firedAtISO);
 
@@ -524,9 +523,9 @@ function detectEBP(candles) {
   };
 }
 
-// IM-3 — used by /sweep/dashboard (moved from Sweep Worker), which
-// re-runs detection live at request time against cached candles rather
-// than reading a precomputed sweep-state table.
+// Used by /sweep/dashboard (moved from Sweep Worker), which re-runs
+// detection live at request time against cached candles rather than
+// reading a precomputed sweep-state table.
 function detectSweep(candles) {
   if (!candles || candles.length < 2) return null;
   const bar0 = candles[0];
@@ -545,7 +544,7 @@ function detectSweep(candles) {
 }
 
 // ============================================================
-// FVG Engine (Phase 1)
+// FVG Engine
 // ============================================================
 
 // candles: oldest-first. Gap is between bar[i-2] and bar[i] — the middle
@@ -608,7 +607,7 @@ async function processFVGZones(db, table, symbol, tf, candlesOldestFirst, latest
 }
 
 // ============================================================
-// Swing State + MSS Engine (Phase 1.5 + 2)
+// Swing State + MSS Engine
 // ============================================================
 
 function isDoji(bar, dojiThreshold) {
@@ -618,8 +617,8 @@ function isDoji(bar, dojiThreshold) {
 // Real ATR(14) when enough history is passed in; the D1 candle cache this
 // file reads from only ever exposes the 3-bar window already used
 // elsewhere here, so this returns null in practice and callers fall back
-// to (high-low)*0.1 per the Phase 1.5 spec — kept so it activates
-// automatically if the cache is ever widened.
+// to (high-low)*0.1 — kept so it activates automatically if the cache is
+// ever widened.
 function calcATR14(candlesOldestFirst) {
   if (!candlesOldestFirst || candlesOldestFirst.length < 14) return null;
   const bars = candlesOldestFirst.slice(-14);
@@ -759,7 +758,7 @@ ${swingLabel}: ${mss.level?.toFixed(5)}
 <i>EBP Tracker</i>`;
 }
 
-// ── Phase I — EBP Signal IDs (M15/1H/4H/1D — not W, separate counters from T3/NSE) ──
+// ── EBP Signal IDs (M15/1H/4H/1D — not W, separate counters from T3/NSE) ──
 async function generateEbpSignalId(tf, symbol, env) {
   const counterKey = `EBP-${tf}`; // EBP-4H, EBP-1D, EBP-1W
   const row = await env.DB.prepare(
@@ -782,11 +781,11 @@ async function generateEbpSignalId(tf, symbol, env) {
   return `EBP-${normSymbol}-${tf}${series}${countStr}`;
 }
 
-// IM-4 — T3 Signal IDs, ported verbatim from sweep-cron.js's generator so
-// both workers share the same global 'T3' signal_counters row (one counter
-// across all symbols, not per-symbol). Now called at chain initiation
-// (Step 1) instead of at MSS completion — the ID is carried through Steps
-// 2/3 via chain_state.step1_signal_id rather than regenerated.
+// T3 Signal IDs, ported verbatim from sweep-cron.js's generator so both
+// workers share the same global 'T3' signal_counters row (one counter
+// across all symbols, not per-symbol). Called at chain initiation (Step 1);
+// the ID is carried through Steps 2/3 via chain_state.step1_signal_id
+// rather than regenerated.
 async function generateSignalId(db, template, symbol) {
   const row = await db.prepare(
     'SELECT series, count FROM signal_counters WHERE template = ?'
@@ -926,7 +925,7 @@ async function handleEBPCron(tf, env, debugLog = null) {
       // record below — that table has no per-user concept.
       const htfBias = defaultBiasTF ? (biasByTF.get(defaultBiasTF) ?? 'neutral') : 'neutral';
 
-      // FVG Phase 1 — candles are newest-first; processFVGZones needs oldest-first.
+      // Candles are newest-first; processFVGZones needs oldest-first.
       // Daily TF only has the two synthesised bars (bar0/bar1) — FVG needs 3,
       // so it's skipped there, but swing state / MSS still run on bar0.
       let mssResult = null;
@@ -936,7 +935,6 @@ async function handleEBPCron(tf, env, debugLog = null) {
         const oldestFirst = [candles[2], candles[1], candles[0]];
         await processFVGZones(env.DB, 'fvg_zones', symbol, tf, oldestFirst, candles[0]);
 
-        // Phase 1.5 + 2 — Swing state + MSS
         mssResult = await updateSwingState(env.DB, 'swing_states', symbol, tf, oldestFirst);
       }
       if (mssResult) {
@@ -1058,13 +1056,13 @@ async function handleEBPCron(tf, env, debugLog = null) {
           }
         }
 
-        // Phase 3 — T1/T2/T3 Step 1, all triggered by this same EBP event.
-        // Runs independently of the plain EBP alert's alignment gate above —
+        // T1/T2/T3 Step 1, all triggered by this same EBP event. Runs
+        // independently of the plain EBP alert's alignment gate above —
         // each template's own bias_gate column decides whether ITS chain
-        // requires HTF-bias alignment (default: yes, same as before).
+        // requires HTF-bias alignment (default: yes).
         // T3's Signal ID is assigned here and carried through Steps 2/3 via
-        // chain_state.step1_signal_id (IM-4). T1/T2 don't get a Signal ID
-        // until their chain actually completes (Step 2, in sweep-cron.js).
+        // chain_state.step1_signal_id. T1/T2 don't get a Signal ID until
+        // their chain actually completes (Step 2, in sweep-cron.js).
         for (const templateId of ['t1', 't2', 't3']) {
           const tmpl = await env.DB.prepare(
             `SELECT * FROM user_templates WHERE user_id=? AND asset_id=? AND template=? AND enabled=1 AND htf=?`
@@ -1517,7 +1515,7 @@ router.delete('/user/template/:id', async (req, env) => {
   return json({ ok: true }, 200, origin);
 });
 
-// ── Chain State (Phase 4 Prompt A) ──────────────────────────────
+// ── Chain State ──────────────────────────────
 // Active T1/T2/T3/T4 chain progress for a given asset, for display only —
 // no mutation route; chains are written exclusively by the cron workers.
 
@@ -1544,7 +1542,7 @@ router.get('/user/chain-state/:assetId', async (req, env) => {
   return json(results ?? [], 200, origin);
 });
 
-// ── FVG Zones (Phase 4 Prompt A) ─────────────────────────────────
+// ── FVG Zones ─────────────────────────────────
 // Active + recently-mitigated fvg_zones for the asset's own configured
 // EBP/Sweep signal TFs only — not every TF that happens to have a zone.
 
@@ -1692,128 +1690,6 @@ router.delete('/user/sweep-configs/:id', async (req, env) => {
   const { user: clerkUser, origin, error, params } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
   await env.DB.prepare('DELETE FROM user_sweep_configs WHERE user_id = ? AND id = ?').bind(clerkUser.id, params.id).run();
-  return json({ ok: true }, 200, origin);
-});
-
-// ── NSE Indicator Configs (TDI / SMA Cloud — Phase D++) ────────
-
-router.get('/user/nse-indicator-configs/:assetId', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const { results } = await env.DB.prepare(
-    'SELECT * FROM nse_indicator_configs WHERE asset_id=? AND user_id=? ORDER BY created_at ASC'
-  ).bind(params.assetId, clerkUser.id).all();
-  return json(results ?? [], 200, origin);
-});
-
-router.post('/user/nse-indicator-configs/:assetId', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const { indicator, timeframe, confirmation_mode, day_filter, bias_mode, htf_timeframe } = await req.json();
-
-  if (indicator !== 'tdi' && indicator !== 'sma') {
-    return json({ error: "indicator must be 'tdi' or 'sma'" }, 400, origin);
-  }
-
-  const validTfs = indicator === 'tdi' ? ['M15', 'M30'] : ['M15', 'M5', 'M30'];
-  if (!validTfs.includes(timeframe)) {
-    return json({ error: `timeframe must be one of: ${validTfs.join(', ')}` }, 400, origin);
-  }
-
-  if (indicator === 'sma' && bias_mode !== undefined && !['ttrades', 'htf_sma', 'none'].includes(bias_mode)) {
-    return json({ error: "bias_mode must be 'ttrades', 'htf_sma', or 'none'" }, 400, origin);
-  }
-  if (indicator === 'sma' && htf_timeframe !== undefined && !['1H', 'D'].includes(htf_timeframe)) {
-    return json({ error: "htf_timeframe must be '1H' or 'D'" }, 400, origin);
-  }
-
-  const existing = await env.DB.prepare(
-    'SELECT id FROM nse_indicator_configs WHERE user_id=? AND asset_id=? AND indicator=? AND timeframe=?'
-  ).bind(clerkUser.id, params.assetId, indicator, timeframe).first();
-  if (existing) {
-    return json({ error: 'Config already exists for this indicator/timeframe on this asset.' }, 400, origin);
-  }
-
-  const finalConfirmationMode = indicator === 'sma' ? (['mss', 'cisd', 'either'].includes(confirmation_mode) ? confirmation_mode : 'either') : null;
-  const finalDayFilter    = indicator === 'sma' ? (day_filter === 0 ? 0 : 1) : null;
-  const finalBiasMode     = indicator === 'sma' ? (['htf_sma', 'none'].includes(bias_mode) ? bias_mode : 'ttrades') : null;
-  const finalHtfTimeframe = indicator === 'sma' ? (htf_timeframe === 'D' ? 'D' : '1H') : null;
-
-  const id = crypto.randomUUID();
-  await env.DB.prepare(`
-    INSERT INTO nse_indicator_configs (id, user_id, asset_id, indicator, timeframe, confirmation_mode, day_filter, enabled, created_at, bias_mode, htf_timeframe)
-    VALUES (?,?,?,?,?,?,?,1,?,?,?)
-  `).bind(id, clerkUser.id, params.assetId, indicator, timeframe, finalConfirmationMode, finalDayFilter, Date.now(), finalBiasMode, finalHtfTimeframe).run();
-
-  return json({
-    id, indicator, timeframe, confirmation_mode: finalConfirmationMode, day_filter: finalDayFilter,
-    bias_mode: finalBiasMode, htf_timeframe: finalHtfTimeframe, enabled: 1,
-  }, 201, origin);
-});
-
-router.patch('/user/nse-indicator-configs/:id', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const body = await req.json();
-
-  if (body.bias_mode !== undefined && !['ttrades', 'htf_sma', 'none'].includes(body.bias_mode)) {
-    return json({ error: "bias_mode must be 'ttrades', 'htf_sma', or 'none'" }, 400, origin);
-  }
-  if (body.htf_timeframe !== undefined && !['1H', 'D'].includes(body.htf_timeframe)) {
-    return json({ error: "htf_timeframe must be '1H' or 'D'" }, 400, origin);
-  }
-  if (body.confirmation_mode !== undefined && !['mss', 'cisd', 'either'].includes(body.confirmation_mode)) {
-    return json({ error: "confirmation_mode must be 'mss', 'cisd', or 'either'" }, 400, origin);
-  }
-
-  const sets = []; const vals = [];
-  if (body.enabled !== undefined)       { sets.push('enabled = ?');       vals.push(body.enabled ? 1 : 0); }
-  if (body.confirmation_mode !== undefined) { sets.push('confirmation_mode = ?'); vals.push(body.confirmation_mode); }
-  if (body.day_filter !== undefined)    { sets.push('day_filter = ?');    vals.push(body.day_filter ? 1 : 0); }
-  if (body.bias_mode !== undefined)     { sets.push('bias_mode = ?');     vals.push(body.bias_mode); }
-  if (body.htf_timeframe !== undefined) { sets.push('htf_timeframe = ?'); vals.push(body.htf_timeframe); }
-  if (!sets.length) return json({ ok: true }, 200, origin);
-  vals.push(clerkUser.id, params.id);
-  await env.DB.prepare(`UPDATE nse_indicator_configs SET ${sets.join(', ')} WHERE user_id = ? AND id = ?`).bind(...vals).run();
-  return json({ ok: true }, 200, origin);
-});
-
-router.delete('/user/nse-indicator-configs/:id', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-
-  const config = await env.DB.prepare(
-    'SELECT * FROM nse_indicator_configs WHERE id = ? AND user_id = ?'
-  ).bind(params.id, clerkUser.id).first();
-
-  await env.DB.prepare('DELETE FROM nse_indicator_configs WHERE id = ? AND user_id = ?').bind(params.id, clerkUser.id).run();
-
-  if (config) {
-    if (config.indicator === 'tdi') {
-      // nse_indicator_chain is per-user (has user_id) — safe to delete unconditionally.
-      await env.DB.prepare(
-        'DELETE FROM nse_indicator_chain WHERE user_id = ? AND asset_id = ? AND timeframe = ?'
-      ).bind(clerkUser.id, config.asset_id, config.timeframe).run();
-    } else if (config.indicator === 'sma') {
-      // nse_sma_state has no user_id — it's shared symbol+TF-level state. Only
-      // clear it once no other user still has an active SMA config on this
-      // same symbol+TF, otherwise this would wipe their phase tracking too.
-      const asset = await env.DB.prepare('SELECT symbol FROM user_assets WHERE id = ?').bind(config.asset_id).first();
-      if (asset?.symbol) {
-        const stillUsed = await env.DB.prepare(`
-          SELECT COUNT(*) as cnt FROM nse_indicator_configs ic
-          JOIN user_assets ua ON ic.asset_id = ua.id
-          WHERE ua.symbol = ? AND ic.timeframe = ? AND ic.indicator = 'sma'
-        `).bind(asset.symbol, config.timeframe).first();
-        if ((stillUsed?.cnt ?? 0) === 0) {
-          await env.DB.prepare(
-            'DELETE FROM nse_sma_state WHERE symbol = ? AND timeframe = ?'
-          ).bind(asset.symbol, config.timeframe).run();
-        }
-      }
-    }
-  }
-
   return json({ ok: true }, 200, origin);
 });
 
@@ -2085,235 +1961,6 @@ router.post('/user/telegram/test', async (req, env) => {
 
 const BREADTH_CURRENCIES = ['EUR', 'GBP', 'USD', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD'];
 
-// 28 cross-pairs covering all C(8,2) combinations.
-// Each entry: [pair, base, quote] using market-convention pair name.
-// pct = (close−open)/open*100; positive pct → base appreciated vs quote.
-const MAJOR_PAIRS = [
-  ['EUR/USD', 'EUR', 'USD'], ['GBP/USD', 'GBP', 'USD'], ['USD/JPY', 'USD', 'JPY'],
-  ['USD/CHF', 'USD', 'CHF'], ['USD/CAD', 'USD', 'CAD'], ['AUD/USD', 'AUD', 'USD'],
-  ['NZD/USD', 'NZD', 'USD'], ['EUR/GBP', 'EUR', 'GBP'], ['EUR/JPY', 'EUR', 'JPY'],
-  ['EUR/CHF', 'EUR', 'CHF'], ['EUR/CAD', 'EUR', 'CAD'], ['EUR/AUD', 'EUR', 'AUD'],
-  ['EUR/NZD', 'EUR', 'NZD'], ['GBP/JPY', 'GBP', 'JPY'], ['GBP/CHF', 'GBP', 'CHF'],
-  ['GBP/CAD', 'GBP', 'CAD'], ['GBP/AUD', 'GBP', 'AUD'], ['GBP/NZD', 'GBP', 'NZD'],
-  ['CHF/JPY', 'CHF', 'JPY'], ['CAD/JPY', 'CAD', 'JPY'], ['AUD/JPY', 'AUD', 'JPY'],
-  ['NZD/JPY', 'NZD', 'JPY'], ['AUD/CAD', 'AUD', 'CAD'], ['AUD/CHF', 'AUD', 'CHF'],
-  ['AUD/NZD', 'AUD', 'NZD'], ['NZD/CAD', 'NZD', 'CAD'], ['NZD/CHF', 'NZD', 'CHF'],
-  ['CAD/CHF', 'CAD', 'CHF'],
-];
-
-function pearsonCorr(a, b) {
-  const n = Math.min(a.length, b.length);
-  if (n < 2) return 0;
-  const meanA = a.slice(0, n).reduce((s, x) => s + x, 0) / n;
-  const meanB = b.slice(0, n).reduce((s, x) => s + x, 0) / n;
-  let num = 0, da = 0, db = 0;
-  for (let i = 0; i < n; i++) {
-    const dA = a[i] - meanA, dB = b[i] - meanB;
-    num += dA * dB; da += dA * dA; db += dB * dB;
-  }
-  const denom = Math.sqrt(da * db);
-  return denom === 0 ? 0 : num / denom;
-}
-
-async function handleMarketBreadthCron(env, debugLog = []) {
-  // Forex weekend gate — Friday 17:00 NY through Sunday 17:00 NY, no new 1H
-  // bars are actually forming, so breadth computation is suppressed. Reuses
-  // the same Intl shortOffset technique nyDateAtHourToUTCms already uses
-  // for daily/weekly candle synthesis (not a new DST helper), just applied
-  // in the other direction — current UTC instant to NY wall-clock.
-  const nowUtc = new Date();
-  const nyOffsetParts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    timeZoneName: 'shortOffset',
-  }).formatToParts(nowUtc);
-  const nyOffsetStr   = nyOffsetParts.find(p => p.type === 'timeZoneName').value;
-  const nyOffsetHours = parseInt(nyOffsetStr.replace('GMT', ''));
-  const nyWallClock   = new Date(nowUtc.getTime() + nyOffsetHours * 3600 * 1000);
-  const nyDayOfWeek   = nyWallClock.getUTCDay();
-  const nyHour        = nyWallClock.getUTCHours();
-
-  const isForexWeekend =
-    (nyDayOfWeek === 5 && nyHour >= 17) || // Friday from 17:00
-    nyDayOfWeek === 6 ||                   // all Saturday
-    (nyDayOfWeek === 0 && nyHour < 17);    // Sunday before 17:00
-
-  if (isForexWeekend) {
-    console.log('Market breadth cron skipped — forex weekend (Friday 17:00 to Sunday 17:00 NY)');
-    return { skipped: true, reason: 'forex weekend — breadth suppressed Friday 17:00 to Sunday 17:00 NY' };
-  }
-
-  const BREADTH_TF = '1H';
-  const now = Date.now();
-
-  // Read 1H candles per pair from cache — Watchdog fetches these directly
-  // (breadth pairs are always in its symbol pool) for strength history and
-  // correlation.
-  const pairData = {};
-  for (const [pair, base, quote] of MAJOR_PAIRS) {
-    const candles = await getCandlesFromCache(pair, BREADTH_TF, env);
-    if (candles && candles.length >= 1) {
-      pairData[pair] = { candles, base, quote };
-    } else {
-      debugLog.push(`skip ${pair}: no candles`);
-    }
-  }
-
-  // Build heatmap and strength from the most recent closed candle.
-  const heatmap = {};
-  for (const c of BREADTH_CURRENCIES) heatmap[c] = {};
-
-  for (const [pair, { candles, base, quote }] of Object.entries(pairData)) {
-    const c   = candles[0];
-    const pct = c.open !== 0 ? ((c.close - c.open) / c.open) * 100 : 0;
-    heatmap[base][quote] = parseFloat(pct.toFixed(4));
-    heatmap[quote][base] = parseFloat((-pct).toFixed(4));
-  }
-
-  const strength = {};
-  for (const ccy of BREADTH_CURRENCIES) {
-    const vals = Object.values(heatmap[ccy]).filter(v => !isNaN(v));
-    strength[ccy] = vals.length > 0
-      ? parseFloat((vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(4))
-      : 0;
-  }
-
-  // Write snapshot cache.
-  await env.DB.prepare(
-    'INSERT OR REPLACE INTO market_breadth_cache (tf, computed_at, heatmap, strength) VALUES (?,?,?,?)'
-  ).bind(BREADTH_TF, now, JSON.stringify(heatmap), JSON.stringify(strength)).run();
-
-  // Append intraday snapshot, prune rows older than 40 days. Was 48 hours
-  // (still all the /market/breadth route's intraday chart query reads —
-  // that query is its own separate 48h-bounded SELECT, unaffected by this
-  // retention window), extended so computeWeeklyBreadth() below actually
-  // has 5+ weeks of history to aggregate from.
-  await env.DB.prepare(
-    'INSERT OR REPLACE INTO market_breadth_intraday (tf, snapshot_at, strength) VALUES (?,?,?)'
-  ).bind(BREADTH_TF, now, JSON.stringify(strength)).run();
-  await env.DB.prepare(
-    'DELETE FROM market_breadth_intraday WHERE tf = ? AND snapshot_at < ?'
-  ).bind(BREADTH_TF, now - 40 * 24 * 60 * 60 * 1000).run();
-
-  // Build per-candle strength series for correlation (up to 10 points).
-  const seriesLen = Math.min(10, ...Object.values(pairData).map(d => d.candles.length));
-  const returnSeries = {};
-  for (const ccy of BREADTH_CURRENCIES) returnSeries[ccy] = [];
-
-  for (let i = 0; i < seriesLen; i++) {
-    const snap = {};
-    for (const ccy of BREADTH_CURRENCIES) snap[ccy] = {};
-    for (const [pair, { candles, base, quote }] of Object.entries(pairData)) {
-      if (i >= candles.length) continue;
-      const c   = candles[i];
-      const pct = c.open !== 0 ? ((c.close - c.open) / c.open) * 100 : 0;
-      snap[base][quote] = pct;
-      snap[quote][base] = -pct;
-    }
-    for (const ccy of BREADTH_CURRENCIES) {
-      const vals = Object.values(snap[ccy]).filter(v => !isNaN(v));
-      returnSeries[ccy].push(vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : 0);
-    }
-  }
-
-  const matrix = {};
-  for (const a of BREADTH_CURRENCIES) {
-    matrix[a] = {};
-    for (const b of BREADTH_CURRENCIES) {
-      matrix[a][b] = a === b ? 1 : parseFloat(pearsonCorr(returnSeries[a], returnSeries[b]).toFixed(3));
-    }
-  }
-
-  await env.DB.prepare(
-    'INSERT OR REPLACE INTO market_breadth_correlation (tf, computed_at, matrix) VALUES (?,?,?)'
-  ).bind(BREADTH_TF, now, JSON.stringify(matrix)).run();
-
-  debugLog.push(`breadth ok: ${Object.keys(pairData).length}/28 pairs`);
-
-  await computeWeeklyBreadth(env, debugLog);
-
-  return { pairs_fetched: Object.keys(pairData).length };
-}
-
-// ── Weekly Market Breadth aggregation ─────────────────────────
-function getIsoWeekKey(tsMs) {
-  const d = new Date(tsMs);
-  const thursday = new Date(d);
-  thursday.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7) + 3);
-  const yearStart = new Date(Date.UTC(thursday.getUTCFullYear(), 0, 1));
-  const weekNo = Math.ceil(((thursday - yearStart) / 86400000 + 1) / 7);
-  return `${thursday.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
-}
-
-// Same Thursday-anchor math as getIsoWeekKey, additionally resolved to the
-// ISO week's Sunday (date-only, UTC midnight) so "is this week complete"
-// can be checked without re-deriving the week boundary a second way.
-function getIsoWeekSundayMs(tsMs) {
-  const d = new Date(tsMs);
-  const thursday = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  thursday.setUTCDate(thursday.getUTCDate() - ((d.getUTCDay() + 6) % 7) + 3);
-  const mondayMs = thursday.getTime() - 3 * 24 * 60 * 60 * 1000;
-  return mondayMs + 6 * 24 * 60 * 60 * 1000;
-}
-
-// market_breadth_intraday only stores per-currency `strength`, not a
-// pair-level heatmap, so there's nothing to aggregate for a weekly heatmap —
-// the '1W' row gets heatmap='{}' (the column is NOT NULL with no default).
-async function computeWeeklyBreadth(env, debugLog) {
-  const now = Date.now();
-  const cutoff = now - 35 * 24 * 60 * 60 * 1000;
-  const { results } = await env.DB.prepare(
-    'SELECT * FROM market_breadth_intraday WHERE snapshot_at > ? ORDER BY snapshot_at ASC'
-  ).bind(cutoff).all();
-
-  const weeks = new Map(); // isoWeekKey -> { sundayMs, days: Set<dayIndex>, rows: [...] }
-  for (const row of results ?? []) {
-    const key = getIsoWeekKey(row.snapshot_at);
-    if (!weeks.has(key)) {
-      weeks.set(key, { sundayMs: getIsoWeekSundayMs(row.snapshot_at), days: new Set(), rows: [] });
-    }
-    const w = weeks.get(key);
-    w.days.add(Math.floor(row.snapshot_at / 86400000));
-    w.rows.push(row);
-  }
-
-  // Most recent completed week only (Sunday end date before today UTC),
-  // skipping any week with fewer than 3 distinct trading days.
-  const todayUTCms = Math.floor(now / 86400000) * 86400000;
-  let latestCompleted = null;
-  for (const [key, w] of weeks) {
-    if (w.days.size < 3) continue;
-    if (w.sundayMs >= todayUTCms) continue; // current/in-progress week
-    if (!latestCompleted || w.sundayMs > latestCompleted.sundayMs) {
-      latestCompleted = { key, ...w };
-    }
-  }
-  if (!latestCompleted) {
-    debugLog.push('weekly breadth: no completed week with >=3 trading days in the last 35 days');
-    return;
-  }
-
-  const sums = {}, counts = {};
-  for (const ccy of BREADTH_CURRENCIES) { sums[ccy] = 0; counts[ccy] = 0; }
-  for (const row of latestCompleted.rows) {
-    const strength = JSON.parse(row.strength);
-    for (const ccy of BREADTH_CURRENCIES) {
-      if (typeof strength[ccy] === 'number') { sums[ccy] += strength[ccy]; counts[ccy] += 1; }
-    }
-  }
-  const weeklyStrength = {};
-  for (const ccy of BREADTH_CURRENCIES) {
-    weeklyStrength[ccy] = counts[ccy] > 0 ? parseFloat((sums[ccy] / counts[ccy]).toFixed(4)) : 0;
-  }
-
-  await env.DB.prepare(`
-    INSERT INTO market_breadth_cache (tf, computed_at, heatmap, strength)
-    VALUES ('1W', ?, '{}', ?)
-    ON CONFLICT(tf) DO UPDATE SET computed_at = excluded.computed_at, strength = excluded.strength
-  `).bind(now, JSON.stringify(weeklyStrength)).run();
-
-  debugLog.push(`weekly breadth ok: week ${latestCompleted.key}, ${latestCompleted.days.size} trading days`);
-}
-
 // EBP cron trigger — public route, secured by X-Cron-Secret (cron-job.org)
 router.post('/cron/ebp', async (req, env) => {
   const origin = getOrigin(req);
@@ -2329,348 +1976,10 @@ router.post('/cron/ebp', async (req, env) => {
 
   try {
     const debugLog = [];
-    let result;
-    if (tf === 'BREADTH') {
-      result = await handleMarketBreadthCron(env, debugLog);
-    } else {
-      result = await handleEBPCron(tf, env, debugLog);
-    }
+    const result = await handleEBPCron(tf, env, debugLog);
     return json({ ok: true, tf, fired_at: new Date().toISOString(), debug: debugLog, ...result }, 200, origin);
   } catch (err) {
     console.error(`EBP cron trigger error TF=${tf}:`, err.message);
-    return json({ error: err.message }, 500, origin);
-  }
-});
-
-// Watchdog health check — external heartbeat for the Watchdog worker itself.
-// Cloudflare CPU-limit kills bypass every JS catch handler (including
-// Watchdog's own outer scheduled().catch()), so Watchdog can never alert on
-// its own termination. This runs independently, on its own cron-job.org
-// trigger, and alerts via Telegram if Watchdog (or any other cron-driven
-// piece) goes silent.
-async function handleWatchdogHealthCheck(env) {
-  const now = Date.now();
-  const nowISO = new Date(now).toISOString();
-
-  // ── DST-aware NY offset — same Intl shortOffset technique used by
-  // handleMarketBreadthCron's weekend gate. ──────────────────────────────
-  const nowUtc = new Date(now);
-  const nyParts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    timeZoneName: 'shortOffset',
-    hour: 'numeric', minute: 'numeric',
-  }).formatToParts(nowUtc);
-  const nyOffsetStr   = nyParts.find(p => p.type === 'timeZoneName').value;
-  const nyOffsetHours = parseInt(nyOffsetStr.replace('GMT', ''));
-  const nyWallClock   = new Date(now + nyOffsetHours * 3600 * 1000);
-  const nyHour        = nyWallClock.getUTCHours();
-  const nyMinute      = nyWallClock.getUTCMinutes();
-  const nyDayOfWeek   = nyWallClock.getUTCDay(); // 0=Sun, 6=Sat
-
-  // ── NSE market hours: 09:15–15:30 IST (UTC+5:30, no DST) ───────────────
-  const istMs      = now + 5.5 * 3600 * 1000;
-  const istClock   = new Date(istMs);
-  const istHour    = istClock.getUTCHours();
-  const istMin     = istClock.getUTCMinutes();
-  const istMinutes = istHour * 60 + istMin;
-  const nseOpen    = 9 * 60 + 15;   // 09:15
-  const nseClose   = 15 * 60 + 30;  // 15:30
-  const istDow     = istClock.getUTCDay();
-  const nseMarketOpen = istDow >= 1 && istDow <= 5
-    && istMinutes >= nseOpen && istMinutes < nseClose;
-
-  // ── Forex market hours — same weekend gate as handleMarketBreadthCron ──
-  const isForexWeekend =
-    (nyDayOfWeek === 5 && nyHour >= 17) ||
-    nyDayOfWeek === 6 ||
-    (nyDayOfWeek === 0 && nyHour < 17);
-  const forexMarketOpen = !isForexWeekend;
-
-  // ── Stale thresholds ─────────────────────────────────────────────────────
-  const STALE_20MIN = 20 * 60 * 1000;
-  const STALE_2HR   = 2  * 60 * 60 * 1000;
-  const STALE_90MIN = 90 * 60 * 1000;
-
-  const failures = [];
-  const checks   = {};
-
-  function minsAgo(tsMs) {
-    return Math.round((now - tsMs) / 60000);
-  }
-
-  // ── Check 1: Watchdog log activity (catches CPU-kill silence) ─────────────
-  {
-    const row = await env.DB.prepare(
-      `SELECT created_at FROM watchdog_log ORDER BY rowid DESC LIMIT 1`
-    ).first();
-    if (!row) {
-      checks.watchdog_log = 'no entries ever';
-      failures.push('Watchdog log: no entries found in DB');
-    } else {
-      const age = now - new Date(row.created_at).getTime();
-      checks.watchdog_log = `last entry ${minsAgo(new Date(row.created_at).getTime())} min ago`;
-      if (age > STALE_90MIN) {
-        failures.push(`Watchdog log silent — last entry ${minsAgo(new Date(row.created_at).getTime())} min ago (expected ≤90 min)`);
-      }
-    }
-  }
-
-  // ── Check 2: Forex/crypto candle cache freshness ──────────────────────────
-  if (forexMarketOpen) {
-    const row = await env.DB.prepare(
-      `SELECT symbol, tf, fetched_at FROM candle_cache
-       WHERE tf = 'M15'
-       ORDER BY fetched_at DESC LIMIT 1`
-    ).first();
-    if (!row) {
-      checks.forex_candle_cache = 'no M15 rows found';
-      failures.push('Forex candle cache: no M15 rows in candle_cache');
-    } else {
-      const age = now - new Date(row.fetched_at).getTime();
-      checks.forex_candle_cache = `${row.symbol} M15 last fetched ${minsAgo(new Date(row.fetched_at).getTime())} min ago`;
-      if (age > STALE_20MIN) {
-        failures.push(`Forex candle cache stale — ${row.symbol} M15 last fetched ${minsAgo(new Date(row.fetched_at).getTime())} min ago (expected ≤20 min)`);
-      }
-    }
-  } else {
-    checks.forex_candle_cache = 'skipped — forex weekend';
-  }
-
-  // ── Check 3: EBP Worker cron activity (swing_states updated) ─────────────
-  if (forexMarketOpen) {
-    const row = await env.DB.prepare(
-      `SELECT symbol, tf, updated_at FROM swing_states
-       ORDER BY updated_at DESC LIMIT 1`
-    ).first();
-    if (!row) {
-      checks.ebp_cron = 'no swing_states rows found';
-      failures.push('EBP Worker: no swing_states rows — cron may never have fired');
-    } else {
-      const age = now - new Date(row.updated_at).getTime();
-      checks.ebp_cron = `swing_states last updated ${minsAgo(new Date(row.updated_at).getTime())} min ago`;
-      if (age > STALE_20MIN) {
-        failures.push(`EBP cron stale — swing_states last updated ${minsAgo(new Date(row.updated_at).getTime())} min ago (expected ≤20 min)`);
-      }
-    }
-  } else {
-    checks.ebp_cron = 'skipped — forex weekend';
-  }
-
-  // ── Check 4: Sweep Worker cron activity (fvg_zones updated) ──────────────
-  // Event-driven, not every-tick — informational only, never a hard failure.
-  if (forexMarketOpen) {
-    const row = await env.DB.prepare(
-      `SELECT symbol, tf, created_at FROM fvg_zones
-       ORDER BY created_at DESC LIMIT 1`
-    ).first();
-    if (!row) {
-      checks.sweep_cron = 'no fvg_zones rows — may be expected if no FVGs detected yet';
-    } else {
-      checks.sweep_cron = `fvg_zones last entry ${minsAgo(new Date(row.created_at).getTime())} min ago`;
-    }
-  } else {
-    checks.sweep_cron = 'skipped — forex weekend';
-  }
-
-  // ── Check 5: Market breadth freshness ────────────────────────────────────
-  if (forexMarketOpen) {
-    const row = await env.DB.prepare(
-      `SELECT snapshot_at FROM market_breadth_intraday
-       ORDER BY snapshot_at DESC LIMIT 1`
-    ).first();
-    if (!row) {
-      checks.market_breadth = 'no intraday rows found';
-      failures.push('Market breadth: no intraday rows in market_breadth_intraday');
-    } else {
-      const age = now - row.snapshot_at;
-      checks.market_breadth = `last snapshot ${minsAgo(row.snapshot_at)} min ago`;
-      if (age > STALE_2HR) {
-        failures.push(`Market breadth stale — last snapshot ${minsAgo(row.snapshot_at)} min ago (expected ≤120 min)`);
-      }
-    }
-  } else {
-    checks.market_breadth = 'skipped — forex weekend';
-  }
-
-  // ── Check 6: Forex SMA Cloud state freshness ──────────────────────────────
-  if (forexMarketOpen) {
-    const row = await env.DB.prepare(
-      `SELECT symbol, timeframe, updated_at FROM forex_sma_state
-       ORDER BY updated_at DESC LIMIT 1`
-    ).first();
-    if (!row) {
-      checks.forex_sma = 'no forex_sma_state rows — expected until first SMA config created';
-    } else {
-      const age = now - new Date(row.updated_at).getTime();
-      checks.forex_sma = `${row.symbol} ${row.timeframe} last updated ${minsAgo(new Date(row.updated_at).getTime())} min ago`;
-      if (age > STALE_2HR) {
-        failures.push(`Forex SMA Cloud stale — ${row.symbol} ${row.timeframe} last updated ${minsAgo(new Date(row.updated_at).getTime())} min ago (expected ≤120 min)`);
-      }
-    }
-  } else {
-    checks.forex_sma = 'skipped — forex weekend';
-  }
-
-  // ── Check 7: NSE candle cache freshness ───────────────────────────────────
-  // nse_candle_cache.updated_at is an INTEGER ms epoch (confirmed via live
-  // PRAGMA table_info) — compare directly, no new Date() wrap needed.
-  if (nseMarketOpen) {
-    const row = await env.DB.prepare(
-      `SELECT symbol, timeframe, updated_at FROM nse_candle_cache
-       ORDER BY updated_at DESC LIMIT 1`
-    ).first();
-    if (!row) {
-      checks.nse_candle_cache = 'no rows found';
-      failures.push('NSE candle cache: no rows in nse_candle_cache during market hours');
-    } else {
-      const age = now - row.updated_at;
-      checks.nse_candle_cache = `${row.symbol} ${row.timeframe} last updated ${minsAgo(row.updated_at)} min ago`;
-      if (age > STALE_20MIN) {
-        failures.push(`NSE candle cache stale — ${row.symbol} ${row.timeframe} last updated ${minsAgo(row.updated_at)} min ago (expected ≤20 min)`);
-      }
-    }
-  } else {
-    checks.nse_candle_cache = 'skipped — NSE market closed';
-  }
-
-  // ── Check 8: NSE swing state freshness ────────────────────────────────────
-  if (nseMarketOpen) {
-    const row = await env.DB.prepare(
-      `SELECT symbol, tf, updated_at FROM nse_swing_states
-       ORDER BY updated_at DESC LIMIT 1`
-    ).first();
-    if (!row) {
-      checks.nse_swing = 'no rows — expected until first NSE EBP/Sweep config created';
-    } else {
-      const age = now - new Date(row.updated_at).getTime();
-      checks.nse_swing = `${row.symbol} ${row.tf} last updated ${minsAgo(new Date(row.updated_at).getTime())} min ago`;
-      if (age > STALE_20MIN) {
-        failures.push(`NSE swing state stale — ${row.symbol} ${row.tf} last updated ${minsAgo(new Date(row.updated_at).getTime())} min ago (expected ≤20 min)`);
-      }
-    }
-  } else {
-    checks.nse_swing = 'skipped — NSE market closed';
-  }
-
-  // ── Check 9: NSE SMA Cloud state freshness ────────────────────────────────
-  // nse_sma_state.updated_at is also INTEGER ms epoch (unlike forex_sma_state's
-  // TEXT), but new Date(intMs).getTime() round-trips correctly either way.
-  if (nseMarketOpen) {
-    const row = await env.DB.prepare(
-      `SELECT symbol, timeframe, updated_at FROM nse_sma_state
-       ORDER BY updated_at DESC LIMIT 1`
-    ).first();
-    if (!row) {
-      checks.nse_sma = 'no rows — expected until first NSE SMA config created';
-    } else {
-      const age = now - new Date(row.updated_at).getTime();
-      checks.nse_sma = `${row.symbol} ${row.timeframe} last updated ${minsAgo(new Date(row.updated_at).getTime())} min ago`;
-      if (age > STALE_2HR) {
-        failures.push(`NSE SMA state stale — ${row.symbol} ${row.timeframe} last updated ${minsAgo(new Date(row.updated_at).getTime())} min ago (expected ≤120 min)`);
-      }
-    }
-  } else {
-    checks.nse_sma = 'skipped — NSE market closed';
-  }
-
-  // ── Determine alert type ──────────────────────────────────────────────────
-  const utcHour   = nowUtc.getUTCHours();
-  const utcMinute = nowUtc.getUTCMinutes();
-  // 2-hourly healthy confirmation: first 15-min tick after every even UTC hour.
-  const is2HourlyWindow = utcHour % 2 === 0 && utcMinute < 15;
-  // EOD report: first 15-min tick after NY 5PM (DST-safe via nyHour above).
-  const isEodWindow = nyHour === 17 && nyMinute < 15;
-
-  // ── Human-readable NY/IST timestamp for Telegram text ───────────────────
-  // nyWallClock/istClock are synthetic Date objects whose UTC-getter fields
-  // already equal the target timezone's wall-clock fields (same trick used
-  // for nyHour/nyMinute/istHour above) — read only via getUTC*, never
-  // toLocaleString/timeZone formatting, or it would double-convert.
-  function fmtWallClock(d) {
-    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    const h24  = d.getUTCHours();
-    const h12  = h24 % 12 === 0 ? 12 : h24 % 12;
-    const ampm = h24 < 12 ? 'AM' : 'PM';
-    const mins = String(d.getUTCMinutes()).padStart(2, '0');
-    return `${months[d.getUTCMonth()]} ${d.getUTCDate()}, ${h12}:${mins} ${ampm}`;
-  }
-  const tsDisplay = `NY ${fmtWallClock(nyWallClock)} · IST ${fmtWallClock(istClock)}`;
-
-  // ── Send Telegram ─────────────────────────────────────────────────────────
-  const botToken = env.WATCHDOG_BOT_TOKEN;
-  const chatId   = env.WATCHDOG_ADMIN_CHAT_ID;
-
-  async function sendTelegram(message) {
-    try {
-      await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: message,
-          parse_mode: 'HTML',
-        }),
-      });
-    } catch (e) {
-      console.error('Watchdog health check Telegram send failed:', e.message);
-    }
-  }
-
-  if (failures.length > 0) {
-    const failureLines = failures.map(f => `• ${f}`).join('\n');
-    await sendTelegram(
-      `🚨 <b>EBP Watchdog — Health Alert</b>\n` +
-      `🕐 ${tsDisplay}\n\n` +
-      `<b>Failed checks (${failures.length}):</b>\n` +
-      `${failureLines}\n\n` +
-      `System may be partially or fully offline.`
-    );
-  } else if (is2HourlyWindow) {
-    const marketStatus = forexMarketOpen ? '📈 Forex: open' : '💤 Forex: weekend';
-    const nseStatus     = nseMarketOpen ? '📈 NSE: open' : '💤 NSE: closed';
-    await sendTelegram(
-      `✅ <b>EBP Watchdog — All Systems OK</b>\n` +
-      `🕐 ${tsDisplay}\n\n` +
-      `${marketStatus} · ${nseStatus}\n` +
-      `All ${Object.keys(checks).length} checks passed.`
-    );
-  }
-  if (isEodWindow) {
-    const checksText = Object.entries(checks).map(([k, v]) => `• ${k}: ${v}`).join('\n');
-    const status = failures.length === 0 ? '✅ All clear' : `⚠️ ${failures.length} issue(s) detected`;
-    await sendTelegram(
-      `📊 <b>EBP Watchdog — EOD Report (NY 5PM)</b>\n` +
-      `🕐 ${tsDisplay}\n\n` +
-      `Status: ${status}\n\n` +
-      `<b>System checks:</b>\n` +
-      `${checksText}`
-    );
-  }
-
-  return {
-    timestamp: nowISO,
-    failures: failures.length,
-    failureList: failures,
-    checks,
-    forexMarketOpen,
-    nseMarketOpen,
-    alertsSent: failures.length > 0 || is2HourlyWindow || isEodWindow,
-  };
-}
-
-// External heartbeat for Watchdog — public route, secured by X-Cron-Secret
-// (cron-job.org, every 15 min), same auth pattern as /cron/ebp.
-router.post('/health/watchdog-check', async (req, env) => {
-  const origin = getOrigin(req);
-  const secret = req.headers.get('X-Cron-Secret');
-  if (!secret || secret !== env.CRON_SECRET) {
-    return json({ error: 'Forbidden' }, 403, origin);
-  }
-  try {
-    const result = await handleWatchdogHealthCheck(env);
-    return json(result, 200, origin);
-  } catch (err) {
-    console.error('Watchdog health check error:', err.message);
     return json({ error: err.message }, 500, origin);
   }
 });
@@ -2782,296 +2091,7 @@ router.delete('/user/telegram', async (req, env) => {
   return json({ success: true }, 200, origin);
 });
 
-// ── Admin ─────────────────────────────────────────────────────
-
-async function requireAdmin(clerkUser, db) {
-  const u = await db.prepare('SELECT is_admin FROM users WHERE id = ?').bind(clerkUser.id).first();
-  return u?.is_admin === 1;
-}
-
-router.get('/admin/users', async (req, env) => {
-  const { user: clerkUser, origin, error } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
-  const users = await env.DB.prepare(`
-    SELECT u.*,
-      (SELECT COUNT(*) FROM user_assets WHERE user_id = u.id) as asset_count,
-      (SELECT COUNT(*) FROM alert_history WHERE user_id = u.id) as alert_count,
-      (SELECT verified FROM user_telegram WHERE user_id = u.id) as telegram_verified
-    FROM users u ORDER BY u.created_at DESC
-  `).all();
-  return json(users.results ?? [], 200, origin);
-});
-
-router.get('/admin/tokens', async (req, env) => {
-  const { user: clerkUser, origin, error } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
-  const tokens = await env.DB.prepare(
-    'SELECT * FROM invite_tokens ORDER BY created_at DESC'
-  ).all();
-  return json(tokens.results ?? [], 200, origin);
-});
-
-router.post('/admin/invite', async (req, env) => {
-  const { user: clerkUser, origin, error } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
-  const token = crypto.randomUUID().split('-')[0].toUpperCase();
-  await env.DB.prepare(
-    'INSERT INTO invite_tokens (token, created_at) VALUES (?,?)'
-  ).bind(token, Date.now()).run();
-  const appUrl = env.APP_URL ?? 'https://ebp-tracker.pages.dev';
-  return json({ token, url: `${appUrl}/invite/${token}` }, 201, origin);
-});
-
-router.post('/admin/expire/:id', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
-  await env.DB.prepare(
-    'UPDATE users SET active = 0, expires_at = ? WHERE id = ?'
-  ).bind(Date.now(), params.id).run();
-  return json({ success: true }, 200, origin);
-});
-
-// ── API key management ───────────────────────────────────────
-
-router.get('/admin/api-keys', async (req, env) => {
-  const { user: clerkUser, origin, error } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
-  const { results } = await env.DB.prepare(`
-    SELECT ak.id, ak.source, ak.label, ak.enabled, ak.added_at,
-           COALESCE(aks.exhausted, 0) as exhausted,
-           COALESCE(aks.calls_today, 0) as calls_today,
-           '***' || substr(ak.key_value, -4) as key_preview
-    FROM api_keys ak
-    LEFT JOIN api_key_state aks ON ak.id = aks.key_name
-    ORDER BY ak.source, ak.label ASC
-  `).all();
-
-  const DAILY_LIMIT = 800;
-  const resetsAtUtc = new Date(Date.UTC(
-    new Date().getUTCFullYear(),
-    new Date().getUTCMonth(),
-    new Date().getUTCDate() + 1
-  )).toISOString();
-
-  const enriched = (results ?? []).map(k => ({
-    ...k,
-    daily_limit:   DAILY_LIMIT,
-    credits_pct:   Math.round((k.calls_today / DAILY_LIMIT) * 100),
-    resets_at_utc: resetsAtUtc,
-  }));
-
-  return json(enriched, 200, origin);
-});
-
-router.post('/admin/api-keys', async (req, env) => {
-  const { user: clerkUser, origin, error } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
-  const { source, key_value, label } = await req.json();
-  if (!source || !key_value || !label) return json({ error: 'source, key_value, label required' }, 400, origin);
-  const id  = crypto.randomUUID();
-  const now = Date.now();
-  await env.DB.prepare(
-    `INSERT INTO api_keys (id, source, key_value, label, enabled, added_at, added_by) VALUES (?,?,?,?,1,?,?)`
-  ).bind(id, source, key_value, label, now, clerkUser.id).run();
-  await env.DB.prepare(
-    `INSERT OR IGNORE INTO api_key_state (key_name, exhausted, calls_today, reset_at) VALUES (?,0,0,0)`
-  ).bind(id).run();
-  return json({ ok: true, id }, 201, origin);
-});
-
-router.patch('/admin/api-keys/:id', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
-  const { enabled } = await req.json();
-  await env.DB.prepare(`UPDATE api_keys SET enabled=? WHERE id=?`).bind(enabled ? 1 : 0, params.id).run();
-  return json({ ok: true }, 200, origin);
-});
-
-router.delete('/admin/api-keys/:id', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
-  await env.DB.prepare(`DELETE FROM api_keys WHERE id=?`).bind(params.id).run();
-  await env.DB.prepare(`DELETE FROM api_key_state WHERE key_name=?`).bind(params.id).run();
-  return json({ ok: true }, 200, origin);
-});
-
-// ── Per-user asset limit ──────────────────────────────────────
-
-router.patch('/admin/users/:id/asset-limit', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
-  const { asset_limit } = await req.json();
-  if (!asset_limit || asset_limit < 1 || asset_limit > 50) {
-    return json({ error: 'asset_limit must be between 1 and 50' }, 400, origin);
-  }
-  await env.DB.prepare(`UPDATE users SET asset_limit=? WHERE id=?`).bind(asset_limit, params.id).run();
-  return json({ ok: true, asset_limit }, 200, origin);
-});
-
-router.get('/admin/users/:id/assets', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
-  const assets = await env.DB.prepare(
-    'SELECT symbol, asset_type, added_at FROM user_assets WHERE user_id = ? ORDER BY added_at ASC'
-  ).bind(params.id).all();
-  return json(assets.results ?? [], 200, origin);
-});
-
-const ALL_TF_ACCESS = ['M5', 'M15', 'M30', '1H', '4H', 'D', 'W'];
-
-router.get('/admin/users/:id/tf-access', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
-  const row = await env.DB.prepare('SELECT user_tf_access FROM users WHERE id=?').bind(params.id).first();
-  if (!row) return json({ error: 'User not found' }, 404, origin);
-  const tfAccess = JSON.parse(row.user_tf_access || JSON.stringify(ALL_TF_ACCESS));
-  return json({ user_id: params.id, tf_access: tfAccess }, 200, origin);
-});
-
-router.patch('/admin/users/:id/tf-access', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
-  const { tf_access } = await req.json();
-  if (!Array.isArray(tf_access) || tf_access.some(tf => !ALL_TF_ACCESS.includes(tf))) {
-    return json({ error: `tf_access must be an array containing only: ${ALL_TF_ACCESS.join(', ')}` }, 400, origin);
-  }
-  await env.DB.prepare(`UPDATE users SET user_tf_access=? WHERE id=?`).bind(JSON.stringify(tf_access), params.id).run();
-  return json({ ok: true }, 200, origin);
-});
-
-const ALL_NSE_TF_ACCESS = ['M1', 'M5', 'M15', 'M30', '1H', 'D'];
-
-router.get('/admin/users/:id/nse-tf-access', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
-  const row = await env.DB.prepare('SELECT nse_tf_access FROM users WHERE id=?').bind(params.id).first();
-  if (!row) return json({ error: 'User not found' }, 404, origin);
-  const nseTfAccess = JSON.parse(row.nse_tf_access || JSON.stringify(ALL_NSE_TF_ACCESS));
-  return json({ user_id: params.id, nse_tf_access: nseTfAccess }, 200, origin);
-});
-
-router.patch('/admin/users/:id/nse-tf-access', async (req, env) => {
-  const { user: clerkUser, origin, error, params } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
-  const { nse_tf_access } = await req.json();
-  if (!Array.isArray(nse_tf_access) || nse_tf_access.some(tf => !ALL_NSE_TF_ACCESS.includes(tf))) {
-    return json({ error: `nse_tf_access must be an array containing only: ${ALL_NSE_TF_ACCESS.join(', ')}` }, 400, origin);
-  }
-  await env.DB.prepare(`UPDATE users SET nse_tf_access=? WHERE id=?`).bind(JSON.stringify(nse_tf_access), params.id).run();
-  return json({ ok: true }, 200, origin);
-});
-
-// GET /nse/status — public, no auth required. Dashboard uses this to show
-// the "~15 min delayed" badge for non-admin users, who can't call
-// GET /admin/api-keys directly.
-router.get('/nse/status', async (req, env) => {
-  const { origin } = req._ctx;
-  const key = await env.DB.prepare(
-    "SELECT id FROM api_keys WHERE source='upstox' AND enabled=1 LIMIT 1"
-  ).first();
-  return json({ upstox_configured: !!key }, 200, origin);
-});
-
-// GET /nse/search — proxies Yahoo Finance's symbol search server-side.
-// Yahoo's endpoint sends no Access-Control-Allow-Origin header, so the
-// frontend can't call it directly from the browser; this route exists
-// purely to route around that CORS gap.
-const NSE_KNOWN_INDICES = ['^NSEI', '^NSEBANK', '^BSESN', '^NIFTYBANK'];
-
-router.get('/nse/search', async (req, env) => {
-  const { user: clerkUser, origin, error } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-
-  const url = new URL(req.url);
-  const q   = (url.searchParams.get('q') ?? '').trim();
-  if (!q) return json([], 200, origin);
-
-  // Run both sources in parallel — Upstox covers equities, Yahoo covers
-  // indices only (Upstox's EQ-segment search doesn't surface index
-  // instruments like ^NSEI at all). Promise.allSettled so one source
-  // failing never kills the other.
-  const [upstoxResults, yahooIndexResults] = await Promise.allSettled([
-
-    // Source 1 — Upstox: equities only
-    (async () => {
-      const upstoxKey = await env.DB.prepare(
-        "SELECT key_value FROM api_keys WHERE source='upstox' AND enabled=1 LIMIT 1"
-      ).first();
-      if (!upstoxKey?.key_value) return [];
-
-      const res = await fetch(
-        `https://api.upstox.com/v2/instruments/search?query=${encodeURIComponent(q)}&exchanges=NSE&segments=EQ&records=20`,
-        {
-          headers: {
-            'Authorization': `Bearer ${upstoxKey.key_value}`,
-            'Accept': 'application/json'
-          }
-        }
-      );
-      if (!res.ok) return [];
-      const data = await res.json();
-      return (data?.data ?? [])
-        .filter(i =>
-          i.exchange === 'NSE' &&
-          i.instrument_type === 'EQ' &&
-          i.trading_symbol &&
-          !i.trading_symbol.includes('-') // exclude derivatives
-        )
-        .map(i => ({
-          symbol: `${i.trading_symbol}.NS`,
-          shortName: i.name || i.trading_symbol,
-          source: 'upstox'
-        }));
-    })(),
-
-    // Source 2 — Yahoo: indices only
-    (async () => {
-      const res = await fetch(
-        `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&lang=en-IN&region=IN`,
-        { headers: { 'User-Agent': 'Mozilla/5.0' } }
-      );
-      if (!res.ok) return [];
-      const data = await res.json();
-      return (data?.quotes ?? [])
-        .filter(item => NSE_KNOWN_INDICES.includes(item.symbol))
-        .map(item => ({
-          symbol: item.symbol,
-          shortName: item.shortName || item.longName || item.symbol,
-          source: 'yahoo'
-        }));
-    })()
-
-  ]);
-
-  const equities = upstoxResults.status === 'fulfilled' ? upstoxResults.value : [];
-  const indices  = yahooIndexResults.status === 'fulfilled' ? yahooIndexResults.value : [];
-
-  // Equities first, indices after; dedupe by symbol in case of overlap.
-  const seen = new Set();
-  const combined = [...equities, ...indices].filter(r => {
-    if (seen.has(r.symbol)) return false;
-    seen.add(r.symbol);
-    return true;
-  });
-
-  return json(combined, 200, origin);
-});
-
-// ── Trade Journal — Signal ID lookup/linking (Phase I) ─────────
+// ── Trade Journal — Signal ID lookup/linking ─────────
 // Secured by X-Journal-Secret (a shared secret with the Trade Journal app),
 // not Clerk auth — these routes are never reached with req._ctx's clerkUser.
 
@@ -3108,7 +2128,7 @@ router.get('/invite/:token', async (req, env) => {
   return json({ valid: true, token: params.token }, 200, origin);
 });
 
-// ── Sweep (moved from Sweep Worker — IM-3) ────────────────────
+// ── Sweep (moved from Sweep Worker) ────────────────────
 
 router.get('/sweep/dashboard', async (req, env) => {
   const { user: clerkUser, origin, error } = req._ctx;
@@ -3217,11 +2237,5 @@ export default {
       console.error('Handler error:', err);
       return json({ error: 'Internal server error', detail: err.message }, 500, origin);
     }
-  },
-
-  // Market Breadth CF native cron — fires at :05 every hour
-  // EBP cron remains on cron-job.org (POST /cron/ebp)
-  async scheduled(event, env, ctx) {
-    ctx.waitUntil(handleMarketBreadthCron(env));
   },
 };

@@ -7,7 +7,6 @@ export function useAssets() {
   const [assets, setAssets]           = useState([]);
   const [loading, setLoading]         = useState(true);
   const [error, setError]             = useState(null);
-  const [lastUpdated, setLastUpdated] = useState(null);
 
   const fetchAssets = useCallback(async () => {
     if (!isLoaded) return;
@@ -20,7 +19,6 @@ export function useAssets() {
       const token = await getToken();
       const data  = await api.get('/user/assets', token);
       setAssets(Array.isArray(data) ? data : []);
-      setLastUpdated(Date.now());
       setError(null);
     } catch (e) {
       setError(e.message);
@@ -45,5 +43,5 @@ export function useAssets() {
     await fetchAssets();
   };
 
-  return { assets, loading, error, addAsset, removeAsset, refetch: fetchAssets, lastUpdated };
+  return { assets, loading, error, addAsset, removeAsset, refetch: fetchAssets };
 }

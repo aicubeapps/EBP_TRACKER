@@ -8,11 +8,12 @@
 //   GET  /health          — public health check
 //   POST /cron/sweep      — HTTP cron trigger (secured by X-Cron-Secret)
 //
-// IM-3 — /sweep/dashboard and /sweep/history moved to EBP Worker. This
-// worker is now cron-only; any other path returns 404.
+// /sweep/dashboard and /sweep/history moved to EBP Worker; /cron/sma
+// (forex/crypto SMA Cloud) moved to compute-worker. This worker is now
+// cron-only for sweep detection; any other path returns 404.
 // ============================================================
 
-import { handleSweepCron, handleForexSmaCron } from './sweep-cron.js';
+import { handleSweepCron } from './sweep-cron.js';
 
 // ── CORS ─────────────────────────────────────────────────────
 
@@ -90,38 +91,6 @@ async function handleFetch(request, env) {
       }, 200, origin);
     } catch (err) {
       console.error(`Cron trigger error TF=${tf}:`, err.message);
-      return json({ error: err.message, stack: err.stack }, 500, origin);
-    }
-  }
-
-  // ── Forex/Crypto SMA Cloud cron trigger — secured by X-Cron-Secret ───
-  if (pathname === '/cron/sma' && request.method === 'POST') {
-    const secret = request.headers.get('X-Cron-Secret');
-    if (!secret || secret !== env.CRON_SECRET) {
-      return json({ error: 'Forbidden' }, 403, origin);
-    }
-
-    let body = {};
-    try { body = await request.json(); } catch {}
-
-    const tf       = body.tf;
-    const validTFs = ['M15', 'M30', '1H', '4H'];
-
-    if (!validTFs.includes(tf)) {
-      return json({ error: `Invalid TF: ${tf}. Must be one of ${validTFs.join(', ')}` }, 400, origin);
-    }
-
-    try {
-      const debugLog = [];
-      await handleForexSmaCron(tf, env, debugLog);
-      return json({
-        ok: true,
-        tf,
-        fired_at: new Date().toISOString(),
-        debug: debugLog,
-      }, 200, origin);
-    } catch (err) {
-      console.error(`SMA cron trigger error TF=${tf}:`, err.message);
       return json({ error: err.message, stack: err.stack }, 500, origin);
     }
   }

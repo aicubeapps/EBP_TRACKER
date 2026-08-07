@@ -18,10 +18,8 @@ export default function AssetCard({ asset, allowedTfs: allowedTfsProp, userNseTf
   const isNse        = asset.asset_type === 'nse';
   const isForex      = ['forex', 'crypto', 'commodity'].includes(asset.asset_type);
 
-  // NSE assets need nse_tf_access, not the forex/crypto user_tf_access —
-  // the third Dashboard call site (NSE Market section) only started passing
-  // userNseTfAccess in this refactor, so fall back to allowedTfsProp too in
-  // case a caller still only sends that.
+  // NSE assets need nse_tf_access, not the forex/crypto user_tf_access;
+  // fall back to allowedTfsProp in case a caller only sends that.
   const allowedTfs = isNse ? (userNseTfAccess ?? allowedTfsProp ?? null) : (allowedTfsProp ?? null);
 
   const [ebpEnabled,   setEbpEnabled]   = useState(false);
@@ -80,10 +78,9 @@ export default function AssetCard({ asset, allowedTfs: allowedTfsProp, userNseTf
 
   const assetTypeBadge = (asset.asset_type ?? 'forex').toLowerCase().replace(/\s/g, '_');
 
-  // DXY (asset_type 'system') isn't forex/crypto/commodity but currently has
-  // working EBP bias-override, FVG zones and AI Alerts — gate on !isNse
-  // (matches the fetch gates above) rather than isForex so this refactor
-  // doesn't silently strip those from DXY.
+  // DXY (asset_type 'system') isn't forex/crypto/commodity but does support
+  // EBP bias-override, FVG zones and AI Alerts — gate on !isNse (matches
+  // the fetch gates above), not isForex, so DXY keeps these features.
   const showAiForexFeatures = !isNse;
 
   return (

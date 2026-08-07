@@ -6,7 +6,6 @@ export function useUser() {
   const { getToken, isLoaded, isSignedIn } = useAuth();
   const [user, setUser]       = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError]     = useState(null);
 
   const fetchUser = async () => {
     if (!isLoaded || !isSignedIn) {
@@ -17,8 +16,8 @@ export function useUser() {
       const token = await getToken();
       const data  = await api.get('/user/me', token);
       setUser(data);
-    } catch (e) {
-      setError(e.message);
+    } catch {
+      // swallowed — no error UI consumes this
     } finally {
       setLoading(false);
     }
@@ -32,5 +31,5 @@ export function useUser() {
     return () => clearInterval(interval);
   }, [isLoaded, isSignedIn]);
 
-  return { user, loading, error, refetch: fetchUser };
+  return { user, loading };
 }

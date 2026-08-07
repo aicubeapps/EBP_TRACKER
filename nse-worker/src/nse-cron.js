@@ -193,7 +193,7 @@ async function fetchNseCandles(symbol, tf, env) {
   }
 }
 
-// ── Phase D++ — NSE Indicators — rolling 60-candle cache ────────
+// ── NSE Indicators — rolling 60-candle cache ────────
 // Fetches fresh candles via the existing Upstox/Yahoo fallback, merges with
 // whatever's cached (deduped by timestamp, fresh wins on collision), trims
 // to 60, writes back. Writes to nse_indicator_candle_cache — a new table,
@@ -242,7 +242,7 @@ async function fetchHTFCandles(symbol, htfTimeframe, env) {
   return candles.slice(0, 15);
 }
 
-// ── Phase D++ — NSE Indicators — shared math helpers (pure, stateless) ──
+// ── NSE Indicators — shared math helpers (pure, stateless) ──
 
 // RSI — Wilder smoothing. candles: newest-first array of {close}.
 // Returns RSI values newest-first (length = candles.length - period).
@@ -488,7 +488,7 @@ function isDoji(bar, dojiThreshold) {
 // Real ATR(14) when enough history is passed in; the D1 candle cache this
 // file reads from only ever exposes the 3-bar window already used
 // elsewhere here, so this returns null in practice and callers fall back
-// to (high-low)*0.1 per the Phase 1.5 spec.
+// to (high-low)*0.1.
 function calcATR14(candlesOldestFirst) {
   if (!candlesOldestFirst || candlesOldestFirst.length < 14) return null;
   const bars = candlesOldestFirst.slice(-14);
@@ -612,7 +612,7 @@ async function updateSwingState(db, symbol, timeframe, candlesOldestFirst) {
   return mssResult;
 }
 
-// ── Phase D++ — NSE Indicator alert delivery (shared by TDI + SMA) ──
+// ── NSE Indicator alert delivery (shared by TDI + SMA) ──
 // Unlike EBP/Sweep/MSS, nse_indicator_configs has no alert_mode column —
 // every enabled config fires directly on its own internal conditions, no
 // HTF-bias-alignment gate. Still respects nse_tf_access (admin-controlled)
@@ -638,7 +638,7 @@ async function deliverNseIndicatorAlert(env, { userId, symbol, timeframe, direct
   ).run();
 }
 
-// ── Phase D++ — TDI (Traders Dynamic Index) ─────────────────────
+// ── TDI (Traders Dynamic Index) ─────────────────────
 
 // Divergence check with nse_swing_states fallback. direction: 'bullish'
 // checks for a bullish (higher-low) divergence against a bearish run;
@@ -845,7 +845,7 @@ async function runTDIForAsset(symbol, timeframe, userId, assetId, candles, env) 
   });
 }
 
-// ── Phase D++ — SMA Cloud (full revamp, 2026-08-05) ──────────────
+// ── SMA Cloud ──────────────
 // Cloud = gap between SMA1 (close price) and SMA9 (9-period SMA of close),
 // both on the NATIVE timeframe. HTF SMA9 (user-configurable per
 // SMA_HTF_PAIRING) is a bias reference only — it is no longer part of the
@@ -922,27 +922,6 @@ function countSma1x9Crossovers(window, sma1Arr, sma9Arr) {
   let count = 0;
   for (let i = 0; i < window; i++) if (didSma1x9Crossover(i, sma1Arr, sma9Arr)) count++;
   return count;
-}
-
-// Which side of BOTH SMA1 and SMA9 a candle closed on. null = ambiguous
-// (inside cloud, or a value missing). Retained from the prior phase-machine
-// design (no longer called by advanceSmaPhase) for potential reuse.
-function sma1x9CandleSide(candles, sma1Arr, sma9Arr, i) {
-  if (sma1Arr[i] == null || sma9Arr[i] == null) return null;
-  const c = candles[i].close;
-  if (c > sma1Arr[i] && c > sma9Arr[i]) return 'bullish';
-  if (c < sma1Arr[i] && c < sma9Arr[i]) return 'bearish';
-  return null;
-}
-
-function priceSameSide(candles, sma1Arr, sma9Arr, direction, count) {
-  let consistent = 0;
-  for (let i = 0; i < count; i++) {
-    const c = candles[i].close;
-    if (direction === 'bearish' && c < sma1Arr[i] && c < sma9Arr[i]) consistent++;
-    if (direction === 'bullish' && c > sma1Arr[i] && c > sma9Arr[i]) consistent++;
-  }
-  return consistent;
 }
 
 // Phase state machine — pure transition function. prev: prior nse_sma_state
@@ -1556,8 +1535,8 @@ export async function handleNseCron(env, tf) {
     AND u.active=1
   `).bind(tf).all();
 
-  // Phase D++ — TDI / SMA Cloud configs (same two-query-pattern reasoning
-  // as ebp/sweep above — no UNION, joins user_telegram at fire time instead).
+  // TDI / SMA Cloud configs (same two-query-pattern reasoning as ebp/sweep
+  // above — no UNION, joins user_telegram at fire time instead).
   const { results: indicatorRows } = await env.DB.prepare(`
     SELECT ic.id as config_id, ic.indicator, ic.confirmation_mode, ic.enabled,
            ic.bias_mode, ic.htf_timeframe,
@@ -1611,7 +1590,7 @@ export async function handleNseCron(env, tf) {
       let mssResult = null;
       if (candles.length >= 3) {
         const oldestFirst = [candles[2], candles[1], candles[0]];
-        // FVG detection (Phase 1) — NSE TFs M5/M15/1H only.
+        // FVG detection — NSE TFs M5/M15/1H only.
         if (['M5', 'M15', '1H'].includes(tf)) {
           await processFVGZones(env.DB, symbol, tf, oldestFirst, candles[0]);
         }
@@ -1705,7 +1684,7 @@ export async function handleNseCron(env, tf) {
         }
       }
 
-      // ── Phase D++ — TDI / SMA Cloud indicators ──
+      // ── TDI / SMA Cloud indicators ──
       // updateSwingState() already ran above (before this block) — required
       // since TDI reads nse_swing_states directly. Reuses `candles` (already
       // fetched above) via mergeAndCacheNSECandles rather than fetching

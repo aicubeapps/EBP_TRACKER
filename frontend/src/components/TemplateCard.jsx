@@ -53,9 +53,9 @@ export function TemplateCard({ tmpl, active, chain, assetId, onUpdate }) {
 
   // HTF change can leave the stored LTF invalid (LTF must rank strictly
   // below HTF) — the backend only cross-checks htf/ltf when both are in
-  // the same PATCH body, so a lone {htf} patch wouldn't catch it. Mirror
-  // AIAlertsPanel's old behavior: reset LTF to the highest valid option
-  // below the new HTF and send both together.
+  // the same PATCH body, so a lone {htf} patch wouldn't catch it. Reset
+  // LTF to the highest valid option below the new HTF and send both
+  // together.
   async function handleHtfChange(newHtf) {
     if (!active) return;
     const options = templateLtfOptions(newHtf);
