@@ -121,8 +121,16 @@ export default function MarketBreathPage() {
   const [data, setData]       = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState(null);
+  // `refreshing` is distinct from `loading` — `loading` gates the initial
+  // full-page loading screen (set false exactly once), while `refreshing`
+  // covers every subsequent load() call (60s poll or manual click) so the
+  // Refresh button can animate without re-showing the full-page loader.
+  const [refreshing, setRefreshing]           = useState(false);
+  const [selectedDayIndex, setSelectedDayIndex]   = useState(0);
+  const [selectedWeekIndex, setSelectedWeekIndex] = useState(0);
 
   const load = useCallback(async () => {
+    setRefreshing(true);
     try {
       const token = await getToken();
       const d = await api.get('/market/breadth', token);
@@ -132,6 +140,7 @@ export default function MarketBreathPage() {
       setError(e.message ?? 'Failed to load breadth data');
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }, [getToken]);
 
@@ -182,12 +191,15 @@ export default function MarketBreathPage() {
         }))
     : [];
 
-  // ── Chart 2: today's latest vs yesterday's last snapshot ─────────
-  // Sourced from the API's daily.today/daily.yesterday — server-side NY
-  // trading-day bucketing (not calendar date), so this stays correct across
-  // weekends/holidays instead of re-deriving it from the raw intraday list.
-  const todayStrength     = daily?.today?.strength ?? null;
-  const yesterdayStrength = daily?.yesterday?.strength ?? null;
+  // ── Chart 2: selected trading day vs the one before it ────────────
+  // `daily` is the API's array of up to 5 most recent NY trading days
+  // (server-side 17:00 NY bucketing, index 0 = most recent) — the dropdown
+  // below picks which pair of adjacent days to compare.
+  const dailyDays          = daily ?? [];
+  const selectedDay        = dailyDays[selectedDayIndex] ?? null;
+  const selectedDayPrior   = dailyDays[selectedDayIndex + 1] ?? null;
+  const todayStrength      = selectedDay?.strength ?? null;
+  const yesterdayStrength  = selectedDayPrior?.strength ?? null;
 
   const dailyChartData = todayStrength
     ? [...CURRENCIES]
@@ -202,9 +214,15 @@ export default function MarketBreathPage() {
         }))
     : [];
 
-  // ── Chart 3: this week's running average vs last week's completed average
-  const thisWeekStrength = weekly?.thisWeek?.strength ?? null;
-  const lastWeekStrength = weekly?.lastWeek?.strength ?? null;
+  // ── Chart 3: selected week vs the one before it ────────────────────
+  // `weekly.weeks` is the API's array of up to 5 most recent ISO weeks
+  // (index 0 = current/most recent) — the dropdown below picks which pair
+  // of adjacent weeks to compare.
+  const weeklyWeeks         = weekly?.weeks ?? [];
+  const selectedWeek        = weeklyWeeks[selectedWeekIndex] ?? null;
+  const selectedWeekPrior   = weeklyWeeks[selectedWeekIndex + 1] ?? null;
+  const thisWeekStrength    = selectedWeek?.strength ?? null;
+  const lastWeekStrength    = selectedWeekPrior?.strength ?? null;
 
   const weeklySortStrength = thisWeekStrength ?? lastWeekStrength;
   const weeklyChartData = weeklySortStrength
@@ -235,11 +253,12 @@ export default function MarketBreathPage() {
           </span>
         )}
         <button
-          className="btn-ghost"
+          className={`btn-ghost${refreshing ? ' btn-refreshing' : ''}`}
           style={{ marginLeft: 'auto', fontSize: 12 }}
           onClick={load}
+          disabled={refreshing}
         >
-          Refresh
+          {refreshing ? 'Refreshing…' : 'Refresh'}
         </button>
       </div>
 
@@ -316,11 +335,26 @@ export default function MarketBreathPage() {
 
       {/* ── Chart 2: Daily Strength ───────────────────────────────── */}
       <section style={cardStyle}>
-        <div style={{ fontWeight: 600, fontSize: '1rem', color: 'var(--ink)', marginBottom: '0.25rem' }}>
-          Daily Strength
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: '0.25rem' }}>
+          <div style={{ fontWeight: 600, fontSize: '1rem', color: 'var(--ink)' }}>
+            Daily Strength
+          </div>
+          {dailyDays.length > 0 && (
+            <select
+              className="select-sm"
+              value={selectedDayIndex}
+              onChange={e => setSelectedDayIndex(Number(e.target.value))}
+            >
+              {dailyDays.map((d, i) => (
+                <option key={d.date} value={i}>
+                  {i === 0 ? `Today (${d.label})` : d.label}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
         <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginBottom: '1rem' }}>
-          Today vs Yesterday · NY session
+          {selectedDay ? selectedDay.label : 'Today'} vs {selectedDayPrior ? selectedDayPrior.label : 'Yesterday'} · NY session
         </div>
         {dailyChartData.length === 0 ? (
           <p style={{ color: 'var(--muted)', fontSize: 13, padding: '16px 0', margin: 0 }}>
@@ -428,11 +462,26 @@ export default function MarketBreathPage() {
 
       {/* ── Chart 3: Weekly Strength ───────────────────────────────── */}
       <section style={cardStyle}>
-        <div style={{ fontWeight: 600, fontSize: '1rem', color: 'var(--ink)', marginBottom: '0.25rem' }}>
-          Weekly Strength
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: '0.25rem' }}>
+          <div style={{ fontWeight: 600, fontSize: '1rem', color: 'var(--ink)' }}>
+            Weekly Strength
+          </div>
+          {weeklyWeeks.length > 0 && (
+            <select
+              className="select-sm"
+              value={selectedWeekIndex}
+              onChange={e => setSelectedWeekIndex(Number(e.target.value))}
+            >
+              {weeklyWeeks.map((w, i) => (
+                <option key={w.weekKey} value={i}>
+                  {w.label}{w.isCurrentWeek ? ' (current)' : ''}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
         <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginBottom: '1rem' }}>
-          This Week vs Last Week · ISO week
+          {selectedWeek ? selectedWeek.label : 'This Week'} vs {selectedWeekPrior ? selectedWeekPrior.label : 'Last Week'} · ISO week
         </div>
         {weeklyChartData.length === 0 ? (
           <p style={{ color: 'var(--muted)', fontSize: 13, padding: '16px 0', margin: 0 }}>

@@ -65,6 +65,15 @@ html, body, #root {
 
 .topbar-brand {
   flex: 1;
+  min-width: 0; /* allow this flex item to shrink below its text's content width */
+  overflow: hidden;
+}
+
+.topbar-brand h1,
+.topbar-brand p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .topbar-brand h1 {
@@ -128,6 +137,13 @@ html, body, #root {
 }
 
 .user-dropdown.open { display: block; }
+
+/* "Last call: ..." timestamp — .text-muted's --muted (#6b6050) is tuned for
+   the light --paper/--surface background, not the dark .topbar; stepped up
+   to match .topbar-user-name's existing brightness rather than pure white. */
+.topbar .text-muted {
+  color: #94a3b8;
+}
 
 .user-dropdown-plan {
   font-family: var(--font-mono);
@@ -1778,6 +1794,17 @@ html, body, #root {
   50% { opacity: 1; }
 }
 
+/* ── Refresh button breathing animation (Market Breadth) ── */
+.btn-refreshing {
+  animation: breathe 1.5s ease-in-out infinite;
+  cursor: default;
+}
+
+@keyframes breathe {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
 /* ── Hamburger (hidden on desktop, visible on mobile) ── */
 .hamburger {
   display: none;
@@ -1809,6 +1836,12 @@ html, body, #root {
     top: 0;
     height: 100vh;
     z-index: 200;
+    /* Override the desktop var(--nav-w) (244px) — at common phone widths
+       (~375px) 244px alone is already ~65% of viewport, so a max-width
+       ceiling above that (e.g. 260px) would be a no-op; width must be
+       set directly here, not just capped. */
+    width: min(230px, 70vw);
+    max-width: min(230px, 70vw);
     transform: translateX(-100%);
     transition: transform 0.25s ease;
   }

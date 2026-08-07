@@ -2021,15 +2021,20 @@ router.get('/market/breadth', async (req, env) => {
     'SELECT matrix FROM market_breadth_correlation WHERE tf = ?'
   ).bind('1H').first();
 
-  const cutoff = Date.now() - 48 * 60 * 60 * 1000;
+  // Widened from 48h to 35 days — the daily array needs up to 5 trading
+  // days and the weekly array needs up to 5 ISO weeks of history; both are
+  // built from this single read, matching compute-worker's own 35-day
+  // weekly-aggregation cutoff. The `intraday` field below (still 1H rows)
+  // is unchanged in shape, just now covers a longer span.
+  const cutoff = Date.now() - 35 * 24 * 60 * 60 * 1000;
   const { results: intraday } = await env.DB.prepare(
     'SELECT snapshot_at, strength FROM market_breadth_intraday WHERE tf = ? AND snapshot_at >= ? ORDER BY snapshot_at ASC'
   ).bind('1H', cutoff).all();
 
-  // ── Daily today/yesterday — the last two trading days that actually have
-  // data, grouped by the 17:00 NY session boundary (nyTradingDayKey) rather
-  // than calendar date, so weekends/holidays don't produce a stale or empty
-  // "yesterday". Reuses the intraday rows already fetched above — no new read.
+  // ── Daily trading-day array — up to 5 most recent NY trading days that
+  // actually have data, grouped by the 17:00 NY session boundary
+  // (nyTradingDayKey) rather than calendar date. Index 0 = most recent.
+  // Reuses the intraday rows already fetched above — no new read.
   const dayBuckets = new Map(); // trading-day key -> latest {t, strength} snapshot that day
   for (const row of intraday ?? []) {
     const key = nyTradingDayKey(row.snapshot_at);
@@ -2038,9 +2043,66 @@ router.get('/market/breadth', async (req, env) => {
       dayBuckets.set(key, { t: row.snapshot_at, strength: JSON.parse(row.strength) });
     }
   }
-  const orderedDays = [...dayBuckets.values()].sort((a, b) => b.t - a.t);
-  const todayEntry     = orderedDays[0] ?? null;
-  const yesterdayEntry = orderedDays[1] ?? null;
+  const DAY_LABEL_WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const DAY_LABEL_MONTHS   = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  function fmtDayLabel(dateKey) {
+    const [y, m, d] = dateKey.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    return `${DAY_LABEL_WEEKDAYS[dt.getUTCDay()]} ${DAY_LABEL_MONTHS[dt.getUTCMonth()]} ${dt.getUTCDate()}`;
+  }
+  const dailyArray = [...dayBuckets.entries()]
+    .sort((a, b) => b[1].t - a[1].t)
+    .slice(0, 5)
+    .map(([dateKey, v]) => ({ date: dateKey, label: fmtDayLabel(dateKey), strength: v.strength }));
+
+  // ── Weekly week array — up to 5 most recent ISO weeks (UTC Monday-Sunday
+  // boundary, same algorithm as compute-worker's computeWeeklyBreadth's
+  // getIsoWeekKey), averaged from the same intraday rows fetched above.
+  function getIsoWeekKey(tsMs) {
+    const d = new Date(tsMs);
+    const thursday = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+    thursday.setUTCDate(thursday.getUTCDate() - ((d.getUTCDay() + 6) % 7) + 3);
+    const yearStart = new Date(Date.UTC(thursday.getUTCFullYear(), 0, 1));
+    const weekNo = Math.ceil(((thursday - yearStart) / 86400000 + 1) / 7);
+    return `${thursday.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+  }
+  function getIsoWeekMondayMs(tsMs) {
+    const d = new Date(tsMs);
+    const thursday = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+    thursday.setUTCDate(thursday.getUTCDate() - ((d.getUTCDay() + 6) % 7) + 3);
+    return thursday.getTime() - 3 * 24 * 60 * 60 * 1000;
+  }
+  const WEEK_LABEL_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  function fmtWeekLabel(mondayMs) {
+    const d = new Date(mondayMs);
+    return `Week of ${WEEK_LABEL_MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
+  }
+  const nowWeekKey = getIsoWeekKey(Date.now());
+  const weekBuckets = new Map(); // weekKey -> { mondayMs, sums, counts }
+  for (const row of intraday ?? []) {
+    const key = getIsoWeekKey(row.snapshot_at);
+    if (!weekBuckets.has(key)) {
+      weekBuckets.set(key, { mondayMs: getIsoWeekMondayMs(row.snapshot_at), sums: {}, counts: {} });
+    }
+    const w = weekBuckets.get(key);
+    const strength = JSON.parse(row.strength);
+    for (const ccy of BREADTH_CURRENCIES) {
+      if (typeof strength[ccy] === 'number') {
+        w.sums[ccy]   = (w.sums[ccy] ?? 0) + strength[ccy];
+        w.counts[ccy] = (w.counts[ccy] ?? 0) + 1;
+      }
+    }
+  }
+  const weeksArray = [...weekBuckets.entries()]
+    .sort((a, b) => b[1].mondayMs - a[1].mondayMs)
+    .slice(0, 5)
+    .map(([weekKey, w]) => {
+      const strength = {};
+      for (const ccy of BREADTH_CURRENCIES) {
+        strength[ccy] = w.counts[ccy] > 0 ? parseFloat((w.sums[ccy] / w.counts[ccy]).toFixed(4)) : 0;
+      }
+      return { weekKey, label: fmtWeekLabel(w.mondayMs), strength, isCurrentWeek: weekKey === nowWeekKey };
+    });
 
   const weeklyLast = await env.DB.prepare(
     'SELECT strength, computed_at FROM market_breadth_cache WHERE tf = ?'
@@ -2056,11 +2118,11 @@ router.get('/market/breadth', async (req, env) => {
     computed_at: cache.computed_at,
     intraday:    (intraday ?? []).map(r => ({ t: r.snapshot_at, strength: JSON.parse(r.strength) })),
     correlation: corr ? JSON.parse(corr.matrix) : null,
-    daily: {
-      today:     todayEntry,
-      yesterday: yesterdayEntry,
-    },
+    daily:       dailyArray,
+    today:       dailyArray[0] ?? null,
+    yesterday:   dailyArray[1] ?? null,
     weekly: {
+      weeks: weeksArray,
       lastWeek: weeklyLast
         ? { strength: JSON.parse(weeklyLast.strength), computed_at: weeklyLast.computed_at }
         : null,
