@@ -1961,6 +1961,25 @@ router.post('/user/telegram/test', async (req, env) => {
 
 const BREADTH_CURRENCIES = ['EUR', 'GBP', 'USD', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD'];
 
+// Trading-day key for an arbitrary UTC ms timestamp, using the 17:00 NY
+// session boundary — same Intl shortOffset technique as nyDateAtHourToUTCms
+// above, just applied to convert an instant to NY wall-clock instead of the
+// other direction (date string + hour -> UTC ms).
+function nyTradingDayKey(tsMs) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    timeZoneName: 'shortOffset',
+  }).formatToParts(new Date(tsMs));
+  const offsetStr   = parts.find(p => p.type === 'timeZoneName').value;
+  const offsetHours = parseInt(offsetStr.replace('GMT', ''));
+  const nyWallClock = new Date(tsMs + offsetHours * 3600 * 1000);
+  // Session rolls over at 17:00 NY — hours >=17 belong to the next trading day.
+  if (nyWallClock.getUTCHours() >= 17) {
+    nyWallClock.setUTCDate(nyWallClock.getUTCDate() + 1);
+  }
+  return nyWallClock.toISOString().slice(0, 10); // YYYY-MM-DD trading-day key
+}
+
 // EBP cron trigger — public route, secured by X-Cron-Secret (cron-job.org)
 router.post('/cron/ebp', async (req, env) => {
   const origin = getOrigin(req);
@@ -2006,6 +2025,29 @@ router.get('/market/breadth', async (req, env) => {
     'SELECT snapshot_at, strength FROM market_breadth_intraday WHERE tf = ? AND snapshot_at >= ? ORDER BY snapshot_at ASC'
   ).bind('1H', cutoff).all();
 
+  // ── Daily today/yesterday — the last two trading days that actually have
+  // data, grouped by the 17:00 NY session boundary (nyTradingDayKey) rather
+  // than calendar date, so weekends/holidays don't produce a stale or empty
+  // "yesterday". Reuses the intraday rows already fetched above — no new read.
+  const dayBuckets = new Map(); // trading-day key -> latest {t, strength} snapshot that day
+  for (const row of intraday ?? []) {
+    const key = nyTradingDayKey(row.snapshot_at);
+    const existing = dayBuckets.get(key);
+    if (!existing || row.snapshot_at > existing.t) {
+      dayBuckets.set(key, { t: row.snapshot_at, strength: JSON.parse(row.strength) });
+    }
+  }
+  const orderedDays = [...dayBuckets.values()].sort((a, b) => b.t - a.t);
+  const todayEntry     = orderedDays[0] ?? null;
+  const yesterdayEntry = orderedDays[1] ?? null;
+
+  const weeklyLast = await env.DB.prepare(
+    'SELECT strength, computed_at FROM market_breadth_cache WHERE tf = ?'
+  ).bind('1W').first();
+  const weeklyCurrent = await env.DB.prepare(
+    'SELECT strength, computed_at FROM market_breadth_cache WHERE tf = ?'
+  ).bind('1W_current').first();
+
   return json({
     currencies:  BREADTH_CURRENCIES,
     heatmap:     JSON.parse(cache.heatmap),
@@ -2013,6 +2055,18 @@ router.get('/market/breadth', async (req, env) => {
     computed_at: cache.computed_at,
     intraday:    (intraday ?? []).map(r => ({ t: r.snapshot_at, strength: JSON.parse(r.strength) })),
     correlation: corr ? JSON.parse(corr.matrix) : null,
+    daily: {
+      today:     todayEntry,
+      yesterday: yesterdayEntry,
+    },
+    weekly: {
+      lastWeek: weeklyLast
+        ? { strength: JSON.parse(weeklyLast.strength), computed_at: weeklyLast.computed_at }
+        : null,
+      thisWeek: weeklyCurrent
+        ? { strength: JSON.parse(weeklyCurrent.strength), computed_at: weeklyCurrent.computed_at }
+        : null,
+    },
   }, 200, origin);
 });
 

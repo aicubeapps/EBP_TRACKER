@@ -400,6 +400,37 @@ async function computeWeeklyBreadth(env, debugLog) {
   `).bind(now, JSON.stringify(weeklyStrength)).run();
 
   debugLog.push(`weekly breadth ok: week ${latestCompleted.key}, ${latestCompleted.days.size} trading days`);
+
+  // ── Current in-progress ISO week — running average, no minimum
+  // trading-day threshold (unlike the completed-week logic above), so
+  // 'this week' reflects however many trading days have elapsed so far.
+  // Reuses the `weeks` bucketing already built above — no new D1 read.
+  const currentWeekKey = getIsoWeekKey(now);
+  const currentWeek = weeks.get(currentWeekKey);
+  if (currentWeek && currentWeek.rows.length > 0) {
+    const curSums = {}, curCounts = {};
+    for (const ccy of BREADTH_CURRENCIES) { curSums[ccy] = 0; curCounts[ccy] = 0; }
+    for (const row of currentWeek.rows) {
+      const strength = JSON.parse(row.strength);
+      for (const ccy of BREADTH_CURRENCIES) {
+        if (typeof strength[ccy] === 'number') { curSums[ccy] += strength[ccy]; curCounts[ccy] += 1; }
+      }
+    }
+    const currentWeeklyStrength = {};
+    for (const ccy of BREADTH_CURRENCIES) {
+      currentWeeklyStrength[ccy] = curCounts[ccy] > 0 ? parseFloat((curSums[ccy] / curCounts[ccy]).toFixed(4)) : 0;
+    }
+
+    await env.DB.prepare(`
+      INSERT INTO market_breadth_cache (tf, computed_at, heatmap, strength)
+      VALUES ('1W_current', ?, '{}', ?)
+      ON CONFLICT(tf) DO UPDATE SET computed_at = excluded.computed_at, strength = excluded.strength
+    `).bind(now, JSON.stringify(currentWeeklyStrength)).run();
+
+    debugLog.push(`current week breadth ok: week ${currentWeekKey}, ${currentWeek.days.size} trading days so far`);
+  } else {
+    debugLog.push(`current week breadth: no data yet for week ${currentWeekKey}`);
+  }
 }
 
 // ── Forex/Crypto SMA Cloud ──────────────────────────────────────
