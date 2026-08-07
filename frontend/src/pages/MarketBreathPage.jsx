@@ -141,11 +141,27 @@ export default function MarketBreathPage() {
     return () => clearInterval(iv);
   }, [load]);
 
+  // Weekly data only changes once per compute-worker cron cycle at most and
+  // is cheap to leave stale between the 60s intraday polls — refresh it on
+  // its own slower cadence instead of piggybacking on the 60s interval.
+  useEffect(() => {
+    const iv = setInterval(async () => {
+      try {
+        const token = await getToken();
+        const d = await api.get('/market/breadth', token);
+        setData(prev => (prev ? { ...prev, weekly: d.weekly } : d));
+      } catch {
+        // best-effort — the 60s effect above will pick up fresh data anyway
+      }
+    }, 14_400_000); // 4 hours
+    return () => clearInterval(iv);
+  }, [getToken]);
+
   if (loading) return <div className="shell"><p className="text-muted">Loading market breadth…</p></div>;
   if (error)   return <div className="shell"><p style={{ color: 'var(--bear)' }}>{error}</p></div>;
   if (!data)   return null;
 
-  const { intraday, computed_at } = data;
+  const { intraday, computed_at, daily, weekly } = data;
 
   // ── Session boundary ─────────────────────────────────────────────
   const sessionStart = getCurrentSessionStart();
@@ -167,15 +183,11 @@ export default function MarketBreathPage() {
     : [];
 
   // ── Chart 2: today's latest vs yesterday's last snapshot ─────────
-  const todayStrength = intraday && intraday.length > 0
-    ? intraday[intraday.length - 1].strength
-    : null;
-
-  const yesterdaySnapshot = (intraday ?? [])
-    .filter(s => s.t < sessionStart)
-    .sort((a, b) => b.t - a.t)[0] ?? null;
-
-  const yesterdayStrength = yesterdaySnapshot ? yesterdaySnapshot.strength : null;
+  // Sourced from the API's daily.today/daily.yesterday — server-side NY
+  // trading-day bucketing (not calendar date), so this stays correct across
+  // weekends/holidays instead of re-deriving it from the raw intraday list.
+  const todayStrength     = daily?.today?.strength ?? null;
+  const yesterdayStrength = daily?.yesterday?.strength ?? null;
 
   const dailyChartData = todayStrength
     ? [...CURRENCIES]
@@ -187,6 +199,21 @@ export default function MarketBreathPage() {
           delta: yesterdayStrength != null
             ? parseFloat(((todayStrength[c] ?? 0) - (yesterdayStrength[c] ?? 0)).toFixed(4))
             : null,
+        }))
+    : [];
+
+  // ── Chart 3: this week's running average vs last week's completed average
+  const thisWeekStrength = weekly?.thisWeek?.strength ?? null;
+  const lastWeekStrength = weekly?.lastWeek?.strength ?? null;
+
+  const weeklySortStrength = thisWeekStrength ?? lastWeekStrength;
+  const weeklyChartData = weeklySortStrength
+    ? [...CURRENCIES]
+        .sort((a, b) => (weeklySortStrength[b] ?? 0) - (weeklySortStrength[a] ?? 0))
+        .map(c => ({
+          currency: c,
+          thisWeek: thisWeekStrength ? (thisWeekStrength[c] ?? 0) : null,
+          lastWeek: lastWeekStrength ? (lastWeekStrength[c] ?? 0) : null,
         }))
     : [];
 
@@ -399,24 +426,124 @@ export default function MarketBreathPage() {
         )}
       </section>
 
-      {/* ── Chart 3: Weekly Strength placeholder ─────────────────── */}
+      {/* ── Chart 3: Weekly Strength ───────────────────────────────── */}
       <section style={cardStyle}>
         <div style={{ fontWeight: 600, fontSize: '1rem', color: 'var(--ink)', marginBottom: '0.25rem' }}>
           Weekly Strength
         </div>
         <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginBottom: '1rem' }}>
-          Previous week · Mon–Fri close
+          This Week vs Last Week · ISO week
         </div>
-        <div style={{
-          padding: '2rem',
-          textAlign: 'center',
-          color: 'var(--muted)',
-          border: '1px dashed var(--border)',
-          borderRadius: '8px',
-          fontSize: '0.875rem',
-        }}>
-          📅 Weekly data available after Friday NY 5:00 PM close
-        </div>
+        {weeklyChartData.length === 0 ? (
+          <p style={{ color: 'var(--muted)', fontSize: 13, padding: '16px 0', margin: 0 }}>
+            No weekly data yet.
+          </p>
+        ) : (
+          <>
+            <ResponsiveContainer width="100%" height={280}>
+              <BarChart layout="vertical" data={weeklyChartData}
+                        margin={{ top: 4, right: 60, bottom: 4, left: 0 }}>
+                <XAxis type="number"
+                       tick={{ fontSize: 10, fontFamily: 'var(--font-mono)', fill: 'var(--muted)' }}
+                       tickFormatter={v => v.toFixed(3)} />
+                <YAxis type="category" dataKey="currency" width={40}
+                       tick={{ fontSize: 11, fontFamily: 'var(--font-mono)', fill: 'var(--ink)' }} />
+                <ReferenceLine x={0} stroke="var(--border)" strokeWidth={2} />
+                <Tooltip
+                  contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 11 }}
+                  formatter={val => val?.toFixed(4) ?? '—'}
+                />
+                {thisWeekStrength && (
+                  <Bar dataKey="thisWeek" name="This Week" barSize={10}>
+                    {weeklyChartData.map((entry) => (
+                      <Cell
+                        key={`thisweek-${entry.currency}`}
+                        fill={CCY_COLORS[entry.currency] || '#888'}
+                      />
+                    ))}
+                    <LabelList dataKey="thisWeek" content={makeStrengthLabel(1, 600)} />
+                  </Bar>
+                )}
+                {lastWeekStrength && (
+                  <Bar dataKey="lastWeek" name="Last Week" barSize={10} opacity={0.35}>
+                    {weeklyChartData.map((entry) => (
+                      <Cell
+                        key={`lastweek-${entry.currency}`}
+                        fill={CCY_COLORS[entry.currency] || '#888'}
+                      />
+                    ))}
+                    <LabelList dataKey="lastWeek" content={makeStrengthLabel(0.5, 400)} />
+                  </Bar>
+                )}
+              </BarChart>
+            </ResponsiveContainer>
+            {!thisWeekStrength && (
+              <p style={{ fontSize: 11, color: 'var(--muted)', marginTop: '0.5rem', marginBottom: 0 }}>
+                Current week data not yet available
+              </p>
+            )}
+            <div style={{ marginTop: '0.75rem' }}>
+              {thisWeekStrength && (
+                <div style={{
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  gap: '0.75rem',
+                  justifyContent: 'center',
+                  marginBottom: '0.4rem',
+                }}>
+                  <span style={{ fontSize: '0.7rem', color: 'var(--muted)', marginRight: '0.25rem' }}>This Week:</span>
+                  {weeklyChartData.map(({ currency }) => (
+                    <span key={currency} style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '0.3rem',
+                      fontSize: '0.75rem',
+                      color: 'var(--ink)',
+                    }}>
+                      <span style={{
+                        width: 10,
+                        height: 10,
+                        borderRadius: '50%',
+                        backgroundColor: CCY_COLORS[currency] || '#888',
+                        display: 'inline-block',
+                      }} />
+                      {currency}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {lastWeekStrength && (
+                <div style={{
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  gap: '0.75rem',
+                  justifyContent: 'center',
+                }}>
+                  <span style={{ fontSize: '0.7rem', color: 'var(--muted)', marginRight: '0.25rem' }}>Last Week:</span>
+                  {weeklyChartData.map(({ currency }) => (
+                    <span key={currency} style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '0.3rem',
+                      fontSize: '0.75rem',
+                      color: 'var(--ink)',
+                    }}>
+                      <span style={{
+                        width: 10,
+                        height: 10,
+                        borderRadius: '50%',
+                        backgroundColor: CCY_COLORS[currency] || '#888',
+                        opacity: 0.35,
+                        display: 'inline-block',
+                      }} />
+                      {currency}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        )}
       </section>
 
     </div>

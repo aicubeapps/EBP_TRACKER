@@ -45,8 +45,8 @@ export function templateLtfOptions(htf) {
   return TEMPLATE_ALL_TFS.filter(tf => TEMPLATE_TF_RANK[tf] < TEMPLATE_TF_RANK[htf]);
 }
 
-// Forex/Crypto SMA Cloud (2026-08-05) — matches sweep-worker's
-// FOREX_SMA_VALID_TFS / FOREX_SMA_HTF_OPTIONS.
+// Forex/Crypto SMA Cloud — matches sweep-worker's FOREX_SMA_VALID_TFS /
+// FOREX_SMA_HTF_OPTIONS.
 export const FOREX_SMA_TFS = ['M15', 'M30', '1H', '4H'];
 export const FOREX_SMA_HTF_OPTIONS = {
   'M15': ['4H'],
@@ -54,8 +54,6 @@ export const FOREX_SMA_HTF_OPTIONS = {
   '1H':  ['4H', 'D'],
   '4H':  ['D'],
 };
-
-// Phase 4 Prompt A — shared exports across config panels.
 
 // Bias override TFs per asset type (BiasOverridePanel).
 export const FOREX_BIAS_TFS = ['W', 'D', '4H', '1H'];
@@ -77,16 +75,6 @@ export const HTF_OVERRIDE_OPTIONS = {
 export const TDI_TFS         = ['M15', 'M30'];
 export const NSE_SMA_TFS     = ['M5', 'M15', 'M30'];
 export const NSE_SMA_HTF_TFS = ['1H', 'D'];
-
-// Same shape as FOREX_SMA_HTF_OPTIONS above, kept as a separate named
-// export per Prompt A's spec rather than renaming the existing one (which
-// ForexSmaConfigPanel.jsx already imports and is out of scope here).
-export const FOREX_SMA_HTF_TFS = {
-  'M15': ['4H'],
-  'M30': ['4H'],
-  '1H':  ['4H', 'D'],
-  '4H':  ['D'],
-};
 
 // FVG rule options (T1/T2/T4 template config).
 export const FVG_RULE_OPTIONS = [

@@ -7,7 +7,6 @@ binding = "DB"
 database_name = "ebp-tracker-db"
 database_id = "b93b206a-5537-4d12-8c86-a4b2372aae7f"
 
-# EBP cron still via cron-job.org HTTP triggers (POST /cron/ebp).
-# Market breadth runs hourly at :05 via this CF native cron.
-[triggers]
-crons = ["5 * * * *"]
+# EBP cron via cron-job.org HTTP triggers (POST /cron/ebp).
+# Market breadth cron (was the CF native [triggers] cron here) has moved
+# to compute-worker.

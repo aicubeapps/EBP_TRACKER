@@ -1,0 +1,8 @@
+name = "admin-worker"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ebp-tracker-db"
+database_id = "b93b206a-5537-4d12-8c86-a4b2372aae7f"
