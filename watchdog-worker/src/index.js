@@ -99,6 +99,11 @@ async function getSignalSymbols(db) {
 // ============================================================
 const TF_TO_INTERVAL = { M15: '15min', M30: '30min', '1H': '1h', '4H': '4h' };
 
+// Forex 4H candles align to the NY trading-day boundary (17:00 NY), not a
+// fixed UTC schedule — this set of NY hours maps to a different set of UTC
+// hours depending on EDT/EST. Used by handleCandleFetchCron() below.
+const NY_4H_BOUNDARIES = [17, 21, 1, 5, 9, 13];
+
 // Copied verbatim from worker/src/ebp-worker.js — used by getClosedCandles.
 const INTERVAL_MS = {
   'M5':  5  * 60 * 1000,
@@ -815,6 +820,24 @@ Last run: ${lastRun?.created_at ?? 'unknown'}`;
 }
 
 // ============================================================
+// Forex closed-window gate — used by handleCandleFetchCron() below to
+// skip forex/commodity fetches while the forex market is shut (crypto
+// still trades 24/7, so it's fetched regardless).
+// ============================================================
+function isForexClosedWindow(nowMs) {
+  const nyStr = new Date(nowMs).toLocaleString('en-US', {
+    timeZone: 'America/New_York'
+  });
+  const ny = new Date(nyStr);
+  const day = ny.getDay();    // 0=Sun,1=Mon...5=Fri,6=Sat
+  const hour = ny.getHours();
+  if (day === 6) return true;               // all Saturday
+  if (day === 5 && hour >= 17) return true; // Friday 17:00+ NY
+  if (day === 0 && hour < 17) return true;  // Sunday before 17:00 NY
+  return false;
+}
+
+// ============================================================
 // Cron-gated orchestration
 // ============================================================
 async function runWatchdog(event, env) {
@@ -823,69 +846,123 @@ async function runWatchdog(event, env) {
   const db     = env.DB;
   const minute = new Date(event.scheduledTime).getUTCMinutes();
   const hour   = new Date(event.scheduledTime).getUTCHours();
-  const nyHour = getNewYorkHour(event.scheduledTime);
-  const nyDay  = getNewYorkDay(event.scheduledTime);
 
   // Daily summary digest — first tick after 08:00 UTC (plain UTC hour, not
-  // the NY-adjusted one everything else in this function uses).
+  // the NY-adjusted one everything else in this file uses).
   if ((minute === 0 || minute < 15) && hour === 8) {
     await sendWatchdogDailyDigest(env);
   }
 
-  // Forex 4H candles align to the NY trading-day boundary (17:00 NY — same
-  // anchor daily synthesis uses), not a fixed UTC schedule. This set of NY
-  // hours maps to a different set of UTC hours depending on EDT/EST —
-  // that's intentional, not a bug: the goal is 6 fires per NY day, not 6
-  // fires per UTC day.
-  const NY_4H_BOUNDARIES = [17, 21, 1, 5, 9, 13];
+  // ETL (signal-symbol fetch + breadth/DXY/synthesis) moved to
+  // POST /cron/candle-fetch and POST /cron/breadth-fetch — this native CF
+  // cron tick is now a near-zero-CPU heartbeat only.
+  await logWatchdog(db, 'info', 'Watchdog scheduled tick — heartbeat');
+}
 
-  const signalSymbols = await getSignalSymbols(db);
-  const keys = await getActiveKeys(db); // also logs if empty
+// ============================================================
+// POST /cron/candle-fetch — signal-symbol Twelve Data/Yahoo ETL, extracted
+// verbatim from the old runWatchdog() signal-fetch block. Driven by
+// cron-job.org (every 15 min) instead of the native CF scheduled() cron.
+// ============================================================
+async function handleCandleFetchCron(env) {
+  try {
+    const db     = env.DB;
+    const now    = Date.now();
+    const minute = new Date(now).getUTCMinutes();
+    const nyHour = getNewYorkHour(now);
 
-  // Assign dedicated key per TF by label — stable against exhaustion-driven
-  // index shifts (exhausted keys drop from the array, shifting [0],[1]…).
-  const keyM15 = keys.find(k => k.label === 'Twelve Data Key 1');
-  const keyM30 = keys.find(k => k.label === 'Twelve Data Key 2');
-  const key1H  = keys.find(k => k.label === 'Twelve Data Key 3');
-  const key4H  = keys.find(k => k.label === 'Twelve Data Key 4');
+    const signalSymbols = await getSignalSymbols(db);
+    const keys = await getActiveKeys(db); // also logs if empty
 
-  // Build parallel fetch array — only push TFs that are due this tick.
-  const fetches = [];
+    // Assign dedicated key per TF by label — stable against exhaustion-driven
+    // index shifts (exhausted keys drop from the array, shifting [0],[1]…).
+    const keyM15 = keys.find(k => k.label === 'Twelve Data Key 1');
+    const keyM30 = keys.find(k => k.label === 'Twelve Data Key 2');
+    const key1H  = keys.find(k => k.label === 'Twelve Data Key 3');
+    const key4H  = keys.find(k => k.label === 'Twelve Data Key 4');
 
-  fetches.push(
-    fetchSignalAndStore(signalSymbols, 'M15', keyM15 ? [keyM15] : [], env)
-  );
+    // Forex closed-window gate — crypto trades 24/7 so it's unaffected;
+    // forex/commodity symbols are skipped while the forex market is shut.
+    let symbolsForFetch = signalSymbols;
 
-  if (minute % 30 === 0) {
-    fetches.push(
-      fetchSignalAndStore(signalSymbols, 'M30', keyM30 ? [keyM30] : [], env)
-    );
-  }
+    if (isForexClosedWindow(now)) {
+      let forexSymbols    = signalSymbols;
+      let nonForexSymbols = [];
 
-  if (minute === 0) {
-    fetches.push(
-      fetchSignalAndStore(signalSymbols, '1H', key1H ? [key1H] : [], env)
-    );
-  }
+      if (signalSymbols.length > 0) {
+        const placeholders = signalSymbols.map(() => '?').join(',');
+        const { results: cryptoRows } = await db.prepare(
+          `SELECT symbol FROM user_assets WHERE symbol IN (${placeholders}) AND asset_type = 'crypto'`
+        ).bind(...signalSymbols).all();
+        const cryptoSet = new Set((cryptoRows ?? []).map(r => r.symbol));
+        nonForexSymbols = signalSymbols.filter(s => cryptoSet.has(s));
+        forexSymbols    = signalSymbols.filter(s => !cryptoSet.has(s));
+      }
 
-  if (minute === 0 && NY_4H_BOUNDARIES.includes(nyHour)) {
-    fetches.push(
-      fetchSignalAndStore(signalSymbols, '4H', key4H ? [key4H] : [], env)
-    );
-  }
+      if (nonForexSymbols.length === 0) {
+        await logWatchdog(db, 'info', 'Forex closed + no crypto symbols — nothing to fetch');
+        return json({ ok: true, symbols: 0, tfs: [] });
+      }
 
-  // Only the signal TF-fetch block is skipped when there's no signal pool —
-  // breadth (Yahoo, unrelated to user_assets/configs) and the hourly tasks
-  // below always run on schedule regardless.
-  if (signalSymbols.length === 0) {
-    await logWatchdog(db, 'warning', 'No active signal symbols — skipping');
-  } else {
+      await logWatchdog(db, 'info',
+        `Forex closed window — skipping ${forexSymbols.length} forex symbols, fetching ${nonForexSymbols.length} crypto symbols only`);
+      symbolsForFetch = nonForexSymbols;
+    }
+
+    if (symbolsForFetch.length === 0) {
+      await logWatchdog(db, 'warning', 'No active signal symbols — skipping');
+      return json({ ok: true, symbols: 0, tfs: [] });
+    }
+
+    // Build parallel fetch array — only push TFs that are due this tick.
+    const fetches = [];
+    const tfs     = [];
+
+    fetches.push(fetchSignalAndStore(symbolsForFetch, 'M15', keyM15 ? [keyM15] : [], env));
+    tfs.push('M15');
+
+    if (minute % 30 === 0) {
+      fetches.push(fetchSignalAndStore(symbolsForFetch, 'M30', keyM30 ? [keyM30] : [], env));
+      tfs.push('M30');
+    }
+
+    if (minute === 0) {
+      fetches.push(fetchSignalAndStore(symbolsForFetch, '1H', key1H ? [key1H] : [], env));
+      tfs.push('1H');
+    }
+
+    if (minute === 0 && NY_4H_BOUNDARIES.includes(nyHour)) {
+      fetches.push(fetchSignalAndStore(symbolsForFetch, '4H', key4H ? [key4H] : [], env));
+      tfs.push('4H');
+    }
+
     await Promise.all(fetches);
-  }
 
-  if (minute === 0) {
-    // Breadth from Yahoo — runs after signal fetches, no credit limits to
-    // worry about, just yieldToRuntime() between symbols.
+    return json({ ok: true, symbols: symbolsForFetch.length, tfs });
+  } catch (err) {
+    console.error('Candle fetch cron error:', err.message);
+    return json({ ok: false, error: err.message }, 500);
+  }
+}
+
+// ============================================================
+// POST /cron/breadth-fetch — breadth/DXY/daily+weekly synthesis ETL,
+// extracted verbatim from the old runWatchdog() minute===0 block. Driven by
+// cron-job.org (hourly) instead of the native CF scheduled() cron. No
+// weekend gate — breadth/DXY/synthesis run regardless of forex market
+// hours, matching prior behaviour.
+// ============================================================
+async function handleBreadthFetchCron(env) {
+  try {
+    const db  = env.DB;
+    const now = Date.now();
+    const nyHour = getNewYorkHour(now);
+    const nyDay  = getNewYorkDay(now);
+
+    const signalSymbols = await getSignalSymbols(db);
+
+    // Breadth from Yahoo — no credit limits to worry about, just
+    // yieldToRuntime() between symbols.
     await fetchBreadthFromYahoo(BREADTH_SYMBOLS, env);
 
     // DXY synthetic — must run after breadth so constituent 1H candles are
@@ -904,6 +981,11 @@ async function runWatchdog(event, env) {
     if (nyDay === 5 && nyHour === 17) {
       await attemptWeeklySynthesis([...signalSymbols, 'DXY'], env);
     }
+
+    return json({ ok: true });
+  } catch (err) {
+    console.error('Breadth fetch cron error:', err.message);
+    return json({ ok: false, error: err.message }, 500);
   }
 }
 
@@ -1316,6 +1398,23 @@ export default {
         console.error('Watchdog health check error:', err.message);
         return json({ error: err.message }, 500);
       }
+    }
+
+    // Signal-symbol candle ETL — extracted from the native scheduled() cron
+    // to keep that handler's CPU time near-zero. cron-job.org, every 15 min.
+    if (url.pathname === '/cron/candle-fetch' && request.method === 'POST') {
+      if (request.headers.get('X-Cron-Secret') !== env.CRON_SECRET) {
+        return json({ error: 'Forbidden' }, 401);
+      }
+      return await handleCandleFetchCron(env);
+    }
+
+    // Breadth/DXY/daily+weekly synthesis ETL — same extraction, hourly.
+    if (url.pathname === '/cron/breadth-fetch' && request.method === 'POST') {
+      if (request.headers.get('X-Cron-Secret') !== env.CRON_SECRET) {
+        return json({ error: 'Forbidden' }, 401);
+      }
+      return await handleBreadthFetchCron(env);
     }
 
     return json({ error: 'Not found' }, 404);
