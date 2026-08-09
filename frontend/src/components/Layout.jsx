@@ -5,7 +5,7 @@ import { useUser } from '../hooks/useUser';
 import { daysRemaining, capitalise } from '../lib/utils';
 import ExpiryBanner from './ExpiryBanner';
 import api from '../lib/api';
-import logoSrc from '../assets/logo.svg';
+import logoSrc from '../assets/logo.jpeg';
 
 function fmtTZ(ts, tz, locale) {
   if (!ts) return null;
