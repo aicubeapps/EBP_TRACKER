@@ -295,7 +295,7 @@ async function fetchYahooFinance(symbol, tf, outputSize = 50) {
   const interval    = toYahooInterval(tf);
   const rangeMap    = {
     'M5': '1d', 'M15': '5d', 'M30': '5d',
-    '1H': '5d', '4H': '60d', 'D': '1mo', 'W': '3mo',
+    '1H': '21d', '4H': '60d', 'D': '1mo', 'W': '3mo',
   };
   const range = rangeMap[tf] ?? '5d';
   const url   = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=${interval}&range=${range}`;
@@ -473,6 +473,13 @@ async function writeCandleCache(db, symbol, tf, candles) {
   `).bind(symbol, tf, JSON.stringify(candles), new Date().toISOString()).run();
 }
 
+async function writeYahooCandleCache(db, symbol, tf, candles) {
+  await db.prepare(`
+    INSERT OR REPLACE INTO yahoo_candle_cache (symbol, tf, candles_json, fetched_at)
+    VALUES (?, ?, ?, ?)
+  `).bind(symbol, tf, JSON.stringify(candles), new Date().toISOString()).run();
+}
+
 // Fetches one TF for the signal-symbol pool via the parallel chunk
 // architecture, falling back to Yahoo per-symbol if every Twelve Data key
 // is exhausted (checked fresh via getActiveTwelveDataKey, not the possibly
@@ -522,10 +529,10 @@ async function fetchBreadthFromYahoo(symbols, env) {
   let successCount = 0;
   for (const symbol of symbols) {
     try {
-      const raw    = await fetchYahooFinance(symbol, '1H', 50);
+      const raw    = await fetchYahooFinance(symbol, '1H', 510);
       const closed = getClosedCandles(raw, INTERVAL_MS['1H']);
       if (closed.length >= 20) {
-        await writeCandleCache(env.DB, symbol, '1H', closed);
+        await writeYahooCandleCache(env.DB, symbol, '1H', closed);
         successCount++;
       } else {
         await logWatchdog(env.DB, 'warning', `${symbol} 1H (breadth): only ${closed.length} closed candles (<20) — skipping D1 write`);
@@ -539,60 +546,267 @@ async function fetchBreadthFromYahoo(symbols, env) {
 }
 
 // ============================================================
-// Synthetic DXY — ICE formula computed from 1H breadth candles.
-// Weights: EUR/USD −0.576, USD/JPY +0.136, GBP/USD −0.119,
-//          USD/CAD +0.091, USD/SEK +0.042, USD/CHF +0.036
-// Called after fetchBreadthFromYahoo so constituent candles are fresh.
+// Synthetic DXY — ICE formula, row-per-candle accumulator design.
+// On cold start: seeds dxy_candle_cache from 21d of yahoo_candle_cache.
+// On normal run: appends one 1H row from the latest closed bar.
+// Signal workers read candle_cache blobs written by writeDXYBlobsToCache.
 // ============================================================
-async function computeSyntheticDXY(env) {
-  const CONSTITUENTS = ['EUR/USD', 'USD/JPY', 'GBP/USD', 'USD/CAD', 'USD/SEK', 'USD/CHF'];
-  const WEIGHTS = {
-    'EUR/USD': -0.576, 'USD/JPY':  0.136, 'GBP/USD': -0.119,
-    'USD/CAD':  0.091, 'USD/SEK':  0.042, 'USD/CHF':  0.036,
-  };
-  const K = 50.14348112;
+async function computeSyntheticDXY(db, nowMs) {
+  const CONSTITUENTS = [
+    { symbol: 'EUR/USD', exponent: -0.576 },
+    { symbol: 'USD/JPY', exponent:  0.136 },
+    { symbol: 'GBP/USD', exponent: -0.119 },
+    { symbol: 'USD/CAD', exponent:  0.091 },
+    { symbol: 'USD/SEK', exponent:  0.042 },
+    { symbol: 'USD/CHF', exponent:  0.036 },
+  ];
+  const ICE_FACTOR = 50.14348112;
 
-  const byTime = {};
-  for (const sym of CONSTITUENTS) {
-    const row = await env.DB.prepare(
-      'SELECT candles_json FROM candle_cache WHERE symbol = ? AND tf = ?'
-    ).bind(sym, '1H').first();
-    if (!row) {
-      await logWatchdog(env.DB, 'warning', `computeSyntheticDXY: missing 1H candles for ${sym} — skipping`);
-      return;
-    }
-    for (const c of JSON.parse(row.candles_json)) {
-      if (!byTime[c.time]) byTime[c.time] = {};
-      byTime[c.time][sym] = c;
-    }
+  // --- Step 1: detect cold start ---
+  const countRow = await db.prepare(
+    'SELECT COUNT(*) as cnt FROM dxy_candle_cache WHERE tf=?'
+  ).bind('1H').first();
+  const isColdStart = !countRow || countRow.cnt === 0;
+
+  if (isColdStart) {
+    return await seedDXYHistory(db, CONSTITUENTS, ICE_FACTOR);
   }
 
-  // For each OHLC field, compute DXY using the appropriate price from each
-  // constituent. For high: use low of negatively-weighted pairs (they pull DXY
-  // down when high) and high of positively-weighted pairs. Reverse for low.
-  const dxy = (prices, getVal) => {
-    let v = K;
-    for (const sym of CONSTITUENTS) v *= Math.pow(getVal(prices[sym], WEIGHTS[sym]), WEIGHTS[sym]);
-    return parseFloat(v.toFixed(5));
-  };
+  // --- Step 2: normal run — compute single latest closed 1H candle ---
+  const latest = {};
+  for (const { symbol } of CONSTITUENTS) {
+    const row = await db.prepare(
+      'SELECT candles_json FROM yahoo_candle_cache WHERE symbol=? AND tf=?'
+    ).bind(symbol, '1H').first();
+    if (!row) {
+      await logWatchdog(db, 'warning',
+        `computeSyntheticDXY: missing yahoo_candle_cache for ${symbol}`);
+      return;
+    }
+    const candles = JSON.parse(row.candles_json);
+    if (!candles || candles.length === 0) {
+      await logWatchdog(db, 'warning',
+        `computeSyntheticDXY: empty candles for ${symbol}`);
+      return;
+    }
+    latest[symbol] = candles[0]; // newest closed candle
+  }
 
-  const candles = Object.entries(byTime)
-    .filter(([, p]) => CONSTITUENTS.every(s => p[s]))
-    .sort(([a], [b]) => Number(a) - Number(b))
-    .map(([t, p]) => ({
-      time:  Number(t),
-      open:  dxy(p, c => c.open),
-      close: dxy(p, c => c.close),
-      high:  dxy(p, (c, w) => w < 0 ? c.low  : c.high),
-      low:   dxy(p, (c, w) => w < 0 ? c.high : c.low),
-    }));
+  // Verify all constituents share the same latest timestamp
+  const times = CONSTITUENTS.map(c => latest[c.symbol].time);
+  const allSameTime = times.every(t => t === times[0]);
+  if (!allSameTime) {
+    await logWatchdog(db, 'warning',
+      `computeSyntheticDXY: constituent timestamp mismatch — ${JSON.stringify(times)}`);
+    // Still proceed with the most recent common timestamp
+  }
 
-  if (candles.length < 20) {
-    await logWatchdog(env.DB, 'warning', `computeSyntheticDXY: only ${candles.length} common candles — skipping`);
+  // Compute DXY OHLC for this single candle using ICE formula
+  const dxyCandle = computeDXYCandle(
+    CONSTITUENTS, latest, ICE_FACTOR,
+    times[0] // use first constituent's time as candle_time
+  );
+
+  // --- Step 3: append to dxy_candle_cache ---
+  await db.prepare(`
+    INSERT OR IGNORE INTO dxy_candle_cache (tf, candle_time, open, high, low, close, created_at)
+    VALUES ('1H', ?, ?, ?, ?, ?, ?)
+  `).bind(
+    dxyCandle.time,
+    dxyCandle.open, dxyCandle.high, dxyCandle.low, dxyCandle.close,
+    new Date(nowMs).toISOString()
+  ).run();
+
+  // --- Step 4: write blobs to candle_cache for signal workers ---
+  await writeDXYBlobsToCache(db, ['1H']);
+}
+
+// Computes a single DXY OHLC candle from per-constituent latest bars
+function computeDXYCandle(constituents, latestMap, iceFactor, candleTime) {
+  let open = iceFactor, high = iceFactor, low = iceFactor, close = iceFactor;
+  for (const { symbol, exponent } of constituents) {
+    const c = latestMap[symbol];
+    if (exponent < 0) {
+      open  *= Math.pow(c.open,  exponent);
+      high  *= Math.pow(c.low,   exponent); // inverted for negative exponent
+      low   *= Math.pow(c.high,  exponent); // inverted for negative exponent
+      close *= Math.pow(c.close, exponent);
+    } else {
+      open  *= Math.pow(c.open,  exponent);
+      high  *= Math.pow(c.high,  exponent);
+      low   *= Math.pow(c.low,   exponent);
+      close *= Math.pow(c.close, exponent);
+    }
+  }
+  return { time: candleTime, open, high, low, close };
+}
+
+// Reads latest 50 rows from dxy_candle_cache for each TF,
+// serialises as blob, writes to candle_cache for signal workers
+async function writeDXYBlobsToCache(db, tfs) {
+  for (const tf of tfs) {
+    const rows = await db.prepare(`
+      SELECT candle_time as time, open, high, low, close
+      FROM dxy_candle_cache
+      WHERE tf=?
+      ORDER BY candle_time DESC
+      LIMIT 50
+    `).bind(tf).all();
+    if (!rows.results || rows.results.length === 0) continue;
+    await db.prepare(`
+      INSERT OR REPLACE INTO candle_cache (symbol, tf, candles_json, fetched_at)
+      VALUES ('DXY', ?, ?, ?)
+    `).bind(tf, JSON.stringify(rows.results), new Date().toISOString()).run();
+  }
+}
+
+// Cold start: seeds dxy_candle_cache from 21d of yahoo_candle_cache 1H data
+async function seedDXYHistory(db, constituents, iceFactor) {
+  const allCandles = {};
+  for (const { symbol } of constituents) {
+    const row = await db.prepare(
+      'SELECT candles_json FROM yahoo_candle_cache WHERE symbol=? AND tf=?'
+    ).bind(symbol, '1H').first();
+    if (!row) return;
+    allCandles[symbol] = JSON.parse(row.candles_json);
+  }
+
+  const timeSets = constituents.map(({ symbol }) =>
+    new Set(allCandles[symbol].map(c => c.time))
+  );
+  const commonTimes = [...timeSets[0]].filter(t =>
+    timeSets.every(s => s.has(t))
+  ).sort((a, b) => b - a); // newest first
+
+  if (commonTimes.length < 10) {
+    await logWatchdog(db, 'warning',
+      `seedDXYHistory: only ${commonTimes.length} common timestamps — aborting seed`);
     return;
   }
 
-  await writeCandleCache(env.DB, 'DXY', '1H', candles);
+  const indexMaps = {};
+  for (const { symbol } of constituents) {
+    indexMaps[symbol] = new Map(allCandles[symbol].map(c => [c.time, c]));
+  }
+
+  const inserts = [];
+  const now = new Date().toISOString();
+  for (const t of commonTimes) {
+    const latestMap = {};
+    for (const { symbol } of constituents) {
+      latestMap[symbol] = indexMaps[symbol].get(t);
+    }
+    const dxy = computeDXYCandle(constituents, latestMap, iceFactor, t);
+    inserts.push(
+      db.prepare(`
+        INSERT OR IGNORE INTO dxy_candle_cache (tf, candle_time, open, high, low, close, created_at)
+        VALUES ('1H', ?, ?, ?, ?, ?, ?)
+      `).bind(t, dxy.open, dxy.high, dxy.low, dxy.close, now)
+    );
+  }
+
+  await db.batch(inserts);
+  await logWatchdog(db, 'info',
+    `seedDXYHistory: seeded ${inserts.length} x 1H DXY candles from 21d history`);
+
+  await synthesiseDXY4H(db);
+  await synthesiseDXYDaily(db);
+  await synthesiseDXYWeekly(db);
+
+  await writeDXYBlobsToCache(db, ['1H', '4H', 'Daily', 'Weekly']);
+}
+
+// Runs at every 4H boundary — groups last 4 x 1H rows into one 4H candle
+async function synthesiseDXY4H(db) {
+  const rows = await db.prepare(`
+    SELECT candle_time, open, high, low, close
+    FROM dxy_candle_cache WHERE tf='1H'
+    ORDER BY candle_time DESC LIMIT 4
+  `).all();
+  if (!rows.results || rows.results.length < 4) return;
+
+  const candles = rows.results;
+  const candle4H = {
+    time:  candles[candles.length - 1].candle_time,
+    open:  candles[candles.length - 1].open,
+    high:  Math.max(...candles.map(c => c.high)),
+    low:   Math.min(...candles.map(c => c.low)),
+    close: candles[0].close,
+  };
+
+  await db.prepare(`
+    INSERT OR IGNORE INTO dxy_candle_cache (tf, candle_time, open, high, low, close, created_at)
+    VALUES ('4H', ?, ?, ?, ?, ?, ?)
+  `).bind(
+    candle4H.time,
+    candle4H.open, candle4H.high, candle4H.low, candle4H.close,
+    new Date().toISOString()
+  ).run();
+}
+
+// Runs at 17:00 NY daily close — groups current trading day's 1H rows
+async function synthesiseDXYDaily(db) {
+  const now = Date.now();
+  const nyNowHour = getNewYorkHour(now);
+
+  const tradingDayOpenMs = nyNowHour >= 17
+    ? now - ((nyNowHour - 17) * 3600000)
+    : now - ((nyNowHour + 7) * 3600000);
+
+  const rows = await db.prepare(`
+    SELECT candle_time, open, high, low, close
+    FROM dxy_candle_cache WHERE tf='1H'
+    AND candle_time >= ?
+    ORDER BY candle_time ASC
+  `).bind(tradingDayOpenMs).all();
+
+  if (!rows.results || rows.results.length < 20) return;
+
+  const candles = rows.results;
+  const dailyCandle = {
+    time:  candles[0].candle_time,
+    open:  candles[0].open,
+    high:  Math.max(...candles.map(c => c.high)),
+    low:   Math.min(...candles.map(c => c.low)),
+    close: candles[candles.length - 1].close,
+  };
+
+  await db.prepare(`
+    INSERT OR IGNORE INTO dxy_candle_cache (tf, candle_time, open, high, low, close, created_at)
+    VALUES ('Daily', ?, ?, ?, ?, ?, ?)
+  `).bind(
+    dailyCandle.time,
+    dailyCandle.open, dailyCandle.high, dailyCandle.low, dailyCandle.close,
+    new Date().toISOString()
+  ).run();
+}
+
+// Runs at Friday 17:00 NY — groups current week's Daily rows
+async function synthesiseDXYWeekly(db) {
+  const rows = await db.prepare(`
+    SELECT candle_time, open, high, low, close
+    FROM dxy_candle_cache WHERE tf='Daily'
+    ORDER BY candle_time DESC LIMIT 5
+  `).all();
+  if (!rows.results || rows.results.length < 5) return;
+
+  const candles = [...rows.results].reverse(); // oldest first
+  const weeklyCandle = {
+    time:  candles[0].candle_time,
+    open:  candles[0].open,
+    high:  Math.max(...candles.map(c => c.high)),
+    low:   Math.min(...candles.map(c => c.low)),
+    close: candles[candles.length - 1].close,
+  };
+
+  await db.prepare(`
+    INSERT OR IGNORE INTO dxy_candle_cache (tf, candle_time, open, high, low, close, created_at)
+    VALUES ('Weekly', ?, ?, ?, ?, ?, ?)
+  `).bind(
+    weeklyCandle.time,
+    weeklyCandle.open, weeklyCandle.high, weeklyCandle.low, weeklyCandle.close,
+    new Date().toISOString()
+  ).run();
 }
 
 // ============================================================
@@ -822,10 +1036,11 @@ async function runWatchdog(event, env) {
   _watchdogAlertEnv = env;
 
   const db     = env.DB;
-  const minute = new Date(event.scheduledTime).getUTCMinutes();
-  const hour   = new Date(event.scheduledTime).getUTCHours();
-  const nyHour = getNewYorkHour(event.scheduledTime);
-  const nyDay  = getNewYorkDay(event.scheduledTime);
+  const now    = event.scheduledTime;
+  const minute = new Date(now).getUTCMinutes();
+  const hour   = new Date(now).getUTCHours();
+  const nyHour = getNewYorkHour(now);
+  const nyDay  = getNewYorkDay(now);
 
   // Daily summary digest — first tick after 08:00 UTC (plain UTC hour, not
   // the NY-adjusted one everything else in this function uses).
@@ -890,9 +1105,30 @@ async function runWatchdog(event, env) {
     await fetchBreadthFromYahoo(BREADTH_SYMBOLS, env);
 
     // DXY synthetic — must run after breadth so constituent 1H candles are
-    // fresh (EUR/USD, USD/JPY, GBP/USD, USD/CAD, USD/SEK, USD/CHF all live
-    // in BREADTH_SYMBOLS and are written by fetchBreadthFromYahoo above).
-    await computeSyntheticDXY(env);
+    // fresh in yahoo_candle_cache (EUR/USD, USD/JPY, GBP/USD, USD/CAD, USD/SEK,
+    // USD/CHF all live in BREADTH_SYMBOLS and are written by fetchBreadthFromYahoo).
+    await computeSyntheticDXY(db, now);
+
+    // 4H synthesis — only at 4H boundary hours (NY 17/21/01/05/09/13)
+    if (NY_4H_BOUNDARIES.includes(nyHour)) {
+      await synthesiseDXY4H(db);
+      await writeDXYBlobsToCache(db, ['4H']);
+    }
+
+    // Daily synthesis — only at 17:00 NY close
+    if (nyHour === 17) {
+      await synthesiseDXYDaily(db);
+      await writeDXYBlobsToCache(db, ['Daily']);
+    }
+
+    // Weekly synthesis — only at Friday 17:00 NY
+    if (nyHour === 17 && nyDay === 5) {
+      await synthesiseDXYWeekly(db);
+      await writeDXYBlobsToCache(db, ['Weekly']);
+    }
+
+    // Always write 1H blob after every run
+    await writeDXYBlobsToCache(db, ['1H']);
 
     // Daily/weekly synthesis includes DXY so its daily/weekly candles are
     // built alongside signal-symbol candles. Market Breadth still reads
