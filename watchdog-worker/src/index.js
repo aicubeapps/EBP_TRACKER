@@ -1907,6 +1907,23 @@ export default {
       return await handleBreadthFetchCron(env);
     }
 
+    // EOD operations report — driven by cron-job.org (weekdays, 21:05 UTC).
+    // sendWatchdogDailyDigest() itself is unchanged; this route is now the
+    // only way it's invoked, since the native scheduled() cron's own
+    // NY-17:00 gate in runWatchdog() is dormant with no [triggers] entry.
+    if (url.pathname === '/cron/daily-digest' && request.method === 'POST') {
+      if (request.headers.get('X-Cron-Secret') !== env.CRON_SECRET) {
+        return json({ error: 'Forbidden' }, 401);
+      }
+      try {
+        await sendWatchdogDailyDigest(env);
+        return json({ ok: true });
+      } catch (err) {
+        console.error('Daily digest cron error:', err.message);
+        return json({ ok: false, error: err.message }, 500);
+      }
+    }
+
     return json({ error: 'Not found' }, 404);
   },
 
