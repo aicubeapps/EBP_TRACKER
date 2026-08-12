@@ -1233,7 +1233,9 @@ async function handleBreadthFetchCron(env) {
     // dedicated Daily/Weekly rows above; both are real, intentionally
     // parallel outputs. Market Breadth itself reads yahoo_candle_cache
     // directly (compute-worker), not candle_cache.
-    await attemptDailySynthesis([...signalSymbols, 'DXY'], env);
+    if (nyHour === 17) {
+      await attemptDailySynthesis([...signalSymbols, 'DXY'], env);
+    }
 
     await cleanupApiCallLog(db);
 
