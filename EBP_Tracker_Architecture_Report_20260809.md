@@ -1,6 +1,6 @@
 # EBP Tracker — Architecture & State Report
 
-**Generated:** 2026-08-02, entirely from source code inspection and live D1 queries. **Updated:** 2026-08-07, following a same-day worker-topology refactor and production deployment (commit `d20aea3`, tag `deploy-2026-08-07-worker-split`) — two new workers were split out (`compute-worker`, `admin-worker`), `nse-worker` and `watchdog-worker` each absorbed routes previously owned by `worker/src/ebp-worker.js`, and all six workers were redeployed and smoke-tested against live traffic. Sections 1, 2, 5, 8, 9, and 10 were substantially rewritten to reflect the new topology; Sections 3, 4, 6, and 7 are carried forward from the 2026-08-02 audit largely unchanged (the database schema, detection algorithms, and frontend logic were not touched by this refactor) with only the route-ownership references corrected. Every specific fact newly stated below (line counts, route lists, configured secrets, cron-job.org job list) was re-verified directly against source and live infrastructure on 2026-08-07, not carried forward from the prior audit. Spec/roadmap docs were consulted only to flag divergences (marked ⚠️ DIVERGENCE), never as a source of truth for "what exists." Anything described in a code comment but not actually implemented is marked "documented but not implemented." **Further updated same day (2026-08-07, second session):** Weekly Market Breadth was implemented end-to-end (compute → API → frontend), and the `main`/`coding` branch divergence created by the worker-split refactor landing only on `main` was reconciled by merge. See new **Section 11** for full detail; Section 9's prior note calling Weekly Market Breadth "still-nonexistent" is superseded by that section and struck through in place below.
+**Generated:** 2026-08-02, entirely from source code inspection and live D1 queries. **Updated:** 2026-08-07, following a same-day worker-topology refactor and production deployment (commit `d20aea3`, tag `deploy-2026-08-07-worker-split`) — two new workers were split out (`compute-worker`, `admin-worker`), `nse-worker` and `watchdog-worker` each absorbed routes previously owned by `worker/src/ebp-worker.js`, and all six workers were redeployed and smoke-tested against live traffic. Sections 1, 2, 5, 8, 9, and 10 were substantially rewritten to reflect the new topology; Sections 3, 4, 6, and 7 are carried forward from the 2026-08-02 audit largely unchanged (the database schema, detection algorithms, and frontend logic were not touched by this refactor) with only the route-ownership references corrected. Every specific fact newly stated below (line counts, route lists, configured secrets, cron-job.org job list) was re-verified directly against source and live infrastructure on 2026-08-07, not carried forward from the prior audit. Spec/roadmap docs were consulted only to flag divergences (marked ⚠️ DIVERGENCE), never as a source of truth for "what exists." Anything described in a code comment but not actually implemented is marked "documented but not implemented." **Further updated same day (2026-08-07, second session):** Weekly Market Breadth was implemented end-to-end (compute → API → frontend), and the `main`/`coding` branch divergence created by the worker-split refactor landing only on `main` was reconciled by merge. See **Section 11** for full detail; Section 9's prior note calling Weekly Market Breadth "still-nonexistent" is superseded by that section and struck through in place below. **Further updated 2026-08-09:** the site logo/favicon were replaced; a stale native Cloudflare cron trigger left over from the 2026-08-07 split (registered live on `ebp-tracker-worker` despite `wrangler.toml` no longer declaring it) was discovered and deleted; and `watchdog-worker`'s ETL (Twelve Data/Yahoo candle fetch, breadth/DXY/synthesis) was extracted from its native `scheduled()` cron into two new cron-job.org-triggered HTTP routes, retiring `watchdog-worker`'s native CF cron trigger entirely. See new **Section 12** for full detail, including what was and wasn't independently verified. **Further updated 2026-08-12:** a full verification pass compared this report, the `main` branch source, and live production (Cloudflare deployments, D1, and all 6 `/health` endpoints) directly against each other — no claim below was carried forward from memory. Stale line counts in Section 1's repo-structure table (left un-synced by Sections 11/12) were corrected in place. A critical, unresolved divergence was found: `watchdog-worker`'s live deployed code is materially different from anything ever committed to this repository — see **Section 13**, and the new top item in Section 9 — and must be reconciled before any further edits are made to `watchdog-worker/src/index.js` in this repo.
 
 Legend: 🔶 UNTESTED = exists in code but not exercised on live data as of this audit. 🐛 BUG RISK = a concrete failure mode identified in the code. ⚠️ DIVERGENCE = contradicts a roadmap/reference doc. 🆕 = new or materially changed since 2026-08-02.
 
@@ -25,31 +25,40 @@ Legend: 🔶 UNTESTED = exists in code but not exercised on live data as of this
 ```
 EBP_TRACKER/
 ├── worker/                         — EBP Worker + main REST API (Cloudflare Worker "ebp-tracker-worker")
-│   ├── src/ebp-worker.js           2241 lines  — routes, EBP/FVG/Swing/MSS detection, T1-T3 chain step 1
-│   │                                (was 2578 lines on 2026-08-02; -337 net despite this session removing far
-│   │                                 more than that in raw code — several routes/detection additions from the
-│   │                                 interim SMA Cloud revamp landed between the two audits)
+│   ├── src/ebp-worker.js           2358 lines  🆕 (2026-08-12 correction) — was reported 2241; grew via the
+│   │                                08-07 second-session Weekly Breadth work (Section 11.1) and commit `fd62ff7`
+│   │                                (08-08, market breadth historical selectors) — neither growth had been
+│   │                                folded back into this table until now. **`fd62ff7` is committed on `main`
+│   │                                but not yet deployed — see Section 13.1; production is still running the
+│   │                                pre-`fd62ff7` build.**
 │   └── wrangler.toml                 11 lines  — [triggers] native cron block removed 2026-08-07 (breadth moved out)
 ├── sweep-worker/                   — Sweep Worker (Cloudflare Worker "sweep-detector")
 │   ├── src/index.js                 119 lines  — HTTP entrypoint, cron-only; POST /cron/sma route removed 2026-08-07
-│   ├── src/sweep-cron.js           1139 lines  — Sweep/MSS/FVG detection, T1/T2/T3(step2-3)/T4 chains
+│   ├── src/sweep-cron.js           1156 lines  🆕 (2026-08-12 correction, was reported 1139)
 │   │                                (Forex/Crypto SMA Cloud cron logic, ~630 lines, moved out to compute-worker)
 │   └── wrangler.toml                 11 lines
 ├── nse-worker/                     — NSE Worker (Cloudflare Worker "nse-tracker")
 │   ├── src/index.js                 406 lines  🆕 — was 62 lines; gained /nse/status, /nse/search, and all 4
 │   │                                /user/nse-indicator-configs/* CRUD routes (+ Clerk auth, CORS) from ebp-worker.js
-│   ├── src/nse-cron.js             1732 lines  — NSE EBP/Sweep/MSS/FVG, TDI, SMA Cloud (unchanged detection logic)
+│   ├── src/nse-cron.js             1735 lines  🆕 (2026-08-12 correction, was reported 1732) — NSE EBP/Sweep/MSS/FVG, TDI, SMA Cloud
 │   └── wrangler.toml                 16 lines  — secrets-documentation comment added 2026-08-07
 ├── watchdog-worker/                — Watchdog Worker (Cloudflare Worker "ebp-watchdog")
-│   ├── src/index.js                1305 lines  🆕 — was 846(ish) lines pre-session; gained POST /health/watchdog-check
-│   │                                (moved from ebp-worker.js), with rewritten probe logic — see Section 9/10
-│   └── wrangler.toml                 11 lines
+│   ├── src/index.js                1432 lines  🆕 (2026-08-09) — 846(ish)→1305 (2026-08-07, gained POST
+│   │                                /health/watchdog-check) →1333 (2026-08-07 branch merge, Section 11.2)
+│   │                                →1432 (2026-08-09: gained isForexClosedWindow(), POST /cron/candle-fetch,
+│   │                                POST /cron/breadth-fetch; runWatchdog() stripped to a heartbeat — Section 12)
+│   └── wrangler.toml                  8 lines  🆕 (2026-08-09) — was 11; [triggers] block removed, native
+│                                       */15 * * * * cron retired — see Section 12
 ├── admin-worker/                   🆕 NEW — Admin Worker (Cloudflare Worker "admin-worker")
-│   ├── src/index.js                 396 lines  — all 14 /admin/* routes + GET /health, own Clerk auth + CORS
+│   ├── src/index.js                 399 lines  🆕 (2026-08-12 correction, was reported 396 here despite
+│   │                                Section 11.2 already noting 399 — table simply wasn't synced) — all 14
+│   │                                /admin/* routes + GET /health, own Clerk auth + CORS
 │   └── wrangler.toml                  8 lines
 ├── compute-worker/                 🆕 NEW — Compute Worker (Cloudflare Worker "compute-worker")
-│   ├── src/index.js                1111 lines  — Market Breadth (native hourly cron) + Forex/Crypto SMA Cloud
-│   │                                (POST /cron/sma), absorbed from ebp-worker.js and sweep-cron.js
+│   ├── src/index.js                1142 lines  🆕 (2026-08-12 correction, was reported 1111 here despite
+│   │                                Section 11.1 already noting 1142 — table simply wasn't synced) — Market
+│   │                                Breadth (native hourly cron) + Forex/Crypto SMA Cloud (POST /cron/sma),
+│   │                                absorbed from ebp-worker.js and sweep-cron.js
 │   └── wrangler.toml                 11 lines  — [triggers] = ["5 * * * *"] (moved from worker/wrangler.toml)
 ├── frontend/                       — React 18 + Vite SPA, deployed to Cloudflare Pages
 │   ├── src/App.jsx                   48 lines  — router
@@ -70,19 +79,19 @@ EBP_TRACKER/
 ```
 `packages/core/` — 🆕 **confirmed removed.** The 2026-08-02 report flagged this as dead-but-present; as of 2026-08-07 the directory does not exist in the repo at all (already deleted in the interim, independent of this session).
 
-Total source line count (`.js`/`.jsx` only, excluding `node_modules`/`dist`/`.wrangler`): **~12,300 lines** across 6 workers + frontend.
+Total source line count (`.js`/`.jsx` only, excluding `node_modules`/`dist`/`.wrangler`): **12,789 lines** 🆕 (2026-08-12 recount via `find | xargs wc -l`, was reported "~12,300") across 6 workers + frontend.
 
 ### Stack
 - **Frontend**: React 18, Vite (`vite`/`@vitejs/plugin-react`), `react-router-dom` v6, `@clerk/clerk-react` (auth), `recharts` (Market Breadth charts only), `xlsx` (Alerts export only). ⚠️ **DIVERGENCE** (unchanged from 08-02): `README.md` claims "React + Vite + MUI" — there is no MUI dependency and zero `@mui` imports; all styling is hand-rolled CSS.
 - **Backend**: 🆕 **6** independent Cloudflare Workers (was 4 on 2026-08-02), all zero-npm-dependency single-file (or single-file + one large cron-logic file) bundles, deliberately not importing from each other. Each of the two new workers (`compute-worker`, `admin-worker`) copies its shared helpers (CORS, `verifyClerkToken`, candle-cache readers, etc.) verbatim from `ebp-worker.js` rather than importing them — same "zero cross-package imports" convention as the original four.
 - **Database**: Cloudflare D1 (SQLite), a single shared database `ebp-tracker-db` (id `b93b206a-5537-4d12-8c86-a4b2372aae7f`) bound as `DB` in all **six** workers' `wrangler.toml`. No schema changes this session.
 - **Auth**: Clerk (`@clerk/clerk-react` frontend, hand-rolled JWKS-verification `verifyClerkToken()`). 🆕 Now duplicated verbatim in **three** worker files (`worker/src/ebp-worker.js`, `admin-worker/src/index.js`, `nse-worker/src/index.js`) rather than one — each with its own independent in-memory JWKS cache, so a JWKS refresh in one worker doesn't warm the cache in another (three separate 1-hour TTL caches, three separate cold-start Clerk API calls).
-- **Scheduling**: Two mechanisms coexist, rebalanced this session:
-  1. **cron-job.org HTTP triggers** — `/cron/ebp`, `/cron/sweep`, `/cron/nse` (unchanged), plus 🆕 `/cron/sma` (moved from `sweep-detector` to `compute-worker`, 4 jobs recreated 1:1 by schedule) and 🆕 `/health/watchdog-check` (repointed from `ebp-tracker-worker` to `ebp-watchdog`). Full verified job list in Section 10 — this update replaces the prior report's "inferred from route TF sets" methodology with actual data read from the cron-job.org REST API this session.
-  2. **Native Cloudflare `[triggers]` cron** — `watchdog-worker` (`*/15 * * * *`, unchanged) and 🆕 `compute-worker` (`5 * * * *`, hourly Market Breadth — moved from `worker/wrangler.toml`, which no longer has a `[triggers]` block or a `scheduled()` export at all).
-- **Deployment**: `npx wrangler deploy` per worker, run directly this session for all 6 workers (see Section 10 for the exact commands and verified output). Still no CI/CD pipeline in-repo. Frontend via Cloudflare Pages, GitHub-integration auto-build — confirmed this session: pushing commit `d20aea3` to `main` triggered a rebuild that picked up the two new frontend env vars.
+- **Scheduling**: 🆕 (2026-08-09) **down to one mechanism** — as of this update, cron-job.org HTTP triggers are the sole scheduling mechanism for every worker except `compute-worker`:
+  1. **cron-job.org HTTP triggers** — `/cron/ebp`, `/cron/sweep`, `/cron/nse` (unchanged), `/cron/sma` (moved from `sweep-detector` to `compute-worker` 2026-08-07, 4 jobs recreated 1:1 by schedule), `/health/watchdog-check` (repointed from `ebp-tracker-worker` to `ebp-watchdog` 2026-08-07), and 🆕 (2026-08-09) `POST /cron/candle-fetch` (every 15 min) + `POST /cron/breadth-fetch` (hourly) on `ebp-watchdog` — see Section 12. Full verified job list in Section 10.
+  2. **Native Cloudflare `[triggers]` cron** — 🆕 (2026-08-09) down to **one worker only**: `compute-worker` (`5 * * * *`, hourly Market Breadth — moved from `worker/wrangler.toml` 2026-08-07). `watchdog-worker`'s `*/15 * * * *` native trigger — previously the last other holdout — was retired 2026-08-09: its `wrangler.toml` `[triggers]` block was removed and the live Cloudflare-side schedule was explicitly deleted via the Workers API (Section 12); `watchdog-worker`'s `scheduled()` handler still exists (unchanged signature) but now only runs a near-zero-CPU heartbeat, no ETL. `worker/wrangler.toml` has had no `[triggers]` block since 2026-08-07, and — 🆕 (2026-08-09) correction — a stale *live* Cloudflare-side registration for `ebp-tracker-worker` (`"5 * * * *"`, predating the 2026-08-07 split) was found to have survived that removal and was deleted this session; see Section 9/12 for why "no `[triggers]` block in source" and "no live schedule on Cloudflare" turned out to be two different claims.
+- **Deployment**: `npx wrangler deploy` per worker, run directly this session for all 6 workers on 2026-08-07 (see Section 10 for the exact commands and verified output); `watchdog-worker` was redeployed twice more on 2026-08-09 (Section 12). Still no CI/CD pipeline in-repo. Frontend via Cloudflare Pages, GitHub-integration auto-build — confirmed 2026-08-07: pushing commit `d20aea3` to `main` triggered a rebuild that picked up the two new frontend env vars; confirmed again 2026-08-09 when the logo/favicon commit (`fd5f951`) was pushed (build success itself not independently re-verified post-push this session — see Section 12). 🆕 **2026-08-12 correction — deployment state does not track `main` for every worker.** `npx wrangler deployments list` (ground truth, read directly this session) shows: `ebp-tracker-worker`'s live deployment is timestamped `2026-08-07T23:25:19Z`, ~12 minutes **before** commit `fd62ff7` (`2026-08-07T23:37:29Z` UTC) — production is running pre-`fd62ff7` code. `watchdog-worker` and `compute-worker`, by contrast, show live deployments (`2026-08-11T12:30Z` and `2026-08-10T12:15Z` respectively, both `Source: Upload`) **after** their last git commit — code was deployed from a local working copy that was never committed. For `watchdog-worker` this is a severe, confirmed divergence, not just a timing gap — see Section 13.1.
 
-### Environment variables / secrets per worker (names only, `wrangler secret list` output, re-verified 2026-08-07)
+### Environment variables / secrets per worker (names only, `wrangler secret list` output, re-verified 2026-08-07, spot-checked again 2026-08-12 — exact match, see Section 13.4)
 
 | Worker | Configured secrets | `[vars]` (plaintext) |
 |---|---|---|
@@ -106,20 +115,33 @@ Frontend build-time env vars (`.env.example`, current): `VITE_CLERK_PUBLISHABLE_
 ```
                     ┌─────────────────────────────────────────────┐
                     │         WATCHDOG WORKER (ebp-watchdog)       │
-                    │  native CF cron */15 * * * *                 │
+                    │  🆕 (2026-08-09) no native CF cron — all 3    │
+                    │     routes below are cron-job.org HTTP       │
+                    │     triggers, X-Cron-Secret gated             │
                     │                                               │
-                    │  Twelve Data (M15/M30/1H/4H, signal symbols)  │
-                    │  Yahoo Finance (fallback + all Market Breadth)│
+                    │  🆕 POST /cron/candle-fetch (every 15 min)    │
+                    │     Twelve Data (M15/M30/1H/4H, signal        │
+                    │     symbols) — forex/commodity skipped via    │
+                    │     isForexClosedWindow() while forex is      │
+                    │     shut; crypto still fetched 24/7           │
                     │       │                                       │
                     │       ▼                                       │
                     │  writeCandleCache() ──► D1: candle_cache      │
-                    │  daily/weekly synthesis, synthetic DXY         │
                     │                                               │
-                    │  🆕 POST /health/watchdog-check (own route,   │
+                    │  🆕 POST /cron/breadth-fetch (hourly)         │
+                    │     Yahoo Finance (all Market Breadth pairs)  │
+                    │     daily/weekly synthesis, synthetic DXY      │
+                    │     — no weekend gate, runs regardless        │
+                    │                                               │
+                    │  POST /health/watchdog-check (own route,      │
                     │     X-Cron-Secret, cron-job.org every 15 min) │
                     │     reads candle_cache/swing_states/breadth/  │
                     │     forex_sma_state/NSE tables, alerts via    │
                     │     Telegram (WATCHDOG_BOT_TOKEN) on failure  │
+                    │                                               │
+                    │  scheduled() still exists (native cron        │
+                    │  trigger retired) but only runs a heartbeat:  │
+                    │  daily-digest gate + one logWatchdog() write  │
                     └─────────────────────────────────────────────┘
                                         │  (D1 read-only from here on)
                                         ▼
@@ -164,7 +186,7 @@ Frontend build-time env vars (`.env.example`, current): `VITE_CLERK_PUBLISHABLE_
 | EBP Worker | `ebp-tracker-worker` | `worker/src/ebp-worker.js` | **44** routes (was 51 on 08-02 — net change reflects both this session's removals and additions from an interim revamp the prior audit predates; see full table below) | Clerk JWT, X-Cron-Secret, X-Journal-Secret, none (public: `/health`, `/telegram/webhook`, `/invite/:token`) |
 | Sweep Worker | `sweep-detector` | `sweep-worker/src/index.js` | 2 routes (`/health`, `/cron/sweep`) — `/cron/sma` removed 2026-08-07 | none, X-Cron-Secret |
 | NSE Worker | `nse-tracker` | `nse-worker/src/index.js` | 🆕 **8** routes (was 2) — `/health`, `/cron/nse`, `/nse/status`, `/nse/search`, `/user/nse-indicator-configs/:assetId` (GET/POST), `/user/nse-indicator-configs/:id` (PATCH/DELETE) | none, X-Cron-Secret, Clerk JWT 🆕 |
-| Watchdog Worker | `ebp-watchdog` | `watchdog-worker/src/index.js` | 🆕 **2** routes (was 1) — `/health`, `POST /health/watchdog-check` | none, X-Cron-Secret 🆕 |
+| Watchdog Worker | `ebp-watchdog` | `watchdog-worker/src/index.js` | 🆕 **4** routes (2026-08-09; was 2 as of 08-07, was 1 pre-08-07) — `/health`, `POST /health/watchdog-check`, 🆕 `POST /cron/candle-fetch`, 🆕 `POST /cron/breadth-fetch` | none, X-Cron-Secret 🆕 |
 | 🆕 Admin Worker | `admin-worker` | `admin-worker/src/index.js` | **15** routes — `/health` + all 14 `/admin/*` routes | Clerk JWT + admin (`requireAdmin()`), none (`/health`) |
 | 🆕 Compute Worker | `compute-worker` | `compute-worker/src/index.js` | **2** routes — `/health`, `POST /cron/sma` | none, X-Cron-Secret |
 
@@ -215,7 +237,7 @@ Frontend build-time env vars (`.env.example`, current): `VITE_CLERK_PUBLISHABLE_
 
 **NSE Worker routes** 🆕 (major expansion — see Section 8 for full detail): `GET /health` (public), `POST /cron/nse` (X-Cron-Secret), `GET /nse/status` (public), `GET /nse/search` (Clerk JWT), `GET/POST /user/nse-indicator-configs/:assetId` (Clerk JWT), `PATCH/DELETE /user/nse-indicator-configs/:id` (Clerk JWT). The four CRUD routes share one regex-matched dispatcher (`/^\/user\/nse-indicator-configs\/([^/]+)$/`) rather than four separate literal-path handlers.
 
-**Watchdog Worker routes** 🆕: `GET /health` (public), `POST /health/watchdog-check` (X-Cron-Secret) — moved here from `ebp-worker.js` 2026-08-07, with rewritten probe logic (Section 9/10). This is the first externally-triggerable business-logic route Watchdog Worker has ever had; previously all its logic fired exclusively from its native `scheduled()` handler.
+**Watchdog Worker routes** 🆕: `GET /health` (public), `POST /health/watchdog-check` (X-Cron-Secret) — moved here from `ebp-worker.js` 2026-08-07, with rewritten probe logic (Section 9/10). 🆕 (2026-08-09) `POST /cron/candle-fetch` (X-Cron-Secret) and `POST /cron/breadth-fetch` (X-Cron-Secret) — the ETL previously run inline inside the native `scheduled()` handler, extracted verbatim into these two routes; see Section 12. As of 2026-08-09, **all** of Watchdog Worker's business logic is externally HTTP-triggered via cron-job.org — its native `scheduled()` handler (still present, unchanged signature) now only does a lightweight daily-digest check plus a heartbeat log write.
 
 **Admin Worker routes** 🆕: `GET /health` (public) plus all 14 `/admin/*` routes, moved verbatim from `ebp-worker.js` — `GET/POST /admin/api-keys`, `PATCH/DELETE /admin/api-keys/:id`, `GET /admin/users`, `GET /admin/tokens`, `POST /admin/invite`, `POST /admin/expire/:id`, `PATCH /admin/users/:id/asset-limit`, `GET /admin/users/:id/assets`, `GET/PATCH /admin/users/:id/tf-access`, `GET/PATCH /admin/users/:id/nse-tf-access`.
 
@@ -235,29 +257,32 @@ Unchanged from 2026-08-02 except one row:
 
 ### Cron schedule — 🆕 now confirmed via the cron-job.org REST API, not inferred
 
-Unlike the 2026-08-02 report (which could only infer the job set from what each route's TF validation accepted, since cron-job.org's own dashboard was unqueryable from code), this session obtained a cron-job.org API key and read the **actual live job list** directly. All 21 active jobs, confirmed 2026-08-07:
+Unlike the 2026-08-02 report (which could only infer the job set from what each route's TF validation accepted, since cron-job.org's own dashboard was unqueryable from code), the 2026-08-07 session obtained a cron-job.org API key and read the **actual live job list** directly (21 active jobs as of that date). 🆕 Two more jobs were added 2026-08-09 (Section 12) — **23 active jobs** as of this update:
 
 | Route | Worker | Jobs | Schedule (UTC) |
 |---|---|---|---|
 | `POST /cron/ebp` | ebp-tracker-worker | 5 jobs (M15/1H/4H/1D/1W) | M15: `:01/:16/:31/:46`; 1H: `:01` hourly; 4H: hours `1,5,9,13,17,21` at `:01`; 1D: `21:01` Mon-Fri; 1W: `21:01` Fri |
 | `POST /cron/sweep` | sweep-detector | 4 jobs (M15/M30/1H/4H) + 1 disabled (M5) | M15: `:02/:17/:32/:47`; M30: `:02/:32`; 1H: `:02` hourly; 4H: hours `1,5,9,13,17,21` at `:02` |
 | `POST /cron/nse` | nse-tracker | 4 enabled jobs (M15/M30/1H/D) + 2 disabled (M1/M5) | all gated to NSE market-hours UTC windows (`3`–`10`), weekdays only |
-| 🆕 `POST /cron/sma` | **compute-worker** (moved from sweep-detector) | 4 jobs (M15/M30/1H/4H) | M15: `:04/:19/:34/:49`; M30: `:04/:34`; 1H: `:04` hourly; 4H: hours `1,5,9,13,17,21` at `:04` — each new job created to exactly mirror its predecessor's schedule before the old one was deleted |
-| `POST /health/watchdog-check` | 🆕 **ebp-watchdog** (moved from ebp-tracker-worker) | 1 job | every 15 min, `:03/:18/:33/:48` |
+| `POST /cron/sma` | compute-worker (moved from sweep-detector 2026-08-07) | 4 jobs (M15/M30/1H/4H) | M15: `:04/:19/:34/:49`; M30: `:04/:34`; 1H: `:04` hourly; 4H: hours `1,5,9,13,17,21` at `:04` — each new job created to exactly mirror its predecessor's schedule before the old one was deleted |
+| `POST /health/watchdog-check` | ebp-watchdog (moved from ebp-tracker-worker 2026-08-07) | 1 job | every 15 min, `:03/:18/:33/:48` |
+| 🆕 `POST /cron/candle-fetch` | **ebp-watchdog** (new 2026-08-09) | 1 job, id `8239654` | every 15 min, `:00/:15/:30/:45` |
+| 🆕 `POST /cron/breadth-fetch` | **ebp-watchdog** (new 2026-08-09) | 1 job, id `8239655` | hourly, `:00` |
 
 All jobs require the `X-Cron-Secret` header matching the target worker's `CRON_SECRET` secret.
 
-**Cloudflare native crons** (`wrangler.toml` `[triggers]`, ground truth, re-verified 2026-08-07):
-- `watchdog-worker`: `*/15 * * * *` — unchanged, sole schedule.
-- 🆕 `compute-worker`: `5 * * * *` — hourly, fires `handleMarketBreadthCron()` via `scheduled()`. **Moved from `worker/wrangler.toml`**, which no longer has a `[triggers]` block or a `scheduled()` export at all — `ebp-worker.js` is now 100% cron-job.org-driven, no native cron.
+**Cloudflare native crons** (`wrangler.toml` `[triggers]`, ground truth, re-verified 2026-08-09):
+- 🆕 `watchdog-worker`: **none as of 2026-08-09** (was `*/15 * * * *`) — `[triggers]` block removed from `wrangler.toml` and the live Cloudflare-side schedule explicitly deleted via the Workers API; see Section 12. Its ETL now runs exclusively via the two new cron-job.org jobs above.
+- `compute-worker`: `5 * * * *` — hourly, fires `handleMarketBreadthCron()` via `scheduled()`. Moved from `worker/wrangler.toml` 2026-08-07. **This is now the only worker in the fleet with a live native Cloudflare cron trigger.**
 - `sweep-worker`, `nse-worker`, `admin-worker`: no `[triggers]` block — 100% cron-job.org/Clerk-JWT-driven.
+- `worker` (ebp-tracker-worker): no `[triggers]` block since 2026-08-07 — but 🆕 a stale *live* schedule (`"5 * * * *"`, predating the split, unrelated to any `[triggers]` block ever having been redeployed empty) was found still registered on Cloudflare's side as of 2026-08-09 and was deleted this session. See Section 9/12 — this is the same class of gap as `watchdog-worker`'s retired trigger above: removing a `[triggers]` block from source and redeploying does **not** by itself guarantee Cloudflare's live schedule registration is cleared; it must be checked/deleted independently via the API.
 
 ### Watchdog Worker vs EBP/Sweep/NSE/Compute Workers
 
 | | Watchdog | EBP/Sweep/NSE/Compute |
 |---|---|---|
-| Purpose | External-data ETL (fetch → cache → synthesize) **plus 🆕 external health-check heartbeat** | Signal detection + user alerting (+ compute-worker: breadth/SMA compute) |
-| Trigger | Native CF cron (`*/15 * * * *`) **+ 🆕 cron-job.org `POST /health/watchdog-check` every 15 min** | cron-job.org HTTP POST (`X-Cron-Secret`), + compute-worker's own native hourly cron for breadth |
+| Purpose | External-data ETL (fetch → cache → synthesize) plus external health-check heartbeat | Signal detection + user alerting (+ compute-worker: breadth/SMA compute) |
+| Trigger | 🆕 (2026-08-09) **100% cron-job.org, no native cron**: `POST /cron/candle-fetch` (every 15 min), `POST /cron/breadth-fetch` (hourly), `POST /health/watchdog-check` (every 15 min) — native `*/15 * * * *` CF trigger retired this date; `scheduled()` still exists but is now a heartbeat-only no-op | cron-job.org HTTP POST (`X-Cron-Secret`), + compute-worker's own native hourly cron for breadth |
 | External APIs called | Twelve Data, Yahoo | none (EBP/Sweep/Compute read D1 only); NSE calls Upstox/Yahoo itself |
 | Writes | `candle_cache`, `daily_candle_cache`, `weekly_candle_cache`, `api_key_state`, `api_call_log`, `watchdog_log` | `signals`, `chain_state`, `fvg_zones`/`nse_fvg_zones`, `swing_states`/`nse_swing_states`, `alert_history`, `bias_cache`, `forex_sma_state`, `market_breadth_*` |
 | Alerts | 🆕 **Yes** — `POST /health/watchdog-check` sends Telegram alerts on any check failure, plus a 2-hourly all-clear and a 17:00 NY EOD summary. `watchdog_log` itself is still write-only, no delivery path (unchanged gap, see Section 10). | Telegram alerts via `SHARED_BOT_TOKEN` to `@EbP_Tracker_bot` |
@@ -267,7 +292,7 @@ All jobs require the `X-Cron-Secret` header matching the target worker's `CRON_S
 
 ## Section 3 — Database Schema (ground truth)
 
-**Not re-audited this update — no schema changes were made or requested this session ("do not modify D1 schema" was an explicit constraint on every task).** The full table-by-table detail from the 2026-08-02 report (34 live tables, `schema.sql` drift notes, FK relationships, cleanup cycles, live row counts as of 2026-08-02) is carried forward unchanged and should still be treated as accurate for schema *shape*. Live row counts specifically (e.g. "`fvg_zones` = 18 rows") are now 5 days stale and were not re-queried for this update — treat any specific count from the prior report as "as of 2026-08-02," not current.
+**Table-by-table detail (FK relationships, cleanup cycles, per-table row counts) not re-audited this update** — the 2026-08-02 report's write-up of those is carried forward and should still be treated as accurate for schema *shape* per table. 🆕 **2026-08-12 correction — the table *count* was stale and has been corrected**: live D1 (`SELECT name FROM sqlite_master WHERE type='table'`, queried directly via `wrangler d1 execute --remote` this session) has **37** tables, not the 34 carried forward from 2026-08-02. The 2026-08-02 table list itself was not preserved verbatim in this report, so a full diff of which 3 tables are new isn't possible from this document alone — but two tables in the current live list are undocumented anywhere in this report's text (searched in full) and are actively being written to in production right now: `yahoo_candle_cache` (29 rows, most recent write `2026-08-12T05:01:17Z`) and `dxy_candle_cache` (526 rows across `1H`/`4H`, most recent write `2026-08-12T05:00:56Z`) — see **Section 13.1** for what writes them and why that's a serious problem. Live row counts elsewhere (e.g. "`fvg_zones` = 18 rows") are now over a week stale and were not re-queried for this update — treat any specific count from the prior report as "as of 2026-08-02," not current.
 
 One correction worth noting here since it surfaced during this session's live smoke-testing: `nse_fvg_zones` behaves identically to `fvg_zones` — a row is written only when `detectFVG()` actually finds a gap, not on every cron tick. This was already implied by the 2026-08-02 report's own description of `processFVGZones()`, but a new Watchdog check added this session initially assumed otherwise (see Section 9's "false alarm" writeup) and was corrected in place before this report was written.
 
@@ -293,6 +318,8 @@ Unchanged from 2026-08-02 — shared bot only, no per-user bot tokens, same link
 
 ### Exact Telegram message format, per alert type
 EBP/Sweep/MSS/T1-T4/NSE-EBP/Sweep/MSS/TDI/SMA formats are all unchanged from the 2026-08-02 report — refer there for the full quoted templates.
+
+🆕 (2026-08-12) **A fourth Watchdog message format exists in the git-committed source and was missing from this report**: `sendWatchdogDailyDigest()` (`watchdog-worker/src/index.js`), gated inside `runWatchdog()` by `hour === 8` **plain UTC** (not NY-adjusted, unlike every other gate in the file — the code's own comment flags this explicitly). Format: `📊 Watchdog Daily Summary` / 24h counts of info·warning·error / last-run timestamp. Because `runWatchdog()` only runs from the native `scheduled()` handler, and `watchdog-worker/wrangler.toml` has had no `[triggers]` block since 2026-08-09 (Section 12), **this digest cannot currently fire at all in the code as committed** — it's dormant, not broken. (Whether the actual *live* deployed code still contains this function, an altered version, or something else entirely is unknown — see Section 13.1.) Worth noting since UTC 08:00 is IST 13:30 (afternoon) — if this gate is ever reconnected to a live trigger without first switching it to an NY-hour check (the same `Intl`-based pattern the EOD gate below already uses), it will fire at an arbitrary UTC time unrelated to market close, not "EOD."
 
 🆕 **Watchdog health-check formats** (new to this report — the prior audit stated no format existed because it hadn't found the route):
 ```
@@ -338,6 +365,7 @@ Largely unchanged from 2026-08-02 — refer there for the full page/component/ho
 
 - **Per-page API calls — Dashboard**: `GET /nse/status` now resolves against `nse-worker` (`VITE_NSE_WORKER_URL`), not `ebp-tracker-worker` — the call site in `Dashboard.jsx` itself is unchanged, only the base URL `api.js` routes it to.
 - **Admin page**: all `/admin/*` calls listed in the 2026-08-02 report (`/admin/users`, `/admin/tokens`, `/admin/api-keys`, etc.) now resolve against `admin-worker` (`VITE_ADMIN_WORKER_URL`) — same paths, same request shapes, different backend.
+- 🆕 (2026-08-09) **Site logo/favicon replaced**: `frontend/src/assets/logo.jpeg` and `frontend/public/favicon.jpeg` (both JPEG, replacing the prior placeholder SVGs) — `Layout.jsx`'s sidebar `<img>` import and `index.html`'s `<link rel="icon">` updated accordingly; old `logo.svg`/`favicon.svg` deleted (confirmed no other references before deletion). Purely cosmetic, no logic changed. `vite build` verified clean; the Cloudflare Pages rebuild itself was not independently re-checked post-push this session.
 
 `frontend/src/lib/api.js` itself changed structurally (Section 1/2) but every call site elsewhere in the frontend (`Admin.jsx`, `NseSearchModal.jsx`, `TdiConfigPanel.jsx`/`SmaConfigPanel.jsx`, etc.) is untouched — they still call `api.get('/admin/users', token)` / `api.get('/nse/search?...', token)` exactly as before; the routing split happens transparently inside `api.js`'s `baseFor(path)`.
 
@@ -377,6 +405,9 @@ Unchanged from 2026-08-02 — not re-queried this update (Section 3 note applies
 
 ## Section 9 — Known Issues & Technical Debt
 
+### 🆕 🐛 (2026-08-12) TOP PRIORITY — `watchdog-worker`'s live production code is not the code in this repository
+Confirmed via live D1 queries and full-history `git log --all -p -S` grep this session — see **Section 13.1** for the complete evidence trail. Summary: production `watchdog-worker` is actively writing to two D1 tables (`yahoo_candle_cache`, `dxy_candle_cache`) through functions (`seedDXYHistory`, `writeDXYBlobsToCache`, `synthesiseDXY4H`/`Daily`/`Weekly`) that do not exist anywhere in this git repository, on any branch, at any commit. The code actually running in production was deployed (`wrangler deploy`, `2026-08-11T12:30Z`, `Source: Upload`) from a local working copy that was never committed or pushed. Anyone editing `watchdog-worker/src/index.js` in this repo today is editing a stale, partially-superseded baseline — and a future `wrangler deploy` run from this repo would silently overwrite and permanently lose whatever undocumented logic is currently live and actively serving production data. **This must be reconciled (recover the deployed source, or rebuild the missing logic deliberately, and commit it) before any further changes are deployed to `watchdog-worker`.**
+
 ### Dead code — status update
 **All 7 dead functions the 2026-08-02 report flagged were already gone by the start of this session** (`getHTFForTF`, `loadBiasCache` ×2, `isPriceInFVG`'s dead copy, `getHTFForSweepTF`, `oppositeDirection`, `fetchAndCacheNSECandles`) — removed in an interim cleanup commit (`c7e4b8b`) between the two audits. This session ran its own fresh dead-code sweep and found (and removed) a further round, all confirmed via repo-wide grep before deletion:
 
@@ -414,6 +445,12 @@ Unchanged from 2026-08-02 — not re-audited this update (Section 3).
 - `NSE_VALID_TFS`/`ALL_NSE_TF_ACCESS` duplication — unchanged bug risk from 2026-08-02, see Section 8's note on a possible third copy now in play via `admin-worker`.
 - `CHUNK_SIZE`, `NY_4H_BOUNDARIES` — unchanged.
 - Cron-job.org's schedule now **is** auditable from a code-adjacent source (this report, Section 2/10, backed by a live API read) but still isn't stored *in* the repo itself — a future schedule change made only via the cron-job.org dashboard would silently drift from this document again.
+
+### 🆕 Correction (2026-08-09): "no `[triggers]` block in source" ≠ "no live schedule on Cloudflare"
+The 2026-08-07 report stated (Section 1/2) that `worker/wrangler.toml` "no longer has a `[triggers]` block... `ebp-worker.js` is now 100% cron-job.org-driven, no native cron." That was accurate about the *source file* but turned out to be incomplete: a live Cloudflare-side schedule (`"5 * * * *"`, `created_on: 2026-07-30`, `modified_on: 2026-08-05` — both dates predating the split) was still registered against `ebp-tracker-worker` as of 2026-08-09, discovered via `GET https://api.cloudflare.com/client/v4/accounts/{id}/workers/scripts/ebp-tracker-worker/schedules`. Deleting a `[triggers]` block from `wrangler.toml` and redeploying does not retroactively clear a schedule that predates the block's removal from a *live* deployed script — it has to be explicitly deleted via `PUT .../schedules` with an empty array (or the dashboard). This was verified safe to delete before deletion: `worker/src/ebp-worker.js`'s `export default` has no `scheduled()` handler at all (confirmed via grep — zero occurrences of the word `scheduled` in the file), so the orphaned trigger was firing into a dead handler every hour with no functional effect, just wasted invocations. Deleted 2026-08-09; confirmed via a follow-up `GET` showing `"schedules": []`. The exact same class of drift was then proactively checked for and confirmed absent on `ebp-watchdog` post-retirement (Section 12) — deleting *that* worker's schedule was done explicitly via the API rather than assuming the `wrangler.toml` edit alone would suffice, precisely because of this finding.
+
+### 🆕 Disclosure (2026-08-09): the CPU-limit premise behind the Watchdog ETL extraction was not independently measured
+Both the `compute-worker` `scheduled()` investigation (Section 12 context) and the `watchdog-worker` ETL-extraction work (Section 12) were undertaken on a stated premise — that native `scheduled()` cron invocations doing inline parallel HTTP fetches + D1 writes were exceeding Cloudflare's CPU-time limit. Neither premise was independently confirmed against real Cloudflare metrics/logs (no `wrangler tail` session or CPU-time dashboard reading was performed for either worker) — investigation of `compute-worker`'s specific claimed failure mode (a crash at ~0.1ms CPU, i.e. before any async work starts) found no code-level defect that would explain it, and that investigation was left unresolved, not fixed. The `watchdog-worker` refactor itself (moving ETL to HTTP-triggered routes) is sound as an architecture change regardless — cron-job.org-triggered `fetch()` invocations are functionally decoupled from the native `scheduled()` cron path either way — but readers should not take this report as confirming the original CPU-limit claim was verified true; it's recorded here as the stated rationale, not a measured fact.
 
 ### Error handling gaps / silent failure risks
 Unchanged from 2026-08-02, with one exception: the **T4 `endOfUTCMonthISO()` ReferenceError** documented in the prior section is now fixed (was an undiscovered gap as of 08-02, since the prior audit didn't catch it either). All other items (Watchdog→Yahoo fallback silent skip, `/nse/search` Upstox-silently-returns-`[]`, T4's weaker chain-dedup guard, `user_templates`'s ignored columns, `/health/datasources`'s no-known-caller, Clerk JWKS fetched with zero cross-worker caching — now **worse**, three independent per-worker JWKS caches instead of one) carry forward unchanged or slightly compounded by the worker split.
@@ -501,7 +538,7 @@ weekly: { lastWeek: {strength, computed_at} | null, thisWeek: {strength, compute
 
 **`frontend/src/pages/MarketBreathPage.jsx`** (**+132 lines**) — Daily Strength's `todayStrength`/`yesterdayStrength` now read `data.daily.today.strength`/`data.daily.yesterday.strength` instead of being re-derived from the raw `intraday` array client-side; the chart JSX/colors/legend for both Intraday Strength and Daily Strength are otherwise byte-for-byte unchanged. The Weekly Strength placeholder is replaced with a live two-bar horizontal chart (This Week solid / Last Week faded), mirroring Daily Strength's recharts components, `CCY_COLORS`, and label styling exactly, with three null-safe render paths (both weeks null → "No weekly data yet"; only `thisWeek` null → Last Week bar only + a note; only `lastWeek` null → This Week bar only). A second `useEffect`/`setInterval` refetches and merges `data.weekly` on its own 4-hour cadence, independent of the existing 60-second full-refresh interval, with its own cleanup.
 
-**Verification status — one gap, disclosed rather than fabricated**: `compute-worker` and `worker` were both redeployed and confirmed live (`/health` 200, `market_breadth_cache` queried directly via `wrangler d1 execute --remote`). However, live confirmation that the `'1W_current'` row actually populates, and a full authenticated `GET /market/breadth` response shape check, were **not completed this session** — the forex-weekend gate inside `handleMarketBreadthCron()` (Friday 17:00–Sunday 17:00 NY) was active for the entire session, suppressing every cron cycle before it reaches `computeWeeklyBreadth()`, and no Clerk bearer token was available in-session to call the authenticated route directly. Both are recommended follow-up checks once markets reopen.
+**Verification status — one gap, disclosed rather than fabricated**: `compute-worker` and `worker` were both redeployed and confirmed live (`/health` 200, `market_breadth_cache` queried directly via `wrangler d1 execute --remote`). However, live confirmation that the `'1W_current'` row actually populates, and a full authenticated `GET /market/breadth` response shape check, were **not completed this session** — the forex-weekend gate inside `handleMarketBreadthCron()` (Friday 17:00–Sunday 17:00 NY) was active for the entire session, suppressing every cron cycle before it reaches `computeWeeklyBreadth()`, and no Clerk bearer token was available in-session to call the authenticated route directly. Both are recommended follow-up checks once markets reopen. 🆕 **2026-08-12 — the first of these two gaps is now closed**: `SELECT tf, computed_at FROM market_breadth_cache` (live, `wrangler d1 execute --remote`) returns three rows — `1H`, `1W`, and `1W_current` — confirming the in-progress weekly row is populating in production. The authenticated `GET /market/breadth` response-shape check still was not performed this session (same reason — no Clerk bearer token available) and remains open. Separately, note `worker`'s live deployment now trails `main` by one commit (`fd62ff7`) — see Section 1/13.1 — so this confirmation reflects `compute-worker`'s write path, not proof that the currently-deployed `ebp-worker.js` serves `1W_current` in its response.
 
 ### 11.2 — `main`/`coding` branch reconciliation
 
@@ -516,5 +553,89 @@ weekly: { lastWeek: {strength, computed_at} | null, thisWeek: {strength, compute
 Both conflict resolutions and the two ported fixes were verified with `node --check` against all five touched files before committing. `main` was then fast-forwarded to the merge commit (no rewrite — `main` was a strict ancestor of the merged `coding`) and both branches pushed. The stray `origin/claude/ebp-tracker-codebase-audit-o4noyr` branch, left over from an earlier session, was deleted — `main` and `coding` are now the only two branches, local or remote, and are at the same commit.
 
 **Report-file cleanup**: an uncommitted working-tree deletion of `EBP_Tracker_Architecture_Report_20260802.md` (superseded independently by `coding`'s own `20260802`→`20260806` rename, `ff0cac9`) had been stashed rather than force-resolved mid-merge, pending a decision on which report file to treat as canonical. That decision landed after this section was first drafted: this file (`...20260807.md`) is the canonical, actively-maintained report going forward; `EBP_Tracker_Architecture_Report_20260806.md` was deleted from the repo in the same pass that added this section, and the stash was dropped as moot.
+
+---
+
+## Section 12 — Site branding, orphaned-cron cleanup, and Watchdog ETL extraction (2026-08-09)
+
+Three unrelated pieces of work landed this date, all on `main`, in this order.
+
+### 12.1 — Site logo/favicon replacement
+`frontend/src/assets/logo.jpeg` and `frontend/public/favicon.jpeg` replaced `logo.svg`/`favicon.svg` — `Layout.jsx:8`'s `logoSrc` import and `index.html`'s `<link rel="icon">` updated to match; both old SVGs deleted after confirming (via grep) no other references. Verified with `vite build` (clean, image bundled correctly) before committing. Commit `fd5f951`, pushed to `main`. Purely cosmetic — no route, schema, or cron behaviour touched.
+
+### 12.2 — Orphaned `ebp-tracker-worker` native cron trigger: found and deleted
+Investigating a reported near-zero-CPU crash on `compute-worker`'s `scheduled()` handler (unresolved — see Section 9's disclosure above) led to a comparison of `compatibility_date`/bindings across all four workers sharing the `"5 * * * *"` schedule string in their history. That comparison surfaced the drift documented in Section 9: `ebp-tracker-worker` still had a **live** Cloudflare-side cron schedule (`"5 * * * *"`) despite `worker/wrangler.toml` having had no `[triggers]` block since the 2026-08-07 split. Confirmed via `GET .../workers/scripts/ebp-tracker-worker/schedules` (returned exactly one schedule, `created_on: 2026-07-30`, `modified_on: 2026-08-05`); confirmed safe to remove by grepping `worker/src/ebp-worker.js` for `scheduled` (zero matches — `export default` has only a `fetch` handler, so the orphaned trigger had nothing to invoke). Deleted via `PUT .../schedules` with body `[]`; re-verified via a follow-up `GET` showing `"schedules": []`. No code or config change was needed for this piece — it was a Cloudflare-API-only cleanup of drift the 2026-08-07 refactor's `wrangler.toml` edit didn't reach.
+
+### 12.3 — Watchdog Worker: ETL extracted from native `scheduled()` cron to cron-job.org HTTP routes
+Stated rationale (not independently measured — see Section 9's disclosure): `watchdog-worker`'s native `scheduled()` handler was doing parallel Twelve Data/Yahoo HTTP fetches plus multiple D1 writes inline, and was reported to be exceeding Cloudflare's CPU-time limit on every tick.
+
+**Code changes** (`watchdog-worker/src/index.js`, 1333 → **1432** lines):
+- New helper `isForexClosedWindow(nowMs)` — NY-timezone Fri-17:00-through-Sun-17:00 gate, defined once, used only by the new candle-fetch route (not breadth-fetch, which deliberately has no weekend gate — matching prior `runWatchdog()` behaviour where breadth/DXY/synthesis always ran on `minute===0` regardless of forex hours).
+- New `NY_4H_BOUNDARIES` constant hoisted to module scope (was a local `const` inside `runWatchdog()`) — needed by the new candle-fetch handler once the section that declared it was removed from `runWatchdog()`. Same value, relocated only.
+- New `POST /cron/candle-fetch` (`handleCandleFetchCron()`) — the old `runWatchdog()` signal-symbol fetch block (`getSignalSymbols`, `getActiveKeys`, per-TF key assignment, the M15/M30/1H/4H `fetches[]` gating, `Promise.all`), extracted with `event.scheduledTime` replaced by `Date.now()` (no `event` object in an HTTP handler) and the new forex-closed-window gate layered on top: while forex is closed, a second D1 query (`SELECT symbol FROM user_assets WHERE symbol IN (...) AND asset_type='crypto'`) splits the signal-symbol pool so only crypto symbols are still fetched; if none remain, returns early and logs `'Forex closed + no crypto symbols — nothing to fetch'` without calling `Promise.all` on an empty set. Returns `{ok, symbols, tfs}` / `{ok:false, error}`.
+- New `POST /cron/breadth-fetch` (`handleBreadthFetchCron()`) — the old `runWatchdog()` `minute===0` block (`fetchBreadthFromYahoo`, `computeSyntheticDXY`, `attemptDailySynthesis`, `cleanupApiCallLog`, the Friday-17:00-NY `attemptWeeklySynthesis` gate), extracted verbatim with the same `Date.now()` substitution. Returns `{ok:true}` / `{ok:false, error}`.
+- `runWatchdog()` stripped to exactly three things: `_watchdogAlertEnv = env`, the pre-existing 08:00 UTC daily-digest gate (`sendWatchdogDailyDigest`), and one `logWatchdog(db, 'info', 'Watchdog scheduled tick — heartbeat')` call. `scheduled()`'s own signature and body are byte-identical to before.
+- Both new routes wired into `fetch()`'s router, same `X-Cron-Secret === env.CRON_SECRET` pattern as every other cron route in the file.
+
+**Config/infra changes**:
+- `watchdog-worker/wrangler.toml`'s `[triggers]` block (`crons = ["*/15 * * * *"]`) removed entirely — deployed via `npx wrangler deploy`.
+- The live Cloudflare-side schedule for `ebp-watchdog` was then explicitly deleted via `PUT .../workers/scripts/ebp-watchdog/schedules` with `[]` (not left to chance, given the Section 12.2/Section 9 finding that a `wrangler.toml` edit alone doesn't guarantee this) — confirmed via a follow-up `GET` showing `"schedules": []`.
+- Two new cron-job.org jobs created via `PUT https://api.cron-job.org/jobs`: **Job A** "Watchdog Candle Fetch" (id `8239654`, `POST /cron/candle-fetch`, every 15 min at `:00/:15/:30/:45` UTC) and **Job B** "Watchdog Breadth Fetch" (id `8239655`, `POST /cron/breadth-fetch`, hourly at `:00` UTC) — both created with `X-Cron-Secret`/`Content-Type` headers and body `{}`, matching the existing job pattern from the 2026-08-07 session (Section 10). Both individually re-fetched via `GET /jobs/{id}` post-creation and confirmed `enabled:true` with the correct URL/schedule/headers.
+
+**Verification performed this session**:
+- `node --check watchdog-worker/src/index.js` passed.
+- Post-deploy: `GET /health` → `200`.
+- `POST /cron/candle-fetch` with a real `X-Cron-Secret` → `{"ok":true,"symbols":2,"tfs":["M15"]}` (live, not simulated — 2 signal symbols configured at test time, M15 fired since the test minute wasn't a 30/60-min boundary).
+- `POST /cron/breadth-fetch` → `{"ok":true}` (live).
+- `SELECT symbol, tf, fetched_at FROM candle_cache ORDER BY fetched_at DESC LIMIT 10` via `wrangler d1 execute --remote` immediately after the two manual test calls above showed the top 10 rows (28 breadth pairs + DXY) timestamped within the same second as the test — confirms the new routes actually write real data, not just return `ok:true`.
+- Both cron-job.org jobs confirmed present and correctly configured via individual `GET /jobs/{id}` calls (not just the creation response).
+
+**What was *not* independently verified this session** (disclosed per this report's own standard, not fabricated as confirmed):
+- The original CPU-time-exceeded claim that motivated this refactor — see Section 9's disclosure.
+- The Cloudflare dashboard's cron-events UI for `ebp-watchdog` was not visually checked (no browser access) — the empty-schedule confirmation above is API-level, which is authoritative for "is a schedule registered," but a human visual check of the events log was not performed.
+- The two new cron-job.org jobs' **first actual scheduled fire** (as opposed to the manual test calls made pre-job-creation) was not observed/confirmed within this session — job creation and the manual route tests happened in immediate sequence, but no follow-up check was made after enough real time had passed for cron-job.org itself to trigger a fire.
+- The Cloudflare Pages rebuild triggered by the `fd5f951` (logo) push was not re-confirmed live post-push this session (unlike the 2026-08-07 session, which did confirm this explicitly).
+
+**Net effect on the fleet-wide scheduling picture**: as of this report, `compute-worker` is the only remaining worker with a live native Cloudflare `[triggers]` cron. Every other worker — including `watchdog-worker`, previously the architecture's one consistent native-cron holdout since 2026-08-02 — is now 100% cron-job.org HTTP-triggered. Section 1's Stack/Scheduling bullet and Section 2's native-crons list above reflect this.
+
+---
+
+## Section 13 — 2026-08-12: full repo-vs-live-infrastructure verification audit
+
+This report had drifted from both `main` and live production in small, ordinary ways (Section 1's line-count table not synced after Sections 11/12 landed — now corrected in place above) and in one serious way (below). Every fact in this section was obtained directly this session — `git log`/`git show` against `main`, `wc -l` and `grep` against the actual working tree, `wrangler deployments list` / `wrangler secret list` / `wrangler d1 execute --remote` against live Cloudflare/D1, and plain `curl` against all 6 public `/health` endpoints plus the Pages frontend. Nothing below is carried forward from a prior report or from model memory.
+
+### 13.1 — 🐛 CRITICAL: `watchdog-worker`'s live code has fully diverged from this repository
+
+**How this was found**: `wrangler deployments list` (run from `watchdog-worker/`) showed the worker's most recent deployment at `2026-08-11T12:30:48Z`, `Source: Upload` — a plain code upload, not a secret change. `git log -- watchdog-worker/` shows the last commit touching that directory is `9c63c95`, dated `2026-08-09T19:36:21+05:30` (`2026-08-09T14:06:21Z`). The deploy is **~22 hours after** the last commit, with a second undocumented deploy in between (`2026-08-10T12:15:12Z`). Neither deploy corresponds to any commit — nothing was pushed to `main` (or any branch) between `9c63c95` and now.
+
+**What that deploy actually contains, established from live D1 state**: `SELECT * FROM sqlite_master WHERE type='table'` against the live `ebp-tracker-db` returns two tables that do not appear anywhere in `watchdog-worker/src/index.js` as committed — `yahoo_candle_cache` (schema: `symbol, tf, candles_json, fetched_at`, PK `(symbol, tf)`) and `dxy_candle_cache` (schema: `tf, candle_time, open, high, low, close, created_at`, PK `(tf, candle_time)`). Both are being written **right now**: `yahoo_candle_cache` has 29 rows, most recent `fetched_at = 2026-08-12T05:01:17Z`; `dxy_candle_cache` has 526 rows (516 `1H` + 10 `4H`), most recent `created_at = 2026-08-12T05:00:56Z` — both timestamps within minutes of this session's queries, i.e. an active cron is writing to them continuously.
+
+`git log --all -p -S "dxy_candle_cache" ` (and the same for `yahoo_candle_cache`, `seedDXYHistory`, `writeDXYBlobsToCache`, `synthesiseDXY4H`, `synthesiseDXYDaily`, `synthesiseDXYWeekly`) returns **zero hits across every commit on every branch this repo has ever had.** These identifiers — table names, column layouts, and function names — have never existed in version control. The `watchdog-worker/src/index.js` actually deployed to production on 2026-08-11 is not derived from anything in this git history; it was authored and deployed from a local working copy outside the repo (or from a version of the repo that was never `git add`ed/committed/pushed).
+
+**The git-committed version is not simply outdated — it takes a different architectural approach that appears to still be running in parallel.** The committed `computeSyntheticDXY()`/`fetchBreadthFromYahoo()` (read in full this session, `watchdog-worker/src/index.js:525-600`) write synthetic DXY and breadth candles as JSON-blob arrays into the single `candle_cache` table (`symbol='DXY'`), and this *also* checks out as live and fresh: `SELECT * FROM candle_cache WHERE symbol='DXY'` shows `1H`/`4H` rows fetched at `2026-08-12T05:01:20Z`, and `candle_cache` broadly has fresh `M15`/`1H` rows across dozens of symbols as recently as `2026-08-12T05:16:04Z`. So the live worker appears to be running **both** the committed `candle_cache`-blob approach **and** an uncommitted `yahoo_candle_cache`/`dxy_candle_cache` row-per-candle approach side by side — consistent with a mid-refactor local build that was deployed before being finished or committed.
+
+**Why this matters immediately**: this repo's `watchdog-worker/src/index.js` (as read and analyzed earlier in this same session, and as it stands in `main` right now) is not a reliable description of what's actually running. A `wrangler deploy` run from this repo — including as the final step of the CPU-fix task this session was originally asked to do — **would overwrite the live `yahoo_candle_cache`/`dxy_candle_cache` write path with nothing**, silently breaking whatever downstream logic (DXY history seeding, blob synthesis for 4H/Daily/Weekly — function names `seedDXYHistory`/`writeDXYBlobsToCache`/`synthesiseDXY4H`/`synthesiseDXYDaily`/`synthesiseDXYWeekly` are known only because a separate task prompt this session described them, and their existence is now corroborated by the live table writes) currently depends on it. **No deploy of `watchdog-worker` should happen from this repo until the live source is recovered and reconciled into git.** Recovery options, not yet attempted: check for the missing code in shell history / editor autosave / a Cloudflare "Quick Edit" dashboard session on the machine that ran the 08-10/08-11 deploys; or, failing that, treat the live table-writing logic as a spec to be deliberately reimplemented and recommitted, informed by the live schemas captured above.
+
+### 13.2 — `worker` (`ebp-tracker-worker`): production is one commit behind `main`
+
+`wrangler deployments list` shows the last deploy at `2026-08-07T23:25:19Z`. `git log -- worker/` shows commit `fd62ff7` ("market breadth historical selectors, refresh animation, header UI fixes") at `2026-08-08T05:07:29+05:30` = `2026-08-07T23:37:29Z` — **12 minutes after** the last deploy, and no deploy has happened since (`wrangler deployments list` documents "the 10 most recent deployments"; this is confirmed the most recent of those 10). `git show fd62ff7 --stat` confirms this commit changed `worker/src/ebp-worker.js` itself (+86/-lines, inside the `/market/breadth` handler — not just frontend), so this is a real backend behavior gap, not a docs-only diff: production's `GET /market/breadth` is still running the pre-`fd62ff7` handler. Since Cloudflare Pages auto-deploys the frontend on every push to `main`, the live frontend almost certainly already expects the response shape `fd62ff7` added — this is a live frontend/backend mismatch, not just a repo/report one. **Recommended fix: `cd worker && npx wrangler deploy`** (not performed this session — a deploy is a live-production action outside this audit's read-only scope; flagged for the user to action).
+
+### 13.3 — `compute-worker`: same deployed-after-last-commit pattern as 13.1, content divergence not confirmed
+
+`compute-worker`'s last deploy (`2026-08-10T12:15:23Z`) is also after its last commit (`060350e`, `2026-08-08T04:12:32+05:30`). Unlike `watchdog-worker`, no corroborating evidence (D1 tables absent from source, functions referenced by an external prompt) was found to confirm the deployed code actually differs in content from what's committed — it may simply be a redeploy of unchanged code (e.g. to pick up a dependency or for an unrelated operational reason). Flagged as the same *pattern* as 13.1 for completeness, but **not** claimed as a confirmed divergence.
+
+### 13.4 — What matched exactly (verified, not just carried forward)
+- **Secrets**: `wrangler secret list` for all 6 workers returns exactly the secret names Section 1's table lists, worker-for-worker, including the two dead `WATCHDOG_*` secrets still sitting unremoved on `worker` (Section 9's "pending removal, not yet executed" is confirmed still true, 5+ days later).
+- **Native cron triggers**: `grep -A2 triggers */wrangler.toml` across all 6 workers confirms `compute-worker` is the only one with a live `[triggers]` block (`crons = ["5 * * * *"]`); the other 5 have none — exactly as Section 2/9 state.
+- **`/health` endpoints**: all 6 worker URLs plus `https://ebp-tracker.pages.dev` return `200` live. Response shapes mostly match `{status:'ok', worker:'<name>'}` as Section 10 describes, with one minor, already-hedged exception: `ebp-tracker-worker`'s `/health` omits the `worker` field entirely (`{"status":"ok","timestamp":...}`) — Section 10 already says "(or close variant)," so this isn't a new gap, just now specifically identified.
+- **Frontend logo/favicon**: `curl https://ebp-tracker.pages.dev` serves `<link rel="icon" ... href="/favicon.jpeg">`, confirming Section 12.1's logo/favicon replacement is live.
+- **`admin-worker`/`nse-worker`/`sweep-worker`**: their most-recent-touching commit is a later branch-reconciliation merge (`63490cc`, Section 11.2), which read as a possible deploy/commit gap at first glance — `git show 63490cc --stat` for these paths confirms it's `coding` catching up to content that was already part of `main`'s `d20aea3` and already deployed 2026-08-07; not a real gap.
+
+### 13.5 — Not checked this session (disclosed, not assumed clean)
+- Full route-by-route re-verification for `sweep-worker`/`nse-worker`/`admin-worker`/`compute-worker` (only structural facts — triggers, secrets, deploy timestamps — were checked; Section 2's per-worker route tables were not re-derived from source line-by-line this pass).
+- D1 schema shape/FK/per-table row counts beyond the table-name list (Section 3's 08-02-vintage detail remains unverified beyond the table count correction above).
+- cron-job.org's live job list — no API key was available this session (unlike 2026-08-07/09, which had one); Section 2/10's job tables are unverified as of this update.
+- Live Cloudflare-side cron *schedule* registrations (as distinct from `wrangler.toml`'s `[triggers]` block) for any worker — checking this the way Section 12.2 did requires a raw Cloudflare API token, which this session deliberately did not extract from `wrangler`'s local credential store.
+- Whether `worker/src/ebp-worker.js`'s live (pre-`fd62ff7`) `/market/breadth` response actually breaks or degrades gracefully against the already-live `fd62ff7` frontend — inferred as a real risk from the deploy-gap timing, not observed directly (no Clerk bearer token available to call the authenticated route).
 
 ---
