@@ -71,6 +71,29 @@ async function getCandlesFromCache(symbol, tf, env) {
   return JSON.parse(row.candles_json);
 }
 
+// Dedicated Yahoo-sourced breadth cache — watchdog-worker's
+// fetchBreadthFromYahoo() writes MAJOR_PAIRS candles here (not
+// candle_cache) as of its 2026-08-12 rebuild; Market Breadth reads them
+// from here rather than candle_cache. Same staleness-gating pattern as
+// getCandlesFromCache above, just a different source table.
+async function getYahooCandlesFromCache(symbol, tf, env) {
+  const row = await env.DB.prepare(
+    'SELECT candles_json, fetched_at FROM yahoo_candle_cache WHERE symbol = ? AND tf = ?'
+  ).bind(symbol, tf).first();
+
+  if (!row) return null;
+
+  const intervalMs = { M15: 15 * 60 * 1000, M30: 30 * 60 * 1000, '1H': 60 * 60 * 1000, '4H': 4 * 60 * 60 * 1000 };
+  const age = Date.now() - new Date(row.fetched_at).getTime();
+  const maxAge = tf === '4H' ? 1.25 * intervalMs['4H'] : 2 * intervalMs[tf];
+  if (age > maxAge) {
+    console.warn(`Stale yahoo cache for ${symbol} ${tf}: ${age}ms old`);
+    return null;
+  }
+
+  return JSON.parse(row.candles_json);
+}
+
 // daily_candle_cache stores OHLC + a calendar date string, not a
 // candle-open timestamp — reconstruct bar.time from the trading-day
 // boundary (17:00 NY the prior calendar day), same approach as every
@@ -233,12 +256,13 @@ async function handleMarketBreadthCron(env, debugLog = []) {
   const BREADTH_TF = '1H';
   const now = Date.now();
 
-  // Read 1H candles per pair from cache — Watchdog fetches these directly
-  // (breadth pairs are always in its symbol pool) for strength history and
-  // correlation.
+  // Read 1H candles per pair from the dedicated Yahoo breadth cache —
+  // watchdog-worker's fetchBreadthFromYahoo() writes MAJOR_PAIRS here
+  // (yahoo_candle_cache), not the shared candle_cache, as of its
+  // 2026-08-12 rebuild (Section 14 of the architecture report).
   const pairData = {};
   for (const [pair, base, quote] of MAJOR_PAIRS) {
-    const candles = await getCandlesFromCache(pair, BREADTH_TF, env);
+    const candles = await getYahooCandlesFromCache(pair, BREADTH_TF, env);
     if (candles && candles.length >= 1) {
       pairData[pair] = { candles, base, quote };
     } else {
