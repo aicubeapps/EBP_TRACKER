@@ -467,12 +467,16 @@ async function processFVGZones(db, symbol, tf, candlesOldestFirst, latestBar) {
     `SELECT * FROM nse_fvg_zones WHERE symbol=? AND tf=? AND mitigated_at IS NULL AND expires_at > ?`
   ).bind(symbol, tf, nowISO).all();
 
+  const statements = [];
   for (const row of activeFVGs ?? []) {
     if (checkFVGMitigation(latestBar, row)) {
-      await db.prepare(`UPDATE nse_fvg_zones SET mitigated_at=?, mitigated_by_tf=? WHERE id=?`)
-        .bind(nowISO, tf, row.id).run();
+      statements.push(
+        db.prepare(`UPDATE nse_fvg_zones SET mitigated_at=?, mitigated_by_tf=? WHERE id=?`)
+          .bind(nowISO, tf, row.id)
+      );
     }
   }
+  if (statements.length > 0) await db.batch(statements);
 }
 
 async function cleanupExpiredNseFVGs(db) {
@@ -1572,9 +1576,27 @@ export async function handleNseCron(env, tf) {
 
   const biasTF = NSE_BIAS_SOURCE.ebp[tf] ?? null; // identical map for ebp/sweep per spec
 
+  // Pre-fetch every symbol's native-TF candles in parallel — the one fetch
+  // every symbol needs unconditionally, isolated per-symbol via .catch so
+  // one failure doesn't abort the batch. The secondary biasTF/SMA-HTF
+  // fetches below stay inline/sequential (deliberately not parallelised —
+  // low value at current NSE symbol counts, and the per-symbol processing
+  // loop itself must stay sequential regardless, since generateNseSignalId
+  // does an unlocked read-then-write against a single shared counter row
+  // that concurrent symbols would race).
+  const fetchedCandles = new Map(
+    await Promise.all(
+      [...symbolMap.keys()].map(symbol =>
+        fetchNseCandles(symbol, tf, env)
+          .then(candles => [symbol, candles])
+          .catch(() => [symbol, null])
+      )
+    )
+  );
+
   for (const [symbol, { ebp: ebpUserRows, sweep: sweepUserRows, indicators: indicatorConfigRows }] of symbolMap) {
     try {
-      const candles = await fetchNseCandles(symbol, tf, env);
+      const candles = fetchedCandles.get(symbol);
       if (!candles || candles.length < 2) continue;
 
       let htfBias = 'neutral';
