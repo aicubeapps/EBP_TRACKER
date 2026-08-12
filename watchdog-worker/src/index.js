@@ -115,6 +115,19 @@ const INTERVAL_MS = {
   'W':   7  * 24 * 60 * 60 * 1000,
 };
 
+// Shared formatter for nyDateAndHour() — constructing Intl.DateTimeFormat
+// is expensive relative to reusing an instance's formatToParts(), and
+// nyDateAndHour() is called once per candle inside groupHourlyByTradingDay's
+// loop, so a fresh formatter per call was measurable CPU waste.
+const NY_DATE_HOUR_FMT = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  hour12: false,
+});
+
 // ============================================================
 // Twelve Data and Yahoo both include the currently-forming candle as
 // the most recent element — copied verbatim from ebp-worker.js.
@@ -518,15 +531,21 @@ async function fetchSignalAndStore(symbols, tf, keys, env) {
     resultMap = await fetchSignalTF(symbols, tf, keys, env);
   }
 
+  const statements = [];
   for (const symbol of symbols) {
     const candles = resultMap.get(symbol);
     if (candles && candles.length >= 20) {
-      await writeCandleCache(env.DB, symbol, tf, candles);
+      statements.push(
+        env.DB.prepare(
+          `INSERT OR REPLACE INTO candle_cache (symbol, tf, candles_json, fetched_at)
+           VALUES (?, ?, ?, ?)`
+        ).bind(symbol, tf, JSON.stringify(candles), new Date().toISOString())
+      );
     } else if (candles) {
       await logWatchdog(env.DB, 'warning', `${symbol} ${tf}: only ${candles.length} closed candles (<20) — skipping D1 write`);
     }
-    await yieldToRuntime();
   }
+  if (statements.length > 0) await env.DB.batch(statements);
 }
 
 // Breadth is Yahoo-only — fetches fire in parallel (no per-key credit
@@ -548,6 +567,7 @@ async function fetchBreadthFromYahoo(symbols, env) {
     )
   );
 
+  const statements = [];
   let successCount = 0;
   for (const { symbol, raw, error } of results) {
     if (error) {
@@ -556,12 +576,18 @@ async function fetchBreadthFromYahoo(symbols, env) {
     }
     const closed = getClosedCandles(raw, INTERVAL_MS['1H']);
     if (closed.length >= 20) {
-      await writeYahooCandleCache(env.DB, symbol, '1H', closed);
+      statements.push(
+        env.DB.prepare(
+          `INSERT OR REPLACE INTO yahoo_candle_cache (symbol, tf, candles_json, fetched_at)
+           VALUES (?, ?, ?, ?)`
+        ).bind(symbol, '1H', JSON.stringify(closed), new Date().toISOString())
+      );
       successCount++;
     } else {
       await logWatchdog(env.DB, 'warning', `${symbol} 1H (breadth): only ${closed.length} closed candles (<20) — skipping D1 write`);
     }
   }
+  if (statements.length > 0) await env.DB.batch(statements);
   await logWatchdog(env.DB, 'info', `Breadth fetch complete: ${successCount}/${symbols.length} symbols written`);
 }
 
@@ -799,11 +825,7 @@ async function seedDXYHistory(env) {
 // next calendar day. A day is complete once its 16:00 NY bar exists.
 // ============================================================
 function nyDateAndHour(ms) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', hour12: false,
-  }).formatToParts(new Date(ms));
+  const parts = NY_DATE_HOUR_FMT.formatToParts(new Date(ms));
   const map = {};
   for (const p of parts) map[p.type] = p.value;
   let hour = parseInt(map.hour, 10);
