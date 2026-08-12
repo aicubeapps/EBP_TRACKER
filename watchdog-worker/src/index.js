@@ -703,11 +703,11 @@ async function synthesiseDXY4H(db) {
 // rest of this file's cron gating already uses.
 async function synthesiseDXYDaily(db) {
   const now = Date.now();
-  const nyNowHour = getNewYorkHour(now);
 
-  const tradingDayOpenMs = nyNowHour >= 17
-    ? now - ((nyNowHour - 17) * 3600000)
-    : now - ((nyNowHour + 7) * 3600000);
+  // Only ever called at nyHour===17 (its sole call site's gate), so the
+  // trading day that just closed always spans exactly the last 24h —
+  // no need to derive an open time relative to the current NY hour.
+  const tradingDayOpenMs = now - (24 * 60 * 60 * 1000);
 
   const { results } = await db.prepare(`
     SELECT candle_time, open, high, low, close
@@ -1067,7 +1067,7 @@ async function sendWatchdogDailyDigest(env) {
     breadthCacheResult,
     nseResult,
     healthResult,
-    heartbeatResult,
+    lastLogResult,
   ] = await Promise.all([
     // Active signal symbols — same set Watchdog itself fetches (mirrors
     // getSignalSymbols' EXISTS logic via IN/UNION per the audited spec),
@@ -1132,16 +1132,17 @@ async function sendWatchdogDailyDigest(env) {
       GROUP BY event_type
     `).bind(cutoffIso).all(),
 
-    // Substitutes for a literal "last health check" lookup — no
-    // logWatchdog() call anywhere in this file ever includes the word
-    // "health" (handleWatchdogHealthCheck sends Telegram alerts directly,
-    // it never writes to watchdog_log), so that search would always
-    // return zero rows. This is the closest real signal: the native
-    // scheduled() heartbeat line logged at the top of every runWatchdog() tick.
+    // Last pipeline activity of any kind — replaces an earlier version of
+    // this query that looked for the native scheduled() heartbeat message
+    // specifically. That cron is dormant (no [triggers] entry), so it
+    // always showed a stale multi-hour-old timestamp even when the real
+    // ETL (cron-job.org-driven) was running fine. This reflects whatever
+    // actually ran last, which in practice is the hourly breadth fetch.
     db.prepare(`
-      SELECT MAX(created_at) as last_heartbeat
+      SELECT message, created_at
       FROM watchdog_log
-      WHERE message = 'Watchdog scheduled tick — heartbeat'
+      ORDER BY created_at DESC
+      LIMIT 1
     `).first(),
   ]);
 
@@ -1153,8 +1154,6 @@ async function sendWatchdogDailyDigest(env) {
   }
 
   const activeSymbols = activeSymbolsResult.results ?? [];
-  const forexCount  = activeSymbols.filter(s => s.asset_type === 'forex' || s.asset_type === 'commodity').length;
-  const cryptoCount = activeSymbols.filter(s => s.asset_type === 'crypto').length;
 
   const tfsBySymbol = new Map();
   for (const row of (configuredTFsResult.results ?? [])) {
@@ -1163,23 +1162,37 @@ async function sendWatchdogDailyDigest(env) {
   }
 
   const writesBySymbolTf = new Map();
-  let totalConfirmedWrites = 0;
   let candleLastFetchMs = null;
   for (const row of (candleWrites.results ?? [])) {
     writesBySymbolTf.set(`${row.symbol}|${row.tf}`, row);
-    totalConfirmedWrites += row.write_count;
     const ms = toMs(row.last_fetch);
     if (ms && (!candleLastFetchMs || ms > candleLastFetchMs)) candleLastFetchMs = ms;
   }
 
   // ── CANDLE FETCH ─────────────────────────────────────────────────────
-  const candleApplicable = isWeekend ? cryptoCount : activeSymbols.length;
-  const candleExpected   = candleApplicable * 96; // 15-min cron → 96 ticks/day
-  const candleOk = candleExpected > 0 && totalConfirmedWrites >= candleExpected * 0.95;
+  // Freshness check, not a write-count — candle_cache is INSERT OR REPLACE
+  // (one row per symbol+tf), so a 24h write-count can never exceed 1 per
+  // pair and was structurally incapable of matching an "expected ~576"
+  // target. D/W excluded — those TFs are served by daily_candle_cache/
+  // weekly_candle_cache, not candle_cache (see SIGNAL CANDLES below and
+  // DAILY/WEEKLY SYNTHESIS), so candle_cache never has rows for them by
+  // design, not by failure.
+  const TF_STALE_MIN = { M15: 30, M30: 35, '1H': 65, '4H': 245 };
+  const CANDLE_TFS_EXCLUDED = new Set(['D', '1D', 'W', '1W']);
+  let candleChecked = 0;
+  let candleFreshCount = 0;
+  for (const { symbol, asset_type } of activeSymbols) {
+    if (isWeekend && asset_type !== 'crypto') continue;
+    const tfs = [...(tfsBySymbol.get(symbol) ?? [])].filter(tf => !CANDLE_TFS_EXCLUDED.has(tf));
+    for (const tf of tfs) {
+      candleChecked++;
+      const ageMs = toMs(writesBySymbolTf.get(`${symbol}|${tf}`)?.last_fetch);
+      if (ageMs && minsAgo(ageMs) <= (TF_STALE_MIN[tf] ?? Infinity)) candleFreshCount++;
+    }
+  }
   const candleFetchSection =
     `<b>CANDLE FETCH</b>\n` +
-    (isWeekend ? `Forex/commodity: — Market closed (${forexCount} symbols)\n` : ``) +
-    `${isWeekend ? 'Crypto' : 'Signal symbols'}: expected ~${candleExpected}, confirmed ${totalConfirmedWrites} ${candleOk ? '✅' : '⚠️'}\n` +
+    `Signal symbols: ${candleFreshCount}/${candleChecked} fresh ${candleFreshCount === candleChecked ? '✅' : '⚠️'}\n` +
     `Last fetch: ${candleLastFetchMs ? nyTime(candleLastFetchMs) : 'no writes in 25h'}`;
 
   // ── BREADTH FETCH ────────────────────────────────────────────────────
@@ -1209,11 +1222,15 @@ async function sendWatchdogDailyDigest(env) {
     `Daily: ${dxyDailyMs && minsAgo(dxyDailyMs) <= 120 ? `✅ ${nyTime(dxyDailyMs)}` : '⚠️ not written'}`;
 
   // ── SIGNAL CANDLES (per active symbol) ──────────────────────────────
-  const TF_STALE_MIN = { M15: 30, M30: 35, '1H': 65, '4H': 245 };
+  // D/W excluded from the candle_cache freshness check — see
+  // CANDLE_TFS_EXCLUDED above. Those TFs are correctly reported in
+  // DAILY/WEEKLY SYNTHESIS instead.
   const signalLines = activeSymbols.map(({ symbol, asset_type }) => {
     if (isWeekend && asset_type !== 'crypto') return `${symbol}: — closed (weekend)`;
-    const tfs = [...(tfsBySymbol.get(symbol) ?? [])];
-    if (!tfs.length) return `${symbol}: no enabled TF config`;
+    const allTfs = [...(tfsBySymbol.get(symbol) ?? [])];
+    const tfs = allTfs.filter(tf => !CANDLE_TFS_EXCLUDED.has(tf));
+    if (!allTfs.length) return `${symbol}: no enabled TF config`;
+    if (!tfs.length) return `${symbol}: only D/W configured (see DAILY/WEEKLY SYNTHESIS)`;
     const staleTfs = tfs.filter(tf => {
       const ageMs = toMs(writesBySymbolTf.get(`${symbol}|${tf}`)?.last_fetch);
       return !ageMs || minsAgo(ageMs) > (TF_STALE_MIN[tf] ?? Infinity);
@@ -1258,11 +1275,11 @@ async function sendWatchdogDailyDigest(env) {
   for (const row of (healthResult.results ?? [])) {
     if (row.event_type in counts) counts[row.event_type] = row.cnt;
   }
-  const heartbeatMs = toMs(heartbeatResult?.last_heartbeat);
+  const lastLogMs = toMs(lastLogResult?.created_at);
   const healthSection =
     `<b>HEALTH LOG (25h)</b>\n` +
     `✅ Info: ${counts.info} · ⚠️ Warnings: ${counts.warning} · 🚨 Errors: ${counts.error}\n` +
-    `Last heartbeat: ${heartbeatMs ? nyTime(heartbeatMs) : 'never'}`;
+    `Last pipeline log: ${lastLogMs ? nyTime(lastLogMs) : 'never'}`;
 
   const message =
     `📊 <b>EBP Watchdog — EOD Operations Report</b>\n` +
