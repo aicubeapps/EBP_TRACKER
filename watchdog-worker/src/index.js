@@ -1013,39 +1013,268 @@ async function attemptWeeklySynthesis(symbols, env) {
 }
 
 // ============================================================
-// Daily summary digest — watchdog_log activity in the last 24h
+// EOD operations report — full pipeline snapshot (candle fetch, breadth/
+// DXY synthesis, per-symbol signal freshness, daily/weekly synthesis,
+// market breadth, NSE, watchdog_log 25h counts). Replaces the old
+// watchdog_log-only digest. Fires once/day via the same NY-17:00 gate in
+// runWatchdog() — 11 parallel D1 reads at that cadence is cheap.
 // ============================================================
 async function sendWatchdogDailyDigest(env) {
-  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const db  = env.DB;
+  const now = Date.now();
 
-  const { results } = await env.DB.prepare(
-    'SELECT event_type, COUNT(*) as count FROM watchdog_log WHERE created_at > ? GROUP BY event_type'
-  ).bind(cutoff).all();
+  // NY wall-clock (date+hour+minute) — same Intl shortOffset technique
+  // already used in handleWatchdogHealthCheck; getNYHour() alone only
+  // returns the hour, not minutes, so this is rebuilt locally rather than
+  // widening that helper's contract for one caller.
+  const nyParts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    timeZoneName: 'shortOffset',
+    hour: 'numeric', minute: 'numeric',
+  }).formatToParts(new Date(now));
+  const nyOffsetHours = parseInt(nyParts.find(p => p.type === 'timeZoneName').value.replace('GMT', ''));
+  const nyWallClock    = new Date(now + nyOffsetHours * 3600 * 1000);
+  const nyHourNow      = nyWallClock.getUTCHours();
+  const nyDayOfWeek    = nyWallClock.getUTCDay(); // 0=Sun..6=Sat
 
-  if (!results || results.length === 0) {
+  // IST wall-clock — UTC+5:30, no DST. Same arithmetic as
+  // handleWatchdogHealthCheck's NSE session gate.
+  const istClock      = new Date(now + 5.5 * 3600 * 1000);
+  const istDow         = istClock.getUTCDay();
+  const istMinutesNow  = istClock.getUTCHours() * 60 + istClock.getUTCMinutes();
+  const nseMarketOpen  = istDow >= 1 && istDow <= 5
+    && istMinutesNow >= (9 * 60 + 15) && istMinutesNow < (15 * 60 + 30);
+
+  const isWeekend = isForexClosedWindow(now);
+
+  const hm      = d => `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
+  const toMs    = v => (v == null) ? null : new Date(v).getTime();
+  const nyTime  = tsMs => tsMs ? `${hm(new Date(tsMs + nyOffsetHours * 3600 * 1000))} NY` : 'never';
+  const istTime = tsMs => tsMs ? `${hm(new Date(tsMs + 5.5 * 3600 * 1000))} IST` : 'never';
+  const minsAgo = tsMs => tsMs ? Math.round((now - tsMs) / 60000) : Infinity;
+  const headerDate = `${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][nyDayOfWeek]} ${nyWallClock.getUTCFullYear()}-${String(nyWallClock.getUTCMonth() + 1).padStart(2, '0')}-${String(nyWallClock.getUTCDate()).padStart(2, '0')}`;
+
+  const cutoffIso = new Date(now - 25 * 60 * 60 * 1000).toISOString();
+
+  const [
+    activeSymbolsResult,
+    configuredTFsResult,
+    candleWrites,
+    breadthResult,
+    dxyResult,
+    dailySynthResult,
+    weeklySynthResult,
+    breadthCacheResult,
+    nseResult,
+    healthResult,
+    heartbeatResult,
+  ] = await Promise.all([
+    // Active signal symbols — same set Watchdog itself fetches (mirrors
+    // getSignalSymbols' EXISTS logic via IN/UNION per the audited spec),
+    // widened to also return asset_type for weekend forex/crypto branching.
+    db.prepare(`
+      SELECT DISTINCT ua.symbol, ua.asset_type
+      FROM user_assets ua
+      WHERE ua.asset_type IN ('forex','crypto','commodity')
+      AND ua.id IN (
+        SELECT DISTINCT asset_id FROM user_ebp_configs WHERE enabled=1
+        UNION
+        SELECT DISTINCT asset_id FROM user_sweep_configs WHERE enabled=1
+      )
+    `).all(),
+
+    // Which TFs each active symbol actually has an enabled EBP/Sweep
+    // config for — drives the per-symbol freshness check below so a
+    // symbol only configured for M15 isn't flagged stale for 4H.
+    db.prepare(`
+      SELECT ua.symbol, ec.timeframe FROM user_assets ua
+      JOIN user_ebp_configs ec ON ec.asset_id = ua.id
+      WHERE ec.enabled = 1 AND ua.asset_type IN ('forex','crypto','commodity')
+      UNION
+      SELECT ua.symbol, sc.timeframe FROM user_assets ua
+      JOIN user_sweep_configs sc ON sc.asset_id = ua.id
+      WHERE sc.enabled = 1 AND ua.asset_type IN ('forex','crypto','commodity')
+    `).all(),
+
+    db.prepare(`
+      SELECT symbol, tf, MAX(fetched_at) as last_fetch, COUNT(*) as write_count
+      FROM candle_cache
+      WHERE fetched_at > ?
+      AND symbol IN (SELECT symbol FROM user_assets WHERE asset_type IN ('forex','crypto','commodity'))
+      GROUP BY symbol, tf
+    `).bind(cutoffIso).all(),
+
+    db.prepare(`
+      SELECT COUNT(*) as cnt, MAX(fetched_at) as last_fetch
+      FROM yahoo_candle_cache
+      WHERE fetched_at > ?
+    `).bind(cutoffIso).first(),
+
+    db.prepare(`
+      SELECT tf, COUNT(*) as cnt, MAX(created_at) as latest
+      FROM dxy_candle_cache
+      WHERE created_at > ?
+      GROUP BY tf
+    `).bind(cutoffIso).all(),
+
+    db.prepare(`SELECT MAX(synthesised_at) as last_synth FROM daily_candle_cache`).first(),
+
+    db.prepare(`SELECT MAX(synthesised_at) as last_synth FROM weekly_candle_cache`).first(),
+
+    db.prepare(`SELECT MAX(computed_at) as last_computed FROM market_breadth_cache WHERE tf='1H'`).first(),
+
+    db.prepare(`SELECT MAX(updated_at) as last_update FROM nse_candle_cache`).first(),
+
+    db.prepare(`
+      SELECT event_type, COUNT(*) as cnt
+      FROM watchdog_log
+      WHERE created_at > ?
+      GROUP BY event_type
+    `).bind(cutoffIso).all(),
+
+    // Substitutes for a literal "last health check" lookup — no
+    // logWatchdog() call anywhere in this file ever includes the word
+    // "health" (handleWatchdogHealthCheck sends Telegram alerts directly,
+    // it never writes to watchdog_log), so that search would always
+    // return zero rows. This is the closest real signal: the native
+    // scheduled() heartbeat line logged at the top of every runWatchdog() tick.
+    db.prepare(`
+      SELECT MAX(created_at) as last_heartbeat
+      FROM watchdog_log
+      WHERE message = 'Watchdog scheduled tick — heartbeat'
+    `).first(),
+  ]);
+
+  if (!(healthResult.results?.length)) {
     await sendWatchdogAlert(env,
-      '📊 <b>Watchdog Daily Summary</b>\n⚠️ No watchdog_log entries in the last 24 hours — Watchdog may not be running.'
+      '📊 <b>Watchdog EOD Report</b>\n⚠️ No watchdog_log entries in the last 25 hours — Watchdog may not be running.'
     );
     return;
   }
 
-  const counts = { info: 0, warning: 0, error: 0 };
-  for (const row of results) {
-    if (row.event_type in counts) counts[row.event_type] = row.count;
+  const activeSymbols = activeSymbolsResult.results ?? [];
+  const forexCount  = activeSymbols.filter(s => s.asset_type === 'forex' || s.asset_type === 'commodity').length;
+  const cryptoCount = activeSymbols.filter(s => s.asset_type === 'crypto').length;
+
+  const tfsBySymbol = new Map();
+  for (const row of (configuredTFsResult.results ?? [])) {
+    if (!tfsBySymbol.has(row.symbol)) tfsBySymbol.set(row.symbol, new Set());
+    tfsBySymbol.get(row.symbol).add(row.timeframe);
   }
 
-  const lastRun = await env.DB.prepare(
-    'SELECT created_at FROM watchdog_log WHERE created_at > ? ORDER BY created_at DESC LIMIT 1'
-  ).bind(cutoff).first();
+  const writesBySymbolTf = new Map();
+  let totalConfirmedWrites = 0;
+  let candleLastFetchMs = null;
+  for (const row of (candleWrites.results ?? [])) {
+    writesBySymbolTf.set(`${row.symbol}|${row.tf}`, row);
+    totalConfirmedWrites += row.write_count;
+    const ms = toMs(row.last_fetch);
+    if (ms && (!candleLastFetchMs || ms > candleLastFetchMs)) candleLastFetchMs = ms;
+  }
 
-  const message = `📊 <b>Watchdog Daily Summary</b>
-Period: last 24 hours
+  // ── CANDLE FETCH ─────────────────────────────────────────────────────
+  const candleApplicable = isWeekend ? cryptoCount : activeSymbols.length;
+  const candleExpected   = candleApplicable * 96; // 15-min cron → 96 ticks/day
+  const candleOk = candleExpected > 0 && totalConfirmedWrites >= candleExpected * 0.95;
+  const candleFetchSection =
+    `<b>CANDLE FETCH</b>\n` +
+    (isWeekend ? `Forex/commodity: — Market closed (${forexCount} symbols)\n` : ``) +
+    `${isWeekend ? 'Crypto' : 'Signal symbols'}: expected ~${candleExpected}, confirmed ${totalConfirmedWrites} ${candleOk ? '✅' : '⚠️'}\n` +
+    `Last fetch: ${candleLastFetchMs ? nyTime(candleLastFetchMs) : 'no writes in 25h'}`;
 
-✅ Normal runs: ${counts.info}
-⚠️ Warnings: ${counts.warning}
-🚨 Errors: ${counts.error}
+  // ── BREADTH FETCH ────────────────────────────────────────────────────
+  // yahoo_candle_cache is INSERT OR REPLACE (one row per symbol+tf), so
+  // this can only ever report "how many of the N symbols currently have a
+  // fresh row," never a cumulative writes-across-24-runs count — no write
+  // history is retained to count.
+  const breadthFresh  = breadthResult?.cnt ?? 0;
+  const breadthLastMs = toMs(breadthResult?.last_fetch);
+  const breadthSection =
+    `<b>BREADTH FETCH</b>\n` +
+    `Expected: hourly (~24 runs/day), ${BREADTH_SYMBOLS.length} symbols per run\n` +
+    `Currently fresh: ${breadthFresh}/${BREADTH_SYMBOLS.length} symbols ${breadthFresh >= BREADTH_SYMBOLS.length * 0.95 ? '✅' : '⚠️'}\n` +
+    `Last fetch: ${breadthLastMs ? nyTime(breadthLastMs) : 'never'}`;
 
-Last run: ${lastRun?.created_at ?? 'unknown'}`;
+  // ── DXY SYNTHESIS ────────────────────────────────────────────────────
+  // Uses dxy_candle_cache (dxyResult) throughout, including for the Daily
+  // row — not the generic daily_candle_cache MAX (that's a different
+  // table, reserved for the DAILY/WEEKLY SYNTHESIS section below, which
+  // covers the signal-symbol+DXY combined attemptDailySynthesis batch).
+  const dxyByTf   = new Map((dxyResult.results ?? []).map(r => [r.tf, r]));
+  const dxyDailyMs = toMs(dxyByTf.get('Daily')?.latest);
+  const dxySection =
+    `<b>DXY SYNTHESIS</b>\n` +
+    `1H rows (25h): ${dxyByTf.get('1H')?.cnt ?? 0}\n` +
+    `4H rows (25h): ${dxyByTf.get('4H')?.cnt ?? 0}\n` +
+    `Daily: ${dxyDailyMs && minsAgo(dxyDailyMs) <= 120 ? `✅ ${nyTime(dxyDailyMs)}` : '⚠️ not written'}`;
+
+  // ── SIGNAL CANDLES (per active symbol) ──────────────────────────────
+  const TF_STALE_MIN = { M15: 30, M30: 35, '1H': 65, '4H': 245 };
+  const signalLines = activeSymbols.map(({ symbol, asset_type }) => {
+    if (isWeekend && asset_type !== 'crypto') return `${symbol}: — closed (weekend)`;
+    const tfs = [...(tfsBySymbol.get(symbol) ?? [])];
+    if (!tfs.length) return `${symbol}: no enabled TF config`;
+    const staleTfs = tfs.filter(tf => {
+      const ageMs = toMs(writesBySymbolTf.get(`${symbol}|${tf}`)?.last_fetch);
+      return !ageMs || minsAgo(ageMs) > (TF_STALE_MIN[tf] ?? Infinity);
+    });
+    return staleTfs.length ? `${symbol}: ⚠️ stale ${staleTfs.join(',')}` : `${symbol}: ✅ (${tfs.join(',')})`;
+  });
+  const signalSection = `<b>SIGNAL CANDLES</b>\n${signalLines.join('\n') || 'no active symbols'}`;
+
+  // ── DAILY/WEEKLY SYNTHESIS ───────────────────────────────────────────
+  const dailyMs  = toMs(dailySynthResult?.last_synth);
+  const weeklyMs = toMs(weeklySynthResult?.last_synth);
+  const isFriday17 = nyDayOfWeek === 5 && nyHourNow === 17;
+  const dailyWeeklySection =
+    `<b>DAILY/WEEKLY SYNTHESIS</b>\n` +
+    `Daily: ${dailyMs && minsAgo(dailyMs) <= 120 ? `✅ ${nyTime(dailyMs)}` : '⚠️ not written'}\n` +
+    `Weekly: ${isFriday17
+      ? (weeklyMs && minsAgo(weeklyMs) <= 120 ? `✅ ${nyTime(weeklyMs)}` : '⚠️ not written')
+      : '— not Friday'}`;
+
+  // ── MARKET BREADTH ───────────────────────────────────────────────────
+  const breadthCacheMs = toMs(breadthCacheResult?.last_computed);
+  const marketBreadthSection =
+    `<b>MARKET BREADTH</b>\n` +
+    `Last computed: ${breadthCacheMs ? nyTime(breadthCacheMs) : 'never'} ${breadthCacheMs && minsAgo(breadthCacheMs) <= 65 ? '✅' : '⚠️'}`;
+
+  // ── NSE ───────────────────────────────────────────────────────────────
+  const nseIsWeekday = istDow >= 1 && istDow <= 5;
+  const nseUpdateMs  = toMs(nseResult?.last_update);
+  let nseSection;
+  if (!nseIsWeekday) {
+    nseSection = `<b>NSE</b>\n— Weekend closed`;
+  } else if (nseMarketOpen) {
+    nseSection = `<b>NSE</b>\nLast update: ${nseUpdateMs ? istTime(nseUpdateMs) : 'never'} ${nseUpdateMs && minsAgo(nseUpdateMs) <= 30 ? '✅' : '⚠️'}`;
+  } else if (nseUpdateMs && new Date(nseUpdateMs + 5.5 * 3600 * 1000).getUTCDay() === istDow) {
+    nseSection = `<b>NSE</b>\n✅ ${istTime(nseUpdateMs)} (session closed)`;
+  } else {
+    nseSection = `<b>NSE</b>\n— closed, no data today`;
+  }
+
+  // ── HEALTH LOG ───────────────────────────────────────────────────────
+  const counts = { info: 0, warning: 0, error: 0 };
+  for (const row of (healthResult.results ?? [])) {
+    if (row.event_type in counts) counts[row.event_type] = row.cnt;
+  }
+  const heartbeatMs = toMs(heartbeatResult?.last_heartbeat);
+  const healthSection =
+    `<b>HEALTH LOG (25h)</b>\n` +
+    `✅ Info: ${counts.info} · ⚠️ Warnings: ${counts.warning} · 🚨 Errors: ${counts.error}\n` +
+    `Last heartbeat: ${heartbeatMs ? nyTime(heartbeatMs) : 'never'}`;
+
+  const message =
+    `📊 <b>EBP Watchdog — EOD Operations Report</b>\n` +
+    `${headerDate} · ${hm(nyWallClock)} NY / ${hm(istClock)} IST\n\n` +
+    `${candleFetchSection}\n\n` +
+    `${breadthSection}\n\n` +
+    `${dxySection}\n\n` +
+    `${signalSection}\n\n` +
+    `${dailyWeeklySection}\n\n` +
+    `${marketBreadthSection}\n\n` +
+    `${nseSection}\n\n` +
+    `${healthSection}`;
 
   await sendWatchdogAlert(env, message);
 }
