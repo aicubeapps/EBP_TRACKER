@@ -1473,6 +1473,19 @@ async function handleBreadthFetchCron(env) {
     }
     await writeDXYBlobsToCache(db, ['1H']);
 
+    // Prune dxy_candle_cache — append-only accumulator (INSERT OR IGNORE,
+    // no existing cleanup) otherwise grows unbounded. Retention comfortably
+    // covers every reader: writeDXYBlobsToCache mirrors at most 50 rows,
+    // synthesiseDXY4H needs the last 4 x 1H rows, synthesiseDXYDaily needs
+    // ~24 x 1H rows in a 24h window, synthesiseDXYWeekly needs the last 5
+    // x Daily rows.
+    await env.DB.batch([
+      env.DB.prepare(`DELETE FROM dxy_candle_cache WHERE tf='1H' AND candle_time NOT IN (SELECT candle_time FROM dxy_candle_cache WHERE tf='1H' ORDER BY candle_time DESC LIMIT 168)`),
+      env.DB.prepare(`DELETE FROM dxy_candle_cache WHERE tf='4H' AND candle_time NOT IN (SELECT candle_time FROM dxy_candle_cache WHERE tf='4H' ORDER BY candle_time DESC LIMIT 42)`),
+      env.DB.prepare(`DELETE FROM dxy_candle_cache WHERE tf='Daily' AND candle_time NOT IN (SELECT candle_time FROM dxy_candle_cache WHERE tf='Daily' ORDER BY candle_time DESC LIMIT 30)`),
+      env.DB.prepare(`DELETE FROM dxy_candle_cache WHERE tf='Weekly' AND candle_time NOT IN (SELECT candle_time FROM dxy_candle_cache WHERE tf='Weekly' ORDER BY candle_time DESC LIMIT 12)`)
+    ]);
+
     // Daily/weekly synthesis includes DXY so its candle_cache-sourced
     // daily/weekly candles are built alongside signal-symbol candles too
     // — this runs in addition to (not instead of) dxy_candle_cache's own
@@ -1484,6 +1497,13 @@ async function handleBreadthFetchCron(env) {
     }
 
     await cleanupApiCallLog(db);
+
+    // watchdog_log has no existing cleanup (unlike api_call_log above) —
+    // 7-day retention comfortably covers every reader (EOD digest reads a
+    // 25h window, health check reads 30min).
+    await env.DB.prepare(
+      `DELETE FROM watchdog_log WHERE created_at < datetime('now', '-7 days')`
+    ).run();
 
     if (nyDay === 5 && nyHour === 17) {
       await attemptWeeklySynthesis([...signalSymbols, 'DXY'], env);
