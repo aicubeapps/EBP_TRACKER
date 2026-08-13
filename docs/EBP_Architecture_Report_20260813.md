@@ -1146,7 +1146,7 @@ The "Read by Source" column is confirmed from direct file reads.
 | Secret | Configured | Read by Source | Status |
 |--------|-----------|----------------|--------|
 | `CRON_SECRET` | Yes — confirmed 2026-08-14 | Yes — `POST /cron/sma` auth header check | Active |
-| `SHARED_BOT_TOKEN` | No — confirmed not configured 2026-08-14 | Yes — Telegram alert sending | **Configured/read mismatch** — code sends Telegram alerts via this secret but it is not set on this worker; those sends fail silently at runtime. Flagged 2026-08-14, not yet investigated further. |
+| `SHARED_BOT_TOKEN` | Yes — added 2026-08-14 | Yes — Telegram alert sending | Active. RESOLVED 2026-08-14 — was missing on this worker only (present on the other three). `deliverForexSmaAlert()` calls `sendTelegramMessage()` before the `alert_history` INSERT, and `sendTelegramMessage()` throws on a non-ok Telegram response, so a missing token means the send throws and the alert is dropped before ever reaching `alert_history` — not a silent no-op. `alert_history` shows `sma_exhaustion`/`sma_type1` deliveries succeeding as recently as 2026-08-13T06:31 UTC / 2026-08-12T09:46 UTC, so the secret was present and working until shortly before this session's 2026-08-14 audit found it missing — not missing since inception. Root cause of the gap itself (a lost token, likely an out-of-band rotation applied to the other three workers but missed here) is not established. Added via `wrangler secret put`; SMA Cloud Telegram alerts are operational again. |
 
 ---
 
