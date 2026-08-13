@@ -1,9 +1,6 @@
 import { SignInButton } from '@clerk/clerk-react';
-import { useParams } from 'react-router-dom';
 
 export default function Landing() {
-  const { token } = useParams();
-
   return (
     <div className="landing-shell">
       <img src="/favicon.svg" alt="EBP Tracker" className="landing-logo" />
@@ -11,12 +8,6 @@ export default function Landing() {
       <h1 className="landing-title">EBP Tracker</h1>
       <p className="landing-tagline">Precision alerts for engulfing bar prints.</p>
       <p className="landing-sub">Forex · Commodities · Indices · Indian Markets</p>
-
-      {token && (
-        <div className="landing-invite">
-          Invite token active: <strong style={{ fontFamily: 'var(--font-mono)' }}>{token}</strong>
-        </div>
-      )}
 
       <SignInButton mode="modal" redirectUrl="/dashboard">
         <button className="btn btn-primary btn-lg">

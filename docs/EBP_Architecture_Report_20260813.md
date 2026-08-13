@@ -186,7 +186,6 @@ NSE Worker also holds `CRON_SECRET` and `CLERK_SECRET_KEY`. NSE Worker `wrangler
 | `chain_state` | ebp-worker (cron) | ebp-worker (user read) |
 | `user_telegram` | ebp-worker | watchdog-worker, compute-worker |
 | `user_indicator_settings` | ebp-worker | compute-worker |
-| `invite_tokens` | admin-worker | ebp-worker |
 
 ### 4.2 Candle Cache Tables
 
@@ -691,6 +690,12 @@ The route reads `tf` from the request body, then falls back to a query parameter
 
 ---
 
+### 12.9 Invite Token Feature — REMOVED PERMANENTLY (2026-08-14)
+
+Feature had zero enforcement: token was display-only text in `Landing.jsx`, never passed into the Clerk sign-in modal, never validated server-side by any frontend caller, no write path to `used_by` or `active`. Any visitor could register identically with or without a token. Full removal: `GET /invite/:token` removed from ebp-worker, `GET /admin/tokens` and `POST /admin/invite` removed from admin-worker, `Landing.jsx`'s token-display block and `.landing-invite` CSS removed, Admin.jsx's "Invite Tokens" tab removed, `invite_tokens` table dropped via migration 014. Closed permanently. No further action.
+
+---
+
 *End of report. All facts are sourced from direct file reads of the production codebase as of 2026-08-13. Sections marked NOT VERIFIED require a live database query or runtime observation to confirm.*
 
 ---
@@ -746,11 +751,10 @@ The route reads `tf` from the request body, then falls back to a query parameter
 | POST | `/telegram/webhook` | public | Incoming Telegram webhook. Receives bot updates; processes `/start` deep-link tokens for account linking. No auth header — URL secrecy is the access control. |
 | GET | `/signals/:id` | X-Journal-Secret | Trade Journal integration. Returns a `signals` row by `signal_id`. Secured by `JOURNAL_API_SECRET` shared secret — CORS open (`Access-Control-Allow-Origin: *`). |
 | PATCH | `/signals/:id/traded` | X-Journal-Secret | Trade Journal integration. Sets `traded = 1` on a `signals` row. Secured by `JOURNAL_API_SECRET`. |
-| GET | `/invite/:token` | public | Validates an invite token against `invite_tokens`. Returns `{ valid: true, token }` or `{ valid: false, error }`. No Clerk auth required — used during the pre-registration invite flow. |
 | GET | `/sweep/dashboard` | Clerk JWT | Returns Sweep-specific dashboard data for the user's assets. |
 | GET | `/sweep/history` | Clerk JWT | Returns recent Sweep alert history for the user. |
 
-**44 routes total** (source: `router.get/post/patch/delete` calls in ebp-worker.js).
+**43 routes total** (source: `router.get/post/patch/delete` calls in ebp-worker.js; was 44, `GET /invite/:token` removed 2026-08-14).
 
 ---
 
@@ -802,8 +806,6 @@ All routes except `/health` require Clerk JWT (`Authorization: Bearer <token>`) 
 |--------|------|-----------|-------------|
 | GET | `/health` | public | Returns basic health response. |
 | GET | `/admin/users` | Clerk JWT + is_admin | Returns all `users` rows. |
-| GET | `/admin/tokens` | Clerk JWT + is_admin | Returns all `invite_tokens` rows. |
-| POST | `/admin/invite` | Clerk JWT + is_admin | Generates an 8-char invite token (`crypto.randomUUID().split('-')[0].toUpperCase()`), inserts into `invite_tokens`. Returns the invite URL built from `env.APP_URL`. |
 | POST | `/admin/expire/:id` | Clerk JWT + is_admin | Sets `users.active = 0` and `users.expires_at = Date.now()` (current time, not future) for the specified user. |
 | GET | `/admin/api-keys` | Clerk JWT + is_admin | Returns all rows from `api_keys` joined with `api_key_state`. |
 | POST | `/admin/api-keys` | Clerk JWT + is_admin | Inserts a new row into `api_keys`. |
@@ -1086,17 +1088,11 @@ All actions are performed via admin-worker routes. All require Clerk JWT + `is_a
 
 ---
 
-### 15.3 Invite Flow
+### 15.3 Invite Flow — REMOVED (2026-08-14)
 
-1. **Admin issues token:** Admin calls `POST /admin/invite`. A row is inserted into `invite_tokens` with an 8-char alphanumeric token and `active = 1`, `used_by = NULL`. The response contains the full invite URL (`env.APP_URL/invite/<token>`).
+Removed entirely. Investigation (2026-08-14) found the feature had zero actual enforcement: the token was display-only text in `Landing.jsx`, never passed into the Clerk sign-in modal, and `GET /invite/:token` was never called by any frontend code — confirmed by a repo-wide search. Any visitor could register identically with or without a token; `used_by`/`active` were inert columns with no write path (consistent with this section's prior finding that the consumption step was never found in source — it never existed).
 
-2. **Admin shares the URL** with the prospective user out-of-band (e.g. email, Slack).
-
-3. **User visits the invite URL:** The browser hits `GET /invite/:token` on the EBP Worker. The handler queries `invite_tokens WHERE token = ? AND active = 1 AND used_by IS NULL`. If valid, returns `{ valid: true, token }`. If already used or invalid, returns `{ valid: false, error: 'Invalid or already used token' }` (HTTP 400).
-
-4. **User completes registration:** The frontend uses the validated token to complete Clerk registration. The exact step that marks `invite_tokens.used_by` and `active = 0` is NOT FOUND IN SOURCE — ebp-worker.js lines covering the Clerk webhook or post-registration handler were not read in sufficient detail in this session. Manual verification required for the token consumption step.
-
-5. **Expired/used token:** `GET /invite/:token` returns HTTP 400 with `{ valid: false, error: 'Invalid or already used token' }`. The user cannot proceed with registration.
+`GET /invite/:token` removed from ebp-worker, `GET /admin/tokens` and `POST /admin/invite` removed from admin-worker, `Landing.jsx`'s token-display block removed (the page itself remains — it's also the plain `/` sign-in landing page), the "Invite Tokens" admin tab removed, `invite_tokens` table dropped via migration 014.
 
 ---
 

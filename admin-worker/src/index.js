@@ -170,28 +170,6 @@ router.get('/admin/users', async (req, env) => {
   return json(users.results ?? [], 200, origin);
 });
 
-router.get('/admin/tokens', async (req, env) => {
-  const { user: clerkUser, origin, error } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
-  const tokens = await env.DB.prepare(
-    'SELECT * FROM invite_tokens ORDER BY created_at DESC'
-  ).all();
-  return json(tokens.results ?? [], 200, origin);
-});
-
-router.post('/admin/invite', async (req, env) => {
-  const { user: clerkUser, origin, error } = req._ctx;
-  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
-  const token = crypto.randomUUID().split('-')[0].toUpperCase();
-  await env.DB.prepare(
-    'INSERT INTO invite_tokens (token, created_at) VALUES (?,?)'
-  ).bind(token, Date.now()).run();
-  const appUrl = env.APP_URL ?? 'https://ebp-tracker.pages.dev';
-  return json({ token, url: `${appUrl}/invite/${token}` }, 201, origin);
-});
-
 router.post('/admin/expire/:id', async (req, env) => {
   const { user: clerkUser, origin, error, params } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);

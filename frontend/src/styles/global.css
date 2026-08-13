@@ -1543,18 +1543,6 @@ html, body, #root {
 .landing-tagline { font-size: 14px; color: var(--text-secondary); margin-bottom: 4px; }
 .landing-sub { font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary); margin-bottom: var(--sp-xl); }
 
-.landing-invite {
-  display: inline-block;
-  padding: 10px 20px;
-  margin-bottom: var(--sp-lg);
-  background: var(--surface);
-  border: 1px solid var(--nav-active-accent);
-  border-radius: var(--radius-md);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--nav-active-accent);
-}
-
 .landing-footer {
   margin-top: var(--sp-xl);
   font-family: var(--font-mono);

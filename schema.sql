@@ -126,14 +126,6 @@ CREATE TABLE IF NOT EXISTS sma_cloud_states (
   UNIQUE(symbol, tf)
 );
 
-CREATE TABLE IF NOT EXISTS invite_tokens (
-  token      TEXT PRIMARY KEY,
-  created_at INTEGER NOT NULL,
-  used_by    TEXT,
-  used_at    INTEGER,
-  active     INTEGER DEFAULT 1
-);
-
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_ua_user_id      ON user_assets(user_id);
 CREATE INDEX IF NOT EXISTS idx_ua_symbol       ON user_assets(symbol);

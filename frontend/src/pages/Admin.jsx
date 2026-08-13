@@ -3,7 +3,7 @@ import { useAuth } from '@clerk/clerk-react';
 import api from '../lib/api';
 import PriceFeedPanel from '../components/PriceFeedPanel';
 
-const TABS = ['Users', 'Invite Tokens', 'API Keys', 'User Limits', 'Price Feed'];
+const TABS = ['Users', 'API Keys', 'User Limits', 'Price Feed'];
 const ALL_TFS      = ['M5', 'M15', 'M30', '1H', '4H', 'D', 'W'];
 const ALL_NSE_TFS  = ['M1', 'M5', 'M15', 'M30', '1H', 'D'];
 
@@ -12,7 +12,6 @@ export default function Admin() {
   const [tab, setTab]                   = useState(0);
   const [isAdmin, setIsAdmin]           = useState(null);
   const [users, setUsers]               = useState([]);
-  const [tokens, setTokens]             = useState([]);
   const [keys, setKeys]                 = useState([]);
   const [loading, setLoading]           = useState(true);
   const [newKey, setNewKey]             = useState({ source: 'twelvedata', key_value: '', label: '' });
@@ -36,13 +35,11 @@ export default function Admin() {
         const admin = me.is_admin === 1;
         setIsAdmin(admin);
         if (admin) {
-          const [u, t, k] = await Promise.all([
+          const [u, k] = await Promise.all([
             api.get('/admin/users',    token),
-            api.get('/admin/tokens',   token),
             api.get('/admin/api-keys', token),
           ]);
           setUsers(Array.isArray(u) ? u : []);
-          setTokens(Array.isArray(t) ? t : []);
           setKeys(Array.isArray(k) ? k : []);
         }
       } catch (e) {
@@ -53,14 +50,6 @@ export default function Admin() {
       }
     })();
   }, []);
-
-  const handleGenerateToken = async () => {
-    const token = await getToken();
-    const data  = await api.post('/admin/invite', {}, token);
-    alert(`New invite URL:\n${data.url}`);
-    const t = await api.get('/admin/tokens', token);
-    setTokens(Array.isArray(t) ? t : []);
-  };
 
   const handleExpire = async (userId) => {
     if (!window.confirm('Expire this user account?')) return;
@@ -338,28 +327,6 @@ export default function Admin() {
 
       {tab === 1 && (
         <div>
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
-            <button className="btn btn-primary" onClick={handleGenerateToken}>+ Generate Token</button>
-          </div>
-          {tokens.length === 0 ? (
-            <div className="card" style={{ textAlign: 'center', color: 'var(--muted)', padding: 24 }}>No tokens yet</div>
-          ) : tokens.map(t => (
-            <div key={t.token} className="card">
-              <div className="card-header">
-                <span className="card-title text-mono" style={{ fontSize: 12 }}>{t.token}</span>
-                <span className="badge">{t.used_by ? 'USED' : 'UNUSED'}</span>
-              </div>
-              <div style={{ fontSize: 12, lineHeight: 1.8 }}>
-                <div><span className="text-muted">Used by:</span> {t.used_by || '—'}</div>
-                <div><span className="text-muted">Created:</span> {new Date(t.created_at).toLocaleDateString()}</div>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {tab === 2 && (
-        <div>
           <div className="section-heading">Upstox Analytics Token</div>
           {(() => {
             const upstoxKey = keys.find(k => k.source === 'upstox');
@@ -509,7 +476,7 @@ export default function Admin() {
         </div>
       )}
 
-      {tab === 3 && (
+      {tab === 2 && (
         <div>
           <div className="section-heading">User Asset Limits</div>
           {users.length === 0 ? (
@@ -543,7 +510,7 @@ export default function Admin() {
         </div>
       )}
 
-      {tab === 4 && <PriceFeedPanel keys={keys} />}
+      {tab === 3 && <PriceFeedPanel keys={keys} />}
     </div>
   );
 }

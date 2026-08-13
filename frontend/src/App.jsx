@@ -34,7 +34,6 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<LandingRoute />} />
-        <Route path="/invite/:token" element={<LandingRoute />} />
         <Route path="/dashboard" element={<ProtectedRoute><Layout><Dashboard /></Layout></ProtectedRoute>} />
         <Route path="/assets" element={<ProtectedRoute><Layout><Assets /></Layout></ProtectedRoute>} />
         <Route path="/alerts" element={<ProtectedRoute><Layout><Alerts /></Layout></ProtectedRoute>} />

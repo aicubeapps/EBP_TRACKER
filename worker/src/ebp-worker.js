@@ -2236,17 +2236,6 @@ router.patch('/signals/:id/traded', async (req, env) => {
   return journalJson({ ok: true }, 200);
 });
 
-// ── Invite token validation ───────────────────────────────────
-
-router.get('/invite/:token', async (req, env) => {
-  const { origin, params } = req._ctx;
-  const record = await env.DB.prepare(
-    'SELECT * FROM invite_tokens WHERE token = ? AND active = 1 AND used_by IS NULL'
-  ).bind(params.token).first();
-  if (!record) return json({ valid: false, error: 'Invalid or already used token' }, 400, origin);
-  return json({ valid: true, token: params.token }, 200, origin);
-});
-
 // ── Sweep (moved from Sweep Worker) ────────────────────
 
 router.get('/sweep/dashboard', async (req, env) => {
