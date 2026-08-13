@@ -1907,8 +1907,10 @@ router.get('/alerts/export', async (req, env) => {
   const from   = days ? Date.now() - parseInt(days) * 24 * 60 * 60 * 1000 : parseInt(url.searchParams.get('from') ?? '0');
   const to     = parseInt(url.searchParams.get('to') ?? String(Date.now()));
   const assetId = url.searchParams.get('assetId');
+  const fromISO = new Date(from).toISOString();
+  const toISO   = new Date(to).toISOString();
   let query    = 'SELECT * FROM alert_history WHERE user_id = ? AND fired_at >= ? AND fired_at <= ?';
-  const params = [clerkUser.id, from, to];
+  const params = [clerkUser.id, fromISO, toISO];
   if (assetId) {
     const asset = await env.DB.prepare('SELECT symbol FROM user_assets WHERE id = ? AND user_id = ?').bind(assetId, clerkUser.id).first();
     if (asset) { query += ' AND symbol = ?'; params.push(asset.symbol); }
