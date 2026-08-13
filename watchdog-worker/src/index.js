@@ -33,6 +33,13 @@ function json(data, status = 200) {
 // logWatchdog call can fire.
 let _watchdogAlertEnv = null;
 
+// Dedup guard for POST /cron/daily-digest — cron-job.org calls this route
+// with no time gate of its own, so this worker instance tracks the NY
+// calendar date the digest last fired for and refuses a second send on
+// the same date. Module-level, same persistence-within-instance caveat as
+// _watchdogAlertEnv above.
+let lastDigestNYDate = null;
+
 async function sendWatchdogAlert(env, message) {
   try {
     await fetch(`https://api.telegram.org/bot${env.WATCHDOG_BOT_TOKEN}/sendMessage`, {
@@ -1952,6 +1959,26 @@ export default {
       if (request.headers.get('X-Cron-Secret') !== env.CRON_SECRET) {
         return json({ error: 'Forbidden' }, 401);
       }
+
+      const nyHour = getNYHour(Date.now());
+      const nyMinute = parseInt(
+        new Intl.DateTimeFormat('en-US', {
+          timeZone: 'America/New_York',
+          minute: 'numeric'
+        }).format(new Date())
+      );
+      const nyDateStr = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/New_York'
+      }).format(new Date());
+
+      if (nyHour !== 17 || nyMinute >= 15) {
+        return json({ skipped: true, reason: 'outside NY 17:00 window' });
+      }
+      if (nyDateStr === lastDigestNYDate) {
+        return json({ skipped: true, reason: 'already sent today' });
+      }
+      lastDigestNYDate = nyDateStr;
+
       try {
         await sendWatchdogDailyDigest(env);
         return json({ ok: true });
