@@ -300,6 +300,18 @@ tr:hover td { background: var(--accent-dim); }
   <a href="#sec-k"><span class="sec-label">K</span>Frontend Components</a>
   <a href="#sec-l"><span class="sec-label">L</span>Constants &amp; Config</a>
   <a href="#sec-m"><span class="sec-label">M</span>Gaps / Bugs / Dead Code</a>
+  <a href="#sec-n1"><span class="sec-label">N1</span>processTemplateChains()</a>
+  <a href="#sec-n2"><span class="sec-label">N2</span>Chain Initiation T1/T2/T3</a>
+  <a href="#sec-n3"><span class="sec-label">N3</span>T3 Advance &amp; Complete</a>
+  <a href="#sec-n4"><span class="sec-label">N4</span>All Telegram Formats</a>
+  <a href="#sec-n5"><span class="sec-label">N5</span>CISD Watch Lifecycle</a>
+  <a href="#sec-n6"><span class="sec-label">N6</span>SMA Phase Lifecycle</a>
+  <a href="#sec-n7"><span class="sec-label">N7</span>NSE Indicator Chain</a>
+  <a href="#sec-n8"><span class="sec-label">N8</span>isDuplicateAlert SQL</a>
+  <a href="#sec-n9"><span class="sec-label">N9</span>endOfUTCMonthISO()</a>
+  <a href="#sec-n10"><span class="sec-label">N10</span>ChainProgressBar States</a>
+  <a href="#sec-n11"><span class="sec-label">N11</span>Function Location Index</a>
+  <a href="#sec-n12"><span class="sec-label">N12</span>Cascade Delete</a>
 </nav>
 
 <main>
@@ -1333,6 +1345,691 @@ T3 window_mins range: 15–240
 <div class="callout class="info"><strong>Upstox source not selectable in Admin key form</strong><br>Admin.jsx only offers 'twelvedata' or 'yahoo' as source options when creating API keys. Upstox credentials are managed separately and cannot be added via the same key management UI.</div>
 <div class="callout class="info"><strong>market_breadth_cache weekly rows have empty heatmap</strong><br>Weekly breadth rows are computed by averaging intraday strength scores. There is no pair-level breakdown available; <code>heatmap_json</code> is always stored as <code>'{}'</code> for <code>tf='1W'</code> and <code>tf='1W_current'</code>.</div>
 <div class="callout class="info"><strong>Alert dedup cutoff uses current time (not lookback)</strong><br><code>isDuplicateAlert</code> uses <code>new Date().toISOString()</code> as the comparison cutoff directly, rather than computing <code>cutoff = now - ALERT_INTERVAL_MS</code>. This means it queries <code>WHERE fired_at &gt; {iso_string}</code> — which is effectively querying for alerts fired in the future, making dedup always pass. This may be an intentional simplification or a latent bug depending on the SQL WHERE direction. Needs verification against actual SQL text.</div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     N1. processTemplateChains() — FULL ORCHESTRATION
+═══════════════════════════════════════════════════════ -->
+<section id="sec-n1">
+<h2><span class="sec-badge">N1</span>processTemplateChains() — Full Orchestration</h2>
+
+<p>Defined in <code>sweep-worker/src/sweep-cron.js</code> lines 716–831. Called once per (symbol, LTF) pair during the sweep cron run. Processes all four template chain types in a fixed order against already-detected sweep/MSS results.</p>
+
+<h3>Processing Order (per symbol+LTF)</h3>
+<ol>
+<li><strong>T4 Step 1 — Arm:</strong> For each enabled T4 template on this symbol+LTF where a sweep was detected matching the template direction: check whether a recent T4 chain already exists within the dedup window (<code>t.window_mins || 60</code> minutes). If the bias gate passes (or is disabled) and no recent chain exists, INSERT a new T4 chain with <code>state='awaiting_fvg_entry'</code> and <code>expires_at=endOfUTCMonthISO()</code>.</li>
+<li><strong>T1/T2/T4 Step 2 — FVG-entry check:</strong> For all active chains at <code>state='awaiting_fvg_entry'</code> whose LTF matches the current run: fetch the associated FVG zone; test price entry per the chain's <code>fvg_rule</code> (<code>any_touch</code> / <code>50_percent</code> / <code>full_fill</code>). On entry: fire <code>formatFvgEntryAlert()</code>, call <code>completeFvgEntryChain()</code>, set <code>chain_state.state='complete'</code>.</li>
+<li><strong>T2 Retracement check:</strong> For active T2 chains at <code>state='awaiting_retracement'</code>: compare the stored <code>htfCandle</code> levels against the current LTF price. On retracement confirmation: advance chain to <code>awaiting_fvg_entry</code>.</li>
+<li><strong>Sweep detect + T3 advance:</strong> Using the same <code>sweepResult</code> from the outer cron loop:
+  <ul>
+    <li>T3 chains at <code>awaiting_sweep</code> whose direction matches: if <code>step3_enabled=1</code> → call <code>advanceT3Chain()</code> (sets <code>state='awaiting_mss'</code>, stores <code>step2_signal_id</code>) then fire <code>formatT3Alert(..., step=2)</code>. If <code>step3_enabled=0</code> → call <code>completeT3Chain()</code> and fire <code>formatT3Step2CompleteAlert()</code>.</li>
+    <li>T3 chains at <code>awaiting_mss</code> whose direction matches: if MSS detected → call <code>completeT3Chain()</code> and fire <code>formatT3Alert(..., step=3)</code>.</li>
+  </ul>
+</li>
+</ol>
+
+<h3>Bias Gate</h3>
+<p><code>biasGateEnabled = t.bias_gate !== 0</code> (default 1 — enabled). HTF bias is read from <code>BIAS_SOURCE.sweep[tf]</code>. A direction mismatch skips initiation for that template but does not abort processing of other templates in the same run.</p>
+
+<h3>T4 Dedup Guard SQL (lines 756–769)</h3>
+<pre>SELECT id FROM chain_state
+WHERE template_type = 'T4'
+  AND user_id = ?
+  AND symbol = ?
+  AND direction = ?
+  AND created_at &gt; ?
+LIMIT 1</pre>
+<p>Cutoff: <code>new Date(Date.now() - (t.window_mins || 60) * 60 * 1000).toISOString()</code></p>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     N2. CHAIN INITIATION — T1 / T2 / T3
+═══════════════════════════════════════════════════════ -->
+<section id="sec-n2">
+<h2><span class="sec-badge">N2</span>Chain Initiation: T1 / T2 / T3</h2>
+
+<p>All three chains are armed inside <code>handleEBPCron()</code> in <code>worker/src/ebp-worker.js</code> when an EBP fires on the configured HTF. The bias-gate guard (<code>biasGateEnabled &amp;&amp; !trendAligned → skip</code>) runs first.</p>
+
+<h3>T1 Initiation (lines 1091–1095)</h3>
+<pre><span class="cm">// No step1SignalId — T1 fires no standalone alert at initiation.</span>
+await insertChain(env.DB, {
+  templateType: <span class="st">'T1'</span>,
+  userId: row.user_id, assetId: row.asset_id,
+  symbol,
+  htf: tf,            <span class="cm">// the EBP timeframe</span>
+  ltf: tmpl.ltf,
+  direction: ebp.direction,
+  state: <span class="st">'awaiting_fvg_entry'</span>,
+  expiresAt: endOfUTCMonthISO(),
+});</pre>
+<p>No <code>step1SignalId</code> and no <code>htfCandle</code> stored. The chain waits silently for an LTF FVG touch.</p>
+
+<h3>T2 Initiation (lines 1096–1111)</h3>
+<pre><span class="kw">const</span> htfIntervalMs = TF_INTERVAL_MS[tf] ?? 0;
+await insertChain(env.DB, {
+  templateType: <span class="st">'T2'</span>,
+  userId: row.user_id, assetId: row.asset_id,
+  symbol,
+  htf: tf, ltf: tmpl.ltf, direction: ebp.direction,
+  state: <span class="st">'awaiting_retracement'</span>,
+  expiresAt: endOfUTCMonthISO(),
+  htfCandle: {
+    open:      candles[0].open,
+    close:     candles[0].close,
+    openTime:  <span class="kw">new</span> Date(candles[0].time).toISOString(),
+    closeTime: <span class="kw">new</span> Date(candles[0].time + htfIntervalMs).toISOString(),
+  },
+});</pre>
+<p><code>htfCandle</code> is JSON-serialised and persisted in <code>chain_state</code>. It captures the exact EBP candle body so that the sweep worker can later confirm a retracement to those levels.</p>
+
+<h3>T3 Initiation — initiateT3Chain (lines 221–227)</h3>
+<pre><span class="kw">async function</span> <span class="fn">initiateT3Chain</span>(db, userId, assetId, symbol, direction, htfTf, ltf, windowMins, signalId) {
+  <span class="kw">const</span> expiresAt = <span class="kw">new</span> Date(Date.now() + windowMins * 60 * 1000).toISOString();
+  await insertChain(db, {
+    templateType: <span class="st">'T3'</span>,
+    userId, assetId, symbol,
+    htf: htfTf, ltf, direction,
+    state: <span class="st">'awaiting_sweep'</span>,
+    step1SignalId: signalId,   <span class="cm">// EBP signal ID stored here</span>
+    expiresAt,
+  });
+}</pre>
+<p>Unlike T1/T2, T3 uses a rolling window expiry: <code>now + windowMins × 60,000 ms</code>. <code>windowMins</code> comes from <code>user_templates.window_mins</code> (validated 15–240 on write, default 60). The EBP signal ID is stored as <code>step1SignalId</code>; T3 is the only template type that does so at initiation.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     N3. T3 ADVANCE & COMPLETE + ALERT FORMATS
+═══════════════════════════════════════════════════════ -->
+<section id="sec-n3">
+<h2><span class="sec-badge">N3</span>T3 Advancement &amp; Completion Functions</h2>
+
+<p>All logic in <code>sweep-worker/src/sweep-cron.js</code>, orchestrated from <code>processTemplateChains()</code>.</p>
+
+<h3>T3 Step 2 — Sweep Confirmation (awaiting_sweep → awaiting_mss or complete)</h3>
+<p>Triggered when <code>detectSweep()</code> returns a result matching the chain's direction:</p>
+<ul>
+<li>If <code>chain.step3_enabled = 1</code>: call <code>advanceT3Chain(db, chain.id, sweepSignalId)</code> — sets <code>state='awaiting_mss'</code> and stores <code>step2_signal_id</code>. Then fire <code>formatT3Alert(symbol, chain.htf, ltf, direction, session, price, signalId, 2)</code>.</li>
+<li>If <code>chain.step3_enabled = 0</code>: call <code>completeT3Chain(db, chain.id)</code> — sets <code>state='complete'</code>. Fire <code>formatT3Step2CompleteAlert(symbol, chain.htf, ltf, direction, session, signalId)</code>.</li>
+</ul>
+
+<h3>T3 Step 3 — MSS Confirmation (awaiting_mss → complete)</h3>
+<p>Triggered when <code>detectMSS()</code> returns a result matching the chain's direction:</p>
+<ul>
+<li>Fire <code>formatT3Alert(symbol, chain.htf, tf, mssResult.direction, session, candles[0].close, signalId, 3)</code>.</li>
+<li>Call <code>completeT3Chain(db, chain.id)</code>.</li>
+</ul>
+
+<h3>alert_history Timeframe Field</h3>
+<p>T3 chain alerts are stored in <code>alert_history</code> with <code>timeframe = `${chain.htf}+${ltf}`</code> (e.g. <code>'4H+M15'</code>). Standalone sweep/MSS alerts use just the LTF string.</p>
+
+<h3>formatT3Alert (lines 173–187)</h3>
+<pre><span class="kw">function</span> <span class="fn">formatT3Alert</span>(symbol, htf, ltf, direction, session, price, signalId, step) {
+  <span class="kw">const</span> emoji    = direction === <span class="st">'bullish'</span> ? <span class="st">'🟢'</span> : <span class="st">'🔴'</span>;
+  <span class="kw">const</span> dirLabel = direction === <span class="st">'bullish'</span> ? <span class="st">'BULL'</span> : <span class="st">'BEAR'</span>;
+  <span class="kw">return</span> [
+    <span class="st">'🎯 T3 Chain — '</span> + symbol,
+    <span class="st">'Step: S'</span> + step + <span class="st">' of 3'</span>,
+    <span class="st">'HTF: '</span> + htf + <span class="st">' EBP → LTF: '</span> + ltf + <span class="st">' Sweep → LTF: '</span> + ltf + <span class="st">' MSS'</span>,
+    <span class="st">'Direction: '</span> + emoji + <span class="st">' '</span> + dirLabel,
+    <span class="st">'Session: '</span> + session,
+    <span class="st">'Price: '</span> + price,
+    <span class="st">'Signal ID: '</span> + signalId + <span class="st">'/S'</span> + step,
+  ].join(<span class="st">'\n'</span>);
+}</pre>
+
+<h3>formatT3Step2CompleteAlert (lines 191–202)</h3>
+<pre><span class="kw">function</span> <span class="fn">formatT3Step2CompleteAlert</span>(symbol, htf, ltf, direction, session, signalId) {
+  <span class="kw">const</span> emoji    = direction === <span class="st">'bullish'</span> ? <span class="st">'🟢'</span> : <span class="st">'🔴'</span>;
+  <span class="kw">const</span> dirLabel = direction === <span class="st">'bullish'</span> ? <span class="st">'BULL'</span> : <span class="st">'BEAR'</span>;
+  <span class="kw">return</span> [
+    <span class="st">'🎯 T3 Signal — '</span> + symbol,
+    <span class="st">'HTF: '</span> + htf + <span class="st">' EBP → LTF: '</span> + ltf + <span class="st">' Sweep'</span>,
+    <span class="st">'Direction: '</span> + emoji + <span class="st">' '</span> + dirLabel,
+    <span class="st">'Session: '</span> + session,
+    <span class="st">'Signal ID: '</span> + signalId,
+    <span class="st">'Note: Step 3 (MSS) disabled'</span>,
+  ].join(<span class="st">'\n'</span>);
+}</pre>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     N4. ALL TELEGRAM MESSAGE FORMATS — VERBATIM
+═══════════════════════════════════════════════════════ -->
+<section id="sec-n4">
+<h2><span class="sec-badge">N4</span>All Telegram Message Formats — Verbatim</h2>
+
+<h3>EBP Alert — formatEBPAlert (ebp-worker.js:490–505)</h3>
+<pre>${emoji} &lt;b&gt;${label} — ${symbol}&lt;/b&gt;
+⏱ Timeframe: ${tf}
+🕐 Candle: ${fmtNY(candleTime)} NY
+📊 Trend: ${trendBias} (${getHTFBiasLabel(biasTF)}) ${alignMark}
+━━━━━━━━━━━━━━
+${swept}: ${sweptLevel}
+${closed}: ${closedLevel}
+━━━━━━━━━━━━━━
+🔗 Signal ID: ${signalId}     ← only when signalId is truthy
+&lt;i&gt;EBP Tracker&lt;/i&gt;</pre>
+<p><code>alignMark</code>: '✅' (trendAligned) / '⚠️ No Trend Filter' (else). <code>swept</code>: 'Low swept' (bull) / 'High swept' (bear). <code>closed</code>: 'Closed above body' / 'Closed below body'.</p>
+
+<h3>Sweep Alert — formatSweepAlert (sweep-cron.js:373–387)</h3>
+<pre>${emoji} &lt;b&gt;${label} — ${symbol}&lt;/b&gt;
+⏱ Timeframe: ${tf}
+🕐 Candle: ${fmtNY(candleTime)} NY
+📊 Trend: ${trendBias} (${getHTFBiasLabel(biasTF)}) ${alignMark}
+━━━━━━━━━━━━━━
+${swept}: ${sweptLevel}
+Closed inside: ${closedInsideLevel}
+━━━━━━━━━━━━━━
+&lt;i&gt;EBP Tracker&lt;/i&gt;</pre>
+<p><code>alignMark</code>: '✅' / '📊 Price Action' (price_action mode) / '⚠️ No Trend Filter'. No Signal ID in standalone sweep alerts.</p>
+
+<h3>MSS Alert — formatMSSAlert (sweep-cron.js:549–562)</h3>
+<pre>${emoji} &lt;b&gt;${label} — ${symbol}&lt;/b&gt;
+⏱ Timeframe: ${tf}
+🕐 Candle: ${fmtNY(mss.candle_time)} NY
+📊 Trend: ${htfBias} (${htfLabelStr}) ${aligned ? '✅' : '⚠️'}
+━━━━━━━━━━━━━━
+${swingLabel}: ${mss.level?.toFixed(5)}
+━━━━━━━━━━━━━━
+&lt;i&gt;EBP Tracker&lt;/i&gt;</pre>
+<p><code>swingLabel</code>: 'Swing high reclaimed' (bull) / 'Swing low reclaimed' (bear). Level to 5 d.p. <code>aligned</code>: <code>mss.direction === htfBias || htfBias === 'neutral'</code>.</p>
+
+<h3>T1/T2/T4 FVG Entry — formatFvgEntryAlert (sweep-cron.js:666–682)</h3>
+<pre>🎯 ${templateType} Signal — ${symbol}
+${flow}
+Direction: ${emoji} ${dirLabel}
+FVG Zone: ${fvg.bottom} – ${fvg.top}
+Price: ${price}
+Signal ID: ${signalId}</pre>
+<p><code>flow</code> by template: <strong>T1</strong> → <code>HTF: ${htf} EBP → LTF: ${ltf} FVG Entry</code> · <strong>T2</strong> → <code>HTF: ${htf} EBP → LTF: ${ltf} Retracement FVG</code> · <strong>T4</strong> → <code>LTF: ${ltf} Sweep → FVG Entry</code>.</p>
+
+<h3>T3 Chain Steps — formatT3Alert (sweep-cron.js:173–187)</h3>
+<pre>🎯 T3 Chain — ${symbol}
+Step: S${step} of 3
+HTF: ${htf} EBP → LTF: ${ltf} Sweep → LTF: ${ltf} MSS
+Direction: ${emoji} ${dirLabel}
+Session: ${session}
+Price: ${price}
+Signal ID: ${signalId}/S${step}</pre>
+
+<h3>T3 Step 2 Complete (MSS disabled) — formatT3Step2CompleteAlert (sweep-cron.js:191–202)</h3>
+<pre>🎯 T3 Signal — ${symbol}
+HTF: ${htf} EBP → LTF: ${ltf} Sweep
+Direction: ${emoji} ${dirLabel}
+Session: ${session}
+Signal ID: ${signalId}
+Note: Step 3 (MSS) disabled</pre>
+
+<h3>NSE EBP Alert — formatNseEBPAlert (nse-cron.js:1426–1442)</h3>
+<pre>${emoji} &lt;b&gt;${label} — ${symbol}&lt;/b&gt;
+⏱ Timeframe: ${tf}
+🕐 Candle: ${fmtIST(candleTime)} IST
+📊 Trend: ${trendBias}${biasTF ? ` (${biasTF} bias)` : ''} ${alignMark}
+━━━━━━━━━━━━━━
+${swept}: ${sweptLevel}
+${closed}: ${closedLevel}
+━━━━━━━━━━━━━━
+🔗 Signal ID: ${signalId}
+EBP Tracker</pre>
+<p>Differs from Forex EBP: IST timestamp; <code>EBP Tracker</code> plain text (no HTML tags); Signal ID always included (not conditional).</p>
+
+<h3>NSE Sweep Alert — formatNseSweepAlert (nse-cron.js:1444–1459)</h3>
+<pre>${emoji} &lt;b&gt;${label} — ${symbol}&lt;/b&gt;
+⏱ Timeframe: ${tf}
+🕐 Candle: ${fmtIST(candleTime)} IST
+📊 Trend: ${trendBias}${biasTF ? ` (${biasTF} bias)` : ''} ${alignMark}
+━━━━━━━━━━━━━━
+${swept}: ${sweptLevel}
+Closed inside: ${closedInsideLevel}
+━━━━━━━━━━━━━━
+🔗 Signal ID: ${signalId}
+EBP Tracker</pre>
+
+<h3>NSE MSS Alert — formatNseMSSAlert (nse-cron.js:1461–1475)</h3>
+<pre>${emoji} &lt;b&gt;${label} — ${symbol}&lt;/b&gt;
+⏱ Timeframe: ${tf}
+🕐 Candle: ${fmtIST(mss.candle_time)} IST
+📊 Trend: ${trendBias}${biasTF ? ` (${biasTF} bias)` : ''} ${alignMark}
+━━━━━━━━━━━━━━
+${swingLabel}: ${mss.level?.toFixed(2)}
+━━━━━━━━━━━━━━
+🔗 Signal ID: ${signalId}
+EBP Tracker</pre>
+<p>NSE MSS level to 2 d.p. (vs Forex MSS at 5 d.p.).</p>
+
+<h3>TDI Alert — formatTdiAlert (nse-cron.js:725–747)</h3>
+<pre>${emoji} &lt;b&gt;${label} — ${symbol}&lt;/b&gt;
+⏱ Timeframe: ${timeframe}
+🕐 Candle: ${fmtIST(candleTime)} IST
+━━━━━━━━━━━━━━
+TDI: RSI exhaustion at lower band    ← bull ('upper band' for bear)
+Divergence: Price LL, RSI HL confirmed    ← bull
+Momentum: Red crossed Yellow ↑    ← bull ('↓' for bear)
+MSS: Swing high reclaimed: ${mssLevel.toFixed(2)}    ← bull
+📦 Volume: ${volumeRatio.toFixed(1)}× average    ← equity only; omitted for index
+📊 SMA Context: ...    ← optional; from buildTdiSmaContextLine()
+━━━━━━━━━━━━━━
+EBP Tracker</pre>
+
+<h3>NSE SMA Exhaustion (nse-cron.js:1071–1079)</h3>
+<pre>⚠️ &lt;b&gt;SMA Cloud Exhausting — ${symbol}&lt;/b&gt;
+⏱ Timeframe: ${timeframe}
+🕐 Candle: ${nowIST}
+━━━━━━━━━━━━━━
+Trend separation collapsed
+━━━━━━━━━━━━━━
+EBP Tracker</pre>
+
+<h3>NSE SMA Type 1 (nse-cron.js:1116–1128)</h3>
+<pre>🟢/🔴 &lt;b&gt;SMA Cloud: Bullish/Bearish Trend — ${symbol}&lt;/b&gt;
+⏱ Timeframe: ${timeframe}
+🕐 Candle: ${nowIST}
+━━━━━━━━━━━━━━
+Momentum: Sharp⚡  or  Gradual📉
+SMA1: ${sma1Now.toFixed(2)} · SMA9: ${sma9Now.toFixed(2)}
+FVG Zone: ${fvg.bottom.toFixed(2)} – ${fvg.top.toFixed(2)}
+📊 Bias: ${bias.label}
+📦 Volume: ${volRatio}× average    ← equity only
+━━━━━━━━━━━━━━
+EBP Tracker</pre>
+
+<h3>NSE SMA Type 2 (nse-cron.js:1231–1243)</h3>
+<pre>🟢/🔴 &lt;b&gt;SMA Cloud: Bullish/Bearish Re-entry — ${symbol}&lt;/b&gt;
+⏱ Timeframe: ${timeframe}
+🕐 Candle: ${nowIST}
+━━━━━━━━━━━━━━
+Rejected from cloud: ${cloudBoundary.toFixed(2)}
+Wick low/high: ${wickLevel.toFixed(2)}
+MSS: Swing high reclaimed: 1.2345    ← or: CISD: First candle open reclaimed: 1.2345
+📊 Bias: ${biasForWatch.label}
+━━━━━━━━━━━━━━
+EBP Tracker</pre>
+<p>Forex SMA formats (compute-worker) are structurally identical to NSE but use NY timestamp (<code>fmtNY</code>) instead of IST.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     N5. CISD — DEFINITION & WATCH LIFECYCLE
+═══════════════════════════════════════════════════════ -->
+<section id="sec-n5">
+<h2><span class="sec-badge">N5</span>CISD — Definition &amp; Watch Lifecycle</h2>
+
+<h3>Definition</h3>
+<p><strong>CISD</strong> (Change In State of Delivery) is a TTrades concept. In this codebase: <em>the open price of the first candle of the pullback run</em> — i.e. the candle whose time equals <code>swingState.run_start_time</code> when <code>run_dir</code> is opposite to the cloud direction. A bar closing beyond this price signals a character change in delivery: the market has stopped "delivering" against the trend.</p>
+
+<h3>Step 2a — Arm Condition</h3>
+<p>Fires when <code>phase='distribution'</code> and no watch is already active in the same direction. All must hold (bull example):</p>
+<ul>
+<li><strong>Wicked into cloud:</strong> <code>bar0.low &lt; cloudTop &amp;&amp; bar0.low &gt; cloudBottom &amp;&amp; (cloudTop - bar0.low) &gt;= atr14 × WICK_PENETRATION</code></li>
+<li><strong>Rejected:</strong> <code>bar0.close &gt; cloudTop</code></li>
+<li><strong>Bias gate passes</strong></li>
+</ul>
+<p>On arm: <code>cisd_watch_active=1</code>, <code>cisd_watch_direction</code>=trend direction, <code>cisd_pullback_start</code>=<code>swingState.run_start_time</code> (ISO), <code>cisd_watch_armed_at</code>=now ISO.</p>
+<p>A fresh rejection in the <em>opposite</em> direction overwrites an existing watch in the other direction.</p>
+
+<h3>Step 2b — Confirm Condition</h3>
+<p>Checked each cron cycle when watch is active (same direction as cloud phase):</p>
+<ol>
+<li>Check watch not expired: <code>Date.now() - new Date(watchArmedAt) &lt; WATCH_EXPIRY_MS[tf]</code></li>
+<li>Check bias has not flipped (re-evaluates <code>checkSMABias()</code>)</li>
+<li>Determine <code>pullbackRunActive</code>: <code>swingState.run_dir === opposite_direction</code></li>
+<li>Read cached candles, filter to <code>c.time &gt;= pullbackStartMs</code>, sort oldest-first</li>
+<li><code>cisdLevel = pullbackCandles[0].open</code></li>
+<li>Bull CISD: <code>bar0.close &gt; cisdLevel</code> · Bear CISD: <code>bar0.close &lt; cisdLevel</code></li>
+</ol>
+
+<h3>MSS Alternative Confirmation</h3>
+<p>When <code>confirmation_mode='mss'</code> or <code>'either'</code>: <code>mssOk = bar0.close &gt; swingState.last_confirmed_swing_high</code> (bull). In <code>either</code> mode the first of MSS or CISD to trigger fires the alert.</p>
+
+<h3>Expiry &amp; Disarm Events</h3>
+<ul>
+<li>Watch timer expired → silently cleared</li>
+<li>Bias flipped → silently cleared</li>
+<li>Exhaustion event → cleared regardless</li>
+<li>Alert fired → cleared; <code>last_signal_time</code> updated; cooldown starts</li>
+</ul>
+
+<h3>Confirm Line in Alert</h3>
+<pre><span class="cm">// MSS confirmed (bull):</span>   "MSS: Swing high reclaimed: 1.23456"
+<span class="cm">// MSS confirmed (bear):</span>   "MSS: Swing low broken: 1.23456"
+<span class="cm">// CISD confirmed:</span>         "CISD: First candle open reclaimed: 1.23456"</pre>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     N6. SMA PHASE LIFECYCLE — EXACT VALUES & CROSS DETECTION
+═══════════════════════════════════════════════════════ -->
+<section id="sec-n6">
+<h2><span class="sec-badge">N6</span>SMA Phase Lifecycle — Exact ms Values &amp; Cross Detection</h2>
+
+<h3>NSE SMA Constants (nse-cron.js)</h3>
+<div class="table-wrap"><table>
+<tr><th>Constant</th><th>M5</th><th>M15</th><th>M30</th></tr>
+<tr><td>SMA_WATCH_EXPIRY_MS</td><td>3,600,000 (1H)</td><td>86,400,000 (24H)</td><td>86,400,000 (24H)</td></tr>
+<tr><td>SMA_TYPE2_COOLDOWN_MS</td><td>3,600,000 (1H)</td><td>86,400,000 (24H)</td><td>86,400,000 (24H)</td></tr>
+<tr><td>SMA_SEPARATION_THRESHOLD</td><td colspan="3">0.15 × atr14</td></tr>
+<tr><td>SMA_VELOCITY_THRESHOLD</td><td colspan="3">0.03 × atr14</td></tr>
+<tr><td>SMA_WICK_PENETRATION</td><td colspan="3">0.10 × atr14</td></tr>
+</table></div>
+
+<h3>Forex SMA Constants (compute-worker/src/index.js)</h3>
+<div class="table-wrap"><table>
+<tr><th>Constant</th><th>M15</th><th>M30</th><th>1H (HTF=4H)</th><th>1H (HTF=D)</th><th>4H</th></tr>
+<tr><td>FOREX_SMA_WATCH_EXPIRY_MS</td><td>14,400,000 (4H)</td><td>14,400,000 (4H)</td><td>14,400,000 (4H)</td><td>86,400,000 (24H)</td><td>86,400,000 (24H)</td></tr>
+<tr><td>FOREX_SMA_TYPE2_COOLDOWN_MS</td><td>14,400,000</td><td>14,400,000</td><td>14,400,000</td><td>86,400,000</td><td>86,400,000</td></tr>
+<tr><td>FOREX_SMA_SEPARATION_THRESHOLD</td><td colspan="5">0.15 × atr14</td></tr>
+<tr><td>FOREX_SMA_VELOCITY_THRESHOLD</td><td colspan="5">0.03 × atr14</td></tr>
+<tr><td>FOREX_SMA_WICK_PENETRATION</td><td colspan="5">0.10 × atr14</td></tr>
+</table></div>
+
+<h3>sma1_last / sma9_last — Fresh Cross Detection (nse-cron.js:1056–1058)</h3>
+<pre><span class="kw">const</span> prevSma1 = priorState?.sma1_last ?? null;
+<span class="kw">const</span> prevSma9 = priorState?.sma9_last ?? null;
+<span class="kw">const</span> freshCrossBull = prevSma1 != null &amp;&amp; prevSma9 != null
+  &amp;&amp; prevSma1 &lt;= prevSma9 &amp;&amp; sma1Now &gt; sma9Now;
+<span class="kw">const</span> freshCrossBear = prevSma1 != null &amp;&amp; prevSma9 != null
+  &amp;&amp; prevSma1 &gt;= prevSma9 &amp;&amp; sma1Now &lt; sma9Now;</pre>
+<p>If either <code>prevSma1</code> or <code>prevSma9</code> is null (first-ever run or after state reset), both fresh-cross flags are <code>false</code>. <code>justEnteredDistribution</code> can still fire via the <code>prevPhase !== 'distribution'</code> branch.</p>
+
+<h3>Phase Transition Truth Table</h3>
+<div class="table-wrap"><table>
+<tr><th>Condition</th><th>Result</th></tr>
+<tr><td><code>separationNow &gt; atr14×0.15 AND crossover3=0 AND trendDir≠null</code></td><td><code>isDistributing=true</code></td></tr>
+<tr><td><code>prevPhase='distribution' AND (sep &lt; atr14×0.15 OR crossover3≥1)</code></td><td><code>isExhausting=true</code> → Exhaustion alert, disarm watch</td></tr>
+<tr><td><code>isDistributing AND (freshCross OR prevPhase≠'dist' OR prevDir≠currDir)</code></td><td><code>justEnteredDistribution=true</code> → Type 1 candidate</td></tr>
+<tr><td><code>isDistributing AND watch active AND confirmation hit</code></td><td>Type 2 alert</td></tr>
+</table></div>
+
+<h3>HTF Pairings</h3>
+<div class="table-wrap"><table>
+<tr><th>Signal TF</th><th>NSE default HTF (SMA_HTF_PAIRING)</th><th>Forex valid HTFs (FOREX_SMA_HTF_OPTIONS)</th></tr>
+<tr><td>M5</td><td>1H</td><td>4H</td></tr>
+<tr><td>M15</td><td>D</td><td>4H</td></tr>
+<tr><td>M30</td><td>D</td><td>4H</td></tr>
+<tr><td>1H</td><td>—</td><td>4H, D</td></tr>
+<tr><td>4H</td><td>—</td><td>D</td></tr>
+</table></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     N7. NSE INDICATOR CHAIN — nse_indicator_chain TRANSITIONS
+═══════════════════════════════════════════════════════ -->
+<section id="sec-n7">
+<h2><span class="sec-badge">N7</span>NSE Indicator Chain — nse_indicator_chain Transitions</h2>
+
+<p>Used exclusively by the <strong>TDI</strong> indicator. The SMA Cloud does <em>not</em> use <code>nse_indicator_chain</code>; it persists its arm/confirm state in <code>nse_sma_state</code> columns (<code>cisd_watch_active</code>, etc.).</p>
+
+<h3>Table Key Columns</h3>
+<div class="table-wrap"><table>
+<tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+<tr><td>id</td><td>TEXT (UUID)</td><td>Reused (overwritten) if a row already exists for user+asset+timeframe</td></tr>
+<tr><td>direction</td><td>TEXT</td><td>'bullish' or 'bearish'</td></tr>
+<tr><td>state</td><td>INTEGER</td><td>Always 1 when row exists. There are no state=0 rows.</td></tr>
+<tr><td>created_at</td><td>INTEGER</td><td>Epoch ms of arm event</td></tr>
+<tr><td>expires_at</td><td>INTEGER</td><td>Epoch ms: <code>now + tfMinutes × 60,000 × 4</code></td></tr>
+</table></div>
+
+<h3>State Machine</h3>
+
+<h4>State 1 — Armed</h4>
+<p>Created or overwritten when <strong>all three</strong> TDI conditions fire in the same cron cycle:</p>
+<ul>
+<li><strong>Cond 1 (Band touch):</strong> <code>redNow &lt;= bbLowerNow</code> (bull) or <code>redNow &gt;= bbUpperNow</code> (bear) — RSI red line at the BB(34, ×1.6185) edge</li>
+<li><strong>Cond 2 (Divergence):</strong> Price making lower low while RSI makes higher low (bull); price HH while RSI LH (bear). Primary reference is <code>swingState.pending_swing_low/high</code>; falls back to 20-candle lookback extreme close.</li>
+<li><strong>Cond 3 (Momentum cross):</strong> <code>redPrev &lt;= yellowPrev &amp;&amp; redNow &gt; yellowNow</code> (bull); reverse for bear. Red = SMA(2) of RSI; Yellow = SMA(7) of RSI.</li>
+</ul>
+<p>If an existing row exists: overwritten with fresh direction and expiry (reset). Expiry = <code>now + tfMinutes × 60,000 × 4</code> (4 candles).</p>
+
+<h4>Condition 4 — Confirmation (fires when 1+2+3 are NOT all met)</h4>
+<p>Checked only if an unexpired state-1 row exists:</p>
+<ul>
+<li><strong>Price gate:</strong> <code>candles[0].close &gt; swingState.last_confirmed_swing_high</code> (bull) / <code>&lt; last_confirmed_swing_low</code> (bear)</li>
+<li><strong>Volume gate (equities only):</strong> <code>currVol &gt; avgVol(last 20) × 1.5</code></li>
+<li>Index symbols (<code>NSE_KNOWN_INDICES</code> list) skip volume gate — price gate alone suffices.</li>
+</ul>
+<p>On confirmation: DELETE the chain row, fire TDI alert.</p>
+
+<h4>Expiry</h4>
+<p>Checked before condition 4: if <code>expires_at &lt;= Date.now()</code>, DELETE row silently. No alert.</p>
+
+<h3>Minimum History Guard</h3>
+<p><code>runTDIForAsset()</code> returns early if <code>candles.length &lt; 48</code> (RSI(13) + BB(34) warm-up) or <code>rsiSeries.length &lt; 35</code>. Data comes from <code>nse_indicator_candle_cache</code> (rolling 60-candle window, merged each run via <code>mergeAndCacheNSECandles()</code>).</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     N8. isDuplicateAlert — ACTUAL SQL (BUG VERDICT)
+═══════════════════════════════════════════════════════ -->
+<section id="sec-n8">
+<h2><span class="sec-badge">N8</span>isDuplicateAlert — Actual SQL &amp; Bug Verdict</h2>
+
+<p>Section M of this encyclopedia states that <code>isDuplicateAlert</code> "uses <code>new Date().toISOString()</code> as the comparison cutoff directly … making dedup always pass." <strong>This is factually incorrect.</strong> The verified source (sweep-cron.js lines 320–336) shows the function is working correctly:</p>
+
+<pre><span class="kw">async function</span> <span class="fn">isDuplicateAlert</span>(db, userId, symbol, tf, direction, alertType) {
+  <span class="kw">const</span> windowMs = ALERT_INTERVAL_MS[tf] || 60 * 60 * 1000;
+  <span class="kw">const</span> cutoff = <span class="kw">new</span> Date(Date.now() - windowMs).toISOString();  <span class="cm">// past timestamp</span>
+  <span class="kw">const</span> existing = <span class="kw">await</span> db.prepare(<span class="st">`
+    SELECT id FROM alert_history
+    WHERE user_id = ? AND symbol = ? AND timeframe = ?
+      AND direction = ? AND alert_type = ? AND fired_at &gt; ?
+    LIMIT 1
+  `</span>).bind(userId, symbol, tf, direction, alertType, cutoff).first();
+  <span class="kw">return</span> existing !== null;
+}</pre>
+
+<h3>Correctness Analysis</h3>
+<ul>
+<li><code>cutoff = now − windowMs</code> — a proper past timestamp, not the current time.</li>
+<li><code>fired_at &gt; cutoff</code> — matches alerts fired <em>after</em> the lookback window started, i.e. within the window. Correct semantics.</li>
+<li><code>fired_at</code> is TEXT ISO 8601 (post-migration 013). SQLite ISO 8601 string comparison is lexicographically correct for UTC timestamps.</li>
+<li>Returns <code>true</code> (is duplicate) when a recent alert exists → new alert suppressed. Dedup is working as designed.</li>
+</ul>
+
+<h3>ALERT_INTERVAL_MS Values</h3>
+<div class="table-wrap"><table>
+<tr><th>TF</th><th>Interval</th><th>ms</th></tr>
+<tr><td>M5</td><td>1H</td><td>3,600,000</td></tr>
+<tr><td>M15</td><td>4H</td><td>14,400,000</td></tr>
+<tr><td>M30</td><td>4H</td><td>14,400,000</td></tr>
+<tr><td>1H</td><td>24H</td><td>86,400,000</td></tr>
+<tr><td>4H</td><td>24H</td><td>86,400,000</td></tr>
+<tr><td>D</td><td>7 days</td><td>604,800,000</td></tr>
+<tr><td>W</td><td>30 days</td><td>2,592,000,000</td></tr>
+<tr><td>fallback</td><td>1H</td><td>3,600,000</td></tr>
+</table></div>
+
+<div class="callout dead"><strong>Section M correction:</strong> The "Alert dedup cutoff uses current time (not lookback)" entry in section M should be disregarded. The cutoff is always <code>now − ALERT_INTERVAL_MS[tf]</code>. Dedup is functional and correct.</div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     N9. endOfUTCMonthISO() — BOTH FILES
+═══════════════════════════════════════════════════════ -->
+<section id="sec-n9">
+<h2><span class="sec-badge">N9</span>endOfUTCMonthISO() — Both Files</h2>
+
+<p>Computes the expiry timestamp for T1 and T2 chains. Defined in two files; implementations are <strong>byte-for-byte identical</strong>.</p>
+
+<h3>sweep-worker/src/sweep-cron.js (lines 248–251)</h3>
+<pre><span class="kw">function</span> <span class="fn">endOfUTCMonthISO</span>() {
+  <span class="kw">const</span> now = <span class="kw">new</span> Date();
+  <span class="kw">return new</span> Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth() + 1,   <span class="cm">// pass next month…</span>
+    0,                        <span class="cm">// …day 0 = last day of the current month</span>
+    23, 59, 59               <span class="cm">// 23:59:59 UTC</span>
+  )).toISOString();
+}</pre>
+
+<h3>worker/src/ebp-worker.js (lines 191–194)</h3>
+<p>Identical — not reproduced for brevity.</p>
+
+<h3>Notes</h3>
+<ul>
+<li><strong>UTC day-0 trick:</strong> <code>Date.UTC(year, month+1, 0)</code> = last day of the current month in UTC. Zero-indexed month means passing <code>getUTCMonth()+1</code> targets "month index = next month"; day 0 rolls back to end-of-current.</li>
+<li><strong>Precision:</strong> Second-level only. Milliseconds are 0 (ISO string ends <code>:59.000Z</code>).</li>
+<li><strong>No DST risk:</strong> UTC; unaffected by server locale.</li>
+<li><strong>Used for:</strong> T1 (<code>awaiting_fvg_entry</code>) and T2 (<code>awaiting_retracement</code>) expiry. T3 uses rolling <code>window_mins</code> window; T4 also uses <code>endOfUTCMonthISO()</code>.</li>
+<li><strong>Duplication rationale:</strong> Cloudflare Workers have no shared module infrastructure across worker packages. The pattern is explicitly acknowledged in the codebase's <code>// SYNC NOTICE</code> comments.</li>
+</ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     N10. ChainProgressBar — STATE_STEPS MAP & RENDERING
+═══════════════════════════════════════════════════════ -->
+<section id="sec-n10">
+<h2><span class="sec-badge">N10</span>ChainProgressBar — STATE_STEPS Map &amp; Rendering</h2>
+
+<p>Defined in <code>frontend/src/components/ChainProgressBar.jsx</code>.</p>
+
+<h3>STEPS — Visual Step Definitions</h3>
+<pre><span class="kw">const</span> STEPS = {
+  T1: [{ key: <span class="st">'step1'</span>, label: <span class="st">'EBP'</span>    }, { key: <span class="st">'step2'</span>, label: <span class="st">'FVG Entry'</span>   }],
+  T2: [{ key: <span class="st">'step1'</span>, label: <span class="st">'EBP'</span>    }, { key: <span class="st">'step2'</span>, label: <span class="st">'Retracement'</span> }],
+  T3: [{ key: <span class="st">'step1'</span>, label: <span class="st">'EBP'</span>    }, { key: <span class="st">'step2'</span>, label: <span class="st">'Sweep'</span>       },
+       { key: <span class="st">'step3'</span>, label: <span class="st">'MSS'</span>    }],
+  T4: [{ key: <span class="st">'step1'</span>, label: <span class="st">'Sweep'</span>  }, { key: <span class="st">'step2'</span>, label: <span class="st">'FVG Entry'</span>   }],
+};</pre>
+
+<h3>STATE_STEPS — chain.state → completedStepCount</h3>
+<pre><span class="kw">const</span> STATE_STEPS = {
+  T1: { awaiting_fvg_entry:   <span class="nu">1</span>,                       complete: <span class="nu">2</span> },
+  T2: { awaiting_retracement: <span class="nu">1</span>,                       complete: <span class="nu">2</span> },
+  T3: { awaiting_sweep: <span class="nu">1</span>, awaiting_mss: <span class="nu">2</span>,           complete: <span class="nu">3</span> },
+  T4: { awaiting_fvg_entry:   <span class="nu">1</span>,                       complete: <span class="nu">2</span> },
+};</pre>
+
+<h3>Rendering Logic</h3>
+<pre><span class="kw">function</span> <span class="fn">getCompletedSteps</span>(chain, templateType) {
+  <span class="kw">if</span> (!chain) <span class="kw">return</span> <span class="nu">0</span>;
+  <span class="kw">return</span> STATE_STEPS[templateType]?.[chain.state] ?? <span class="nu">0</span>;
+}
+<span class="cm">// Step at index i gets class 'chain-step--done' if i &lt; completed, else 'chain-step--pending'</span></pre>
+<p>Example: T3 with <code>state='awaiting_mss'</code> (completed=2) renders EBP + Sweep as done dots, MSS as pending dot.</p>
+
+<h3>Key Design Note</h3>
+<p>Completion is derived from <code>chain.state</code>, <em>not</em> from <code>step*_signal_id</code> column population. This is intentional: T1/T2/T4's completion step never receives its own signal ID in the current implementation — a signal-ID-based check would incorrectly show those steps as incomplete even after the chain has fired.</p>
+
+<h3>State Label &amp; Meta Row</h3>
+<pre><span class="kw">function</span> <span class="fn">humaniseState</span>(state) {
+  <span class="kw">return</span> state?.replace(/_/g, <span class="st">' '</span>).replace(/\b\w/g, c =&gt; c.toUpperCase()) ?? <span class="st">'—'</span>;
+}
+<span class="cm">// 'awaiting_mss' → 'Awaiting Mss'</span>
+<span class="cm">// chain.state === 'complete' → displays 'Complete ✓' directly</span></pre>
+<p>Below the step dots: state label · <code>step1_signal_id</code> (if set) · direction emoji + text.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     N11. FUNCTION LOCATION INDEX
+═══════════════════════════════════════════════════════ -->
+<section id="sec-n11">
+<h2><span class="sec-badge">N11</span>Function Location Index</h2>
+
+<h3>sweep-worker/src/sweep-cron.js — 1157 lines</h3>
+<div class="table-wrap"><table>
+<tr><th>Function</th><th>Lines</th><th>Notes</th></tr>
+<tr><td>formatT3Alert</td><td>173–187</td><td>Used for T3 step 2 and step 3 alerts; step param controls label</td></tr>
+<tr><td>formatT3Step2CompleteAlert</td><td>191–202</td><td>Fired when step3_enabled=0</td></tr>
+<tr><td>endOfUTCMonthISO</td><td>248–251</td><td>T1/T2/T4 chain expiry; identical copy in ebp-worker</td></tr>
+<tr><td>isDuplicateAlert</td><td>320–336</td><td>Lookback-window dedup; returns boolean</td></tr>
+<tr><td>formatSweepAlert</td><td>373–387</td><td>Standalone sweep alert; HTML parse_mode</td></tr>
+<tr><td>formatMSSAlert</td><td>549–562</td><td>Standalone MSS alert; level to 5 d.p.</td></tr>
+<tr><td>formatFvgEntryAlert</td><td>666–682</td><td>T1/T2/T4 completion alert; flow string varies by template</td></tr>
+<tr><td>processTemplateChains</td><td>716–831</td><td>Main chain orchestration; 4-step order</td></tr>
+</table></div>
+
+<h3>worker/src/ebp-worker.js — 2359 lines</h3>
+<div class="table-wrap"><table>
+<tr><th>Function / Block</th><th>Lines</th><th>Notes</th></tr>
+<tr><td>endOfUTCMonthISO</td><td>191–194</td><td>Identical to sweep-cron.js version</td></tr>
+<tr><td>initiateT3Chain</td><td>221–227</td><td>Inserts T3 with awaiting_sweep; stores step1SignalId</td></tr>
+<tr><td>formatEBPAlert</td><td>490–505</td><td>Forex/crypto EBP; Signal ID conditional</td></tr>
+<tr><td>T1 chain initiation block</td><td>1091–1095</td><td>Inside handleEBPCron(); no step1SignalId stored</td></tr>
+<tr><td>T2 chain initiation block</td><td>1096–1111</td><td>Stores htfCandle JSON with open/close/times</td></tr>
+<tr><td>DELETE /user/assets/:id cascade</td><td>1337–1349</td><td>5-table explicit application-code cascade</td></tr>
+<tr><td>DELETE /user/forex-indicator-configs/:id</td><td>1804–1834</td><td>Includes forex_sma_state shared-state cleanup</td></tr>
+</table></div>
+
+<h3>nse-worker/src/nse-cron.js — 1758 lines</h3>
+<div class="table-wrap"><table>
+<tr><th>Function</th><th>Lines</th><th>Notes</th></tr>
+<tr><td>getClosedCandles</td><td>37–44</td><td>Filters forming bar: openMs + intervalMs &lt;= now</td></tr>
+<tr><td>generateNseSignalId</td><td>80–98</td><td>Shared 'NSE' counter; format NSE-{TICK}-{A001}</td></tr>
+<tr><td>calcTTradesBias</td><td>337–375</td><td>7-closure type priority; verbatim copy from ebp-worker</td></tr>
+<tr><td>detectEBP</td><td>389–404</td><td>Verbatim copy from ebp-worker</td></tr>
+<tr><td>detectSweep</td><td>407–422</td><td>Verbatim copy from sweep-cron</td></tr>
+<tr><td>detectFVG</td><td>426–439</td><td>3-bar oldest-first window; 14-day expiry</td></tr>
+<tr><td>updateSwingState</td><td>525–620</td><td>Reads/writes nse_swing_states; returns mssResult or null</td></tr>
+<tr><td>runTDIForAsset</td><td>754–853</td><td>TDI 4-condition state machine; needs 48+ candles</td></tr>
+<tr><td>runSMAForAsset</td><td>1020–1350</td><td>NSE SMA Cloud full lifecycle; reads/writes nse_sma_state</td></tr>
+<tr><td>deriveSession</td><td>1401–1424</td><td>NY-relative session: Asian/London/New York/Off-hours</td></tr>
+<tr><td>formatNseEBPAlert</td><td>1426–1442</td><td>IST timestamp; always includes Signal ID</td></tr>
+<tr><td>formatNseSweepAlert</td><td>1444–1459</td><td>IST timestamp; includes Signal ID</td></tr>
+<tr><td>formatNseMSSAlert</td><td>1461–1475</td><td>IST timestamp; level to 2 d.p.</td></tr>
+<tr><td>handleNseCron</td><td>1507–1757</td><td>Main NSE cron entry; market-hours gated; symbol-parallel fetch</td></tr>
+</table></div>
+
+<h3>compute-worker/src/index.js — 1168 lines</h3>
+<div class="table-wrap"><table>
+<tr><th>Constant / Block</th><th>Lines</th><th>Notes</th></tr>
+<tr><td>FOREX_SMA_VALID_TFS</td><td>484</td><td>['M15','M30','1H','4H']</td></tr>
+<tr><td>FOREX_SMA_WATCH_EXPIRY_MS</td><td>486–491</td><td>Object; 1H key is sub-object keyed by HTF</td></tr>
+<tr><td>FOREX_SMA_TYPE2_COOLDOWN_MS</td><td>493–498</td><td>Same nested structure as EXPIRY_MS</td></tr>
+<tr><td>FOREX_SMA_SEPARATION_THRESHOLD</td><td>500</td><td>0.15</td></tr>
+<tr><td>FOREX_SMA_VELOCITY_THRESHOLD</td><td>501</td><td>0.03</td></tr>
+<tr><td>FOREX_SMA_WICK_PENETRATION</td><td>502</td><td>0.10 (defined but currently unused in phase logic — see section M)</td></tr>
+<tr><td>Exhaustion alert build</td><td>769–777</td><td>Part of Forex SMA cron handler</td></tr>
+<tr><td>Type 1 alert build</td><td>822–833</td><td>Part of Forex SMA cron handler</td></tr>
+<tr><td>Type 2 alert build</td><td>944–955</td><td>Part of Forex SMA cron handler</td></tr>
+</table></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     N12. CASCADE DELETE — DELETE /user/assets/:id
+═══════════════════════════════════════════════════════ -->
+<section id="sec-n12">
+<h2><span class="sec-badge">N12</span>Cascade Delete — DELETE /user/assets/:id</h2>
+
+<p>Route handler in <code>worker/src/ebp-worker.js</code> lines 1337–1349. D1 SQLite foreign-key enforcement is not enabled; all cascade logic is explicit application code:</p>
+
+<h3>Delete Sequence</h3>
+<pre><span class="cm">// 1. All EBP signal configs for this asset</span>
+<span class="kw">await</span> env.DB.prepare(<span class="st">'DELETE FROM user_ebp_configs WHERE asset_id = ?'</span>).bind(params.id).run();
+
+<span class="cm">// 2. All sweep signal configs</span>
+<span class="kw">await</span> env.DB.prepare(<span class="st">'DELETE FROM user_sweep_configs WHERE asset_id = ?'</span>).bind(params.id).run();
+
+<span class="cm">// 3. All T1/T2/T3/T4 template definitions</span>
+<span class="kw">await</span> env.DB.prepare(<span class="st">'DELETE FROM user_templates WHERE asset_id = ?'</span>).bind(params.id).run();
+
+<span class="cm">// 4. All active/pending chain progress rows</span>
+<span class="kw">await</span> env.DB.prepare(<span class="st">'DELETE FROM chain_state WHERE asset_id = ?'</span>).bind(params.id).run();
+
+<span class="cm">// 5. The asset record itself — ownership check here</span>
+<span class="kw">await</span> env.DB.prepare(<span class="st">'DELETE FROM user_assets WHERE id = ? AND user_id = ?'</span>)
+  .bind(params.id, clerkUser.id).run();</pre>
+
+<h3>Tables NOT Included in This Cascade</h3>
+<div class="table-wrap"><table>
+<tr><th>Table</th><th>Reason</th></tr>
+<tr><td>forex_indicator_configs</td><td>Has its own DELETE route with <code>forex_sma_state</code> shared-state cleanup logic. Not touched by asset delete.</td></tr>
+<tr><td>nse_indicator_configs</td><td>No asset-level delete. Orphaned rows persist until manually cleaned.</td></tr>
+<tr><td>nse_indicator_chain</td><td>Not deleted on asset removal. Orphaned rows expire naturally via <code>expires_at</code>.</td></tr>
+<tr><td>alert_history</td><td>Intentionally retained as historical record.</td></tr>
+<tr><td>signals</td><td>Intentionally retained as historical record.</td></tr>
+<tr><td>fvg_zones / nse_fvg_zones</td><td>Shared symbol-level data; no user or asset scope.</td></tr>
+<tr><td>swing_states / nse_swing_states</td><td>Shared symbol+TF level; no user scope.</td></tr>
+</table></div>
+
+<h3>forex_indicator_configs Separate Delete Route (lines 1804–1834)</h3>
+<p>After deleting an SMA config row, the route checks whether any other user still holds a config for the same symbol+TF. If none remain, it deletes the shared <code>forex_sma_state</code> row:</p>
+<pre><span class="kw">const</span> stillUsed = <span class="kw">await</span> env.DB.prepare(<span class="st">`
+  SELECT COUNT(*) as cnt FROM forex_indicator_configs fic
+  JOIN user_assets ua ON fic.asset_id = ua.id
+  WHERE ua.symbol = ? AND fic.timeframe = ?
+`</span>).bind(asset.symbol, config.timeframe).first();
+
+<span class="kw">if</span> ((stillUsed?.cnt ?? 0) === 0) {
+  <span class="kw">await</span> env.DB.prepare(<span class="st">'DELETE FROM forex_sma_state WHERE symbol = ? AND timeframe = ?'</span>)
+    .bind(asset.symbol, config.timeframe).run();
+}</pre>
+<p>This is the only place in the codebase where <code>forex_sma_state</code> rows are explicitly deleted. No equivalent cleanup exists for <code>nse_sma_state</code> on config delete.</p>
 </section>
 
 </main>
