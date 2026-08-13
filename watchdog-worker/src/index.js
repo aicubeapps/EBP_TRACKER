@@ -1550,7 +1550,6 @@ async function handleWatchdogHealthCheck(env) {
   const nyOffsetHours = parseInt(nyOffsetStr.replace('GMT', ''));
   const nyWallClock   = new Date(now + nyOffsetHours * 3600 * 1000);
   const nyHour        = nyWallClock.getUTCHours();
-  const nyMinute      = nyWallClock.getUTCMinutes();
   const nyDayOfWeek   = nyWallClock.getUTCDay(); // 0=Sun, 6=Sat
 
   // ── NSE market hours: 09:15–15:30 IST (UTC+5:30, no DST) ───────────────
@@ -1845,8 +1844,6 @@ async function handleWatchdogHealthCheck(env) {
   const utcMinute = nowUtc.getUTCMinutes();
   // 2-hourly healthy confirmation: first 15-min tick after every even UTC hour.
   const is2HourlyWindow = utcHour % 2 === 0 && utcMinute < 15;
-  // EOD report: first 15-min tick after NY 5PM (DST-safe via nyHour above).
-  const isEodWindow = nyHour === 17 && nyMinute < 15;
 
   // ── Human-readable NY/IST timestamp for Telegram text ───────────────────
   // nyWallClock/istClock are synthetic Date objects whose UTC-getter fields
@@ -1885,17 +1882,6 @@ async function handleWatchdogHealthCheck(env) {
       `All ${Object.keys(checks).length} checks passed.`
     );
   }
-  if (isEodWindow) {
-    const checksText = Object.entries(checks).map(([k, v]) => `• ${k}: ${v}`).join('\n');
-    const status = failures.length === 0 ? '✅ All clear' : `⚠️ ${failures.length} issue(s) detected`;
-    await sendWatchdogAlert(env,
-      `📊 <b>EBP Watchdog — EOD Report (NY 5PM)</b>\n` +
-      `🕐 ${tsDisplay}\n\n` +
-      `Status: ${status}\n\n` +
-      `<b>System checks:</b>\n` +
-      `${checksText}`
-    );
-  }
 
   return {
     timestamp: nowISO,
@@ -1904,7 +1890,7 @@ async function handleWatchdogHealthCheck(env) {
     checks,
     forexMarketOpen,
     nseMarketOpen,
-    alertsSent: failures.length > 0 || is2HourlyWindow || isEodWindow,
+    alertsSent: failures.length > 0 || is2HourlyWindow,
   };
 }
 
