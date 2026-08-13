@@ -692,3 +692,635 @@ The route reads `tf` from the request body, then falls back to a query parameter
 ---
 
 *End of report. All facts are sourced from direct file reads of the production codebase as of 2026-08-13. Sections marked NOT VERIFIED require a live database query or runtime observation to confirm.*
+
+---
+
+## 13. Complete Route Tables
+
+> NSE Worker routes are documented in Section 9.
+
+---
+
+### 13.1 EBP Worker (`worker/src/ebp-worker.js`, Cloudflare script `ebp-tracker-worker`)
+
+| Method | Path | Auth Type | Description |
+|--------|------|-----------|-------------|
+| GET | `/health` | public | Returns `{ status: 'ok' }`. No DB access. |
+| GET | `/user/me` | Clerk JWT | Returns the current user row from `users`. Creates the row via `getOrCreateUser()` if it does not exist. Checks `expires_at` and deactivates if past. |
+| GET | `/user/assets` | Clerk JWT | Returns all `user_assets` rows for the authenticated user. |
+| POST | `/user/assets` | Clerk JWT | Creates a new asset. Validates symbol via Twelve Data API (env.TWELVE_DATA_API_KEY). Enforces `asset_limit` for non-NSE/non-system assets. |
+| GET | `/user/assets/count` | Clerk JWT | Returns count of non-NSE/non-system assets owned by the user against their `asset_limit`. |
+| DELETE | `/user/assets/:id` | Clerk JWT | Deletes asset and all dependent config rows (cascade via application code). |
+| PATCH | `/user/assets/:id/bias-overrides` | Clerk JWT | Updates `bias_overrides` JSON on a `user_assets` row. |
+| GET | `/user/assets/validate` | Clerk JWT | Validates a symbol string against the Twelve Data API without creating an asset. |
+| GET | `/user/ebp-configs/:assetId` | Clerk JWT | Returns all EBP configs for the specified asset. |
+| POST | `/user/ebp-configs/:assetId` | Clerk JWT | Creates an EBP config. Checks `user_tf_access` to gate the requested timeframe. |
+| PATCH | `/user/ebp-configs/:id` | Clerk JWT | Updates fields on an EBP config row. |
+| DELETE | `/user/ebp-configs/:id` | Clerk JWT | Deletes an EBP config row. |
+| GET | `/user/sweep-configs/:assetId` | Clerk JWT | Returns all Sweep configs for the specified asset. |
+| POST | `/user/sweep-configs/:assetId` | Clerk JWT | Creates a Sweep config. Checks `user_tf_access`. |
+| PATCH | `/user/sweep-configs/:id` | Clerk JWT | Updates fields on a Sweep config row. |
+| DELETE | `/user/sweep-configs/:id` | Clerk JWT | Deletes a Sweep config row. |
+| GET | `/user/templates/:assetId` | Clerk JWT | Returns all template chain configs for the specified asset. |
+| POST | `/user/templates/:assetId` | Clerk JWT | Creates a template chain config. |
+| PATCH | `/user/template/:id` | Clerk JWT | Updates a template chain config. |
+| DELETE | `/user/template/:id` | Clerk JWT | Deletes a template chain config. |
+| GET | `/user/chain-state/:assetId` | Clerk JWT | Returns active `chain_state` rows for the specified asset. |
+| GET | `/user/fvg-zones/:assetId` | Clerk JWT | Returns open `fvg_zones` rows for the specified asset. |
+| GET | `/dashboard` | Clerk JWT | Returns aggregated dashboard data (assets, configs, active chains). |
+| GET | `/user/forex-indicator-configs/:assetId` | Clerk JWT | Returns forex SMA indicator configs for the specified asset. |
+| POST | `/user/forex-indicator-configs/:assetId` | Clerk JWT | Creates a forex SMA indicator config. |
+| PATCH | `/user/forex-indicator-configs/:id` | Clerk JWT | Updates a forex SMA indicator config. |
+| DELETE | `/user/forex-indicator-configs/:id` | Clerk JWT | Deletes a forex SMA indicator config. |
+| GET | `/user/bias/:symbol` | Clerk JWT | Returns the computed bias for the specified symbol from `swing_states`. |
+| GET | `/health/datasources` | Clerk JWT | Returns freshness status of `candle_cache` and `market_breadth_cache` rows relevant to the user. |
+| GET | `/alerts/history` | Clerk JWT | Returns recent `alert_history` rows for the user. |
+| GET | `/alerts/export` | Clerk JWT | Exports `alert_history` rows filtered by `from`/`to` query params (integer ms epoch). **Known bug:** compares TEXT `fired_at` column against integer epoch values; result set may be empty or incorrect. |
+| GET | `/user/telegram` | Clerk JWT | Returns the user's linked Telegram chat record from `telegram_links`. |
+| POST | `/user/telegram/initlink` | Clerk JWT | Initiates the Telegram deep-link flow; generates and stores a link token. |
+| POST | `/user/telegram/test` | Clerk JWT | Sends a test Telegram message to the user's linked chat. |
+| POST | `/user/telegram/verify` | Clerk JWT | Verifies the deep-link token and finalises the Telegram account link. |
+| DELETE | `/user/telegram` | Clerk JWT | Unlinks the user's Telegram account. |
+| GET | `/market/breadth` | Clerk JWT | Returns the latest `market_breadth_cache` snapshot for the user's configured timeframes. |
+| POST | `/cron/ebp` | X-Cron-Secret | Main EBP cron handler. Accepts body `{ tf }`. Valid values: M15, M30, 1H, 4H, D, W. Runs swing detection for all active non-NSE configs where `users.active = 1`. |
+| POST | `/telegram/webhook` | public | Incoming Telegram webhook. Receives bot updates; processes `/start` deep-link tokens for account linking. No auth header — URL secrecy is the access control. |
+| GET | `/signals/:id` | X-Journal-Secret | Trade Journal integration. Returns a `signals` row by `signal_id`. Secured by `JOURNAL_API_SECRET` shared secret — CORS open (`Access-Control-Allow-Origin: *`). |
+| PATCH | `/signals/:id/traded` | X-Journal-Secret | Trade Journal integration. Sets `traded = 1` on a `signals` row. Secured by `JOURNAL_API_SECRET`. |
+| GET | `/invite/:token` | public | Validates an invite token against `invite_tokens`. Returns `{ valid: true, token }` or `{ valid: false, error }`. No Clerk auth required — used during the pre-registration invite flow. |
+| GET | `/sweep/dashboard` | Clerk JWT | Returns Sweep-specific dashboard data for the user's assets. |
+| GET | `/sweep/history` | Clerk JWT | Returns recent Sweep alert history for the user. |
+
+**44 routes total** (source: `router.get/post/patch/delete` calls in ebp-worker.js).
+
+---
+
+### 13.2 Sweep Worker (`sweep-worker/src/index.js`, Cloudflare script `sweep-detector`)
+
+| Method | Path | Auth Type | Description |
+|--------|------|-----------|-------------|
+| GET | `/health` | public | Returns `{ status: 'ok', worker: 'sweep-detector', timestamp: <ISO> }`. |
+| POST | `/cron/sweep` | X-Cron-Secret | Sweep cron handler. Accepts body `{ tf }`. Valid values: M15, M30, 1H, 4H. Delegates to `handleSweepCron()` in sweep-cron.js. |
+
+**2 fetch routes total.** No `scheduled()` export.
+
+---
+
+### 13.3 Compute Worker (`compute-worker/src/index.js`, Cloudflare script `compute-worker`)
+
+| Method | Path | Auth Type | Description |
+|--------|------|-----------|-------------|
+| GET | `/health` | public | Returns `{ status: 'ok', worker: 'compute-worker' }`. |
+| POST | `/cron/sma` | X-Cron-Secret | SMA Cloud cron handler. Accepts body `{ tf }`. Valid values: M15, M30, 1H, 4H. Computes forex SMA phase transitions and market breadth. |
+
+**2 fetch routes total.**
+
+`scheduled()` handler → `handleMarketBreadthCron()`. Registered via `[triggers] crons = ["5 * * * *"]` in `compute-worker/wrangler.toml` (every hour at :05). Fires independently of the `POST /cron/sma` route.
+
+---
+
+### 13.4 Watchdog Worker (`watchdog-worker/src/index.js`, Cloudflare script `ebp-watchdog`)
+
+| Method | Path | Auth Type | Description |
+|--------|------|-----------|-------------|
+| GET | `/health` | public | Returns `{ ok: true, worker: 'ebp-watchdog', ts: <ISO> }`. |
+| POST | `/health/watchdog-check` | X-Cron-Secret | External health probe. Reads `candle_cache`, `swing_states`, `market_breadth_intraday`, `forex_sma_state`, `nse_candle_cache`, `nse_swing_states`, `nse_fvg_zones`, `nse_sma_state`, and `watchdog_log`. Sends Telegram alert on failures; sends all-clear every 2h. Driven by cron-job.org every 15 min. |
+| POST | `/cron/candle-fetch` | X-Cron-Secret | Signal-symbol ETL. Fetches M15 every tick; M30 when `minute % 30 === 0`; 1H at `minute === 0`; 4H at `minute === 0` and NY hour in `NY_4H_BOUNDARIES`. Respects `isForexClosedWindow` (skips forex/commodity; fetches crypto). Driven by cron-job.org every 15 min. |
+| POST | `/cron/breadth-fetch` | X-Cron-Secret | Breadth + DXY + daily/weekly synthesis ETL. Fetches all `BREADTH_SYMBOLS` from Yahoo Finance; computes synthetic DXY; synthesises 4H/Daily/Weekly DXY candles at their respective NY boundaries; runs `attemptDailySynthesis` at NY 17:00; runs `attemptWeeklySynthesis` on Friday NY 17:00. Driven by cron-job.org hourly. |
+| POST | `/cron/daily-digest` | X-Cron-Secret | EOD operations report. Calls `sendWatchdogDailyDigest()` which sends an 11-section Telegram report covering candle fetch, breadth, DXY, signal symbols, daily/weekly synthesis, market breadth, NSE, and watchdog_log health. Driven by cron-job.org weekdays at 21:05 UTC. |
+
+**5 fetch routes total.**
+
+`scheduled()` handler → `runWatchdog()` (near-zero CPU heartbeat; sends `logWatchdog('info', 'heartbeat')`; also fires `sendWatchdogDailyDigest` at NY 17:00 — but this native CF trigger is dormant with no `[triggers]` entry in `watchdog-worker/wrangler.toml`). Real ETL runs entirely via the cron-job.org-driven POST routes above.
+
+---
+
+### 13.5 Admin Worker (`admin-worker/src/index.js`, Cloudflare script `admin-worker`)
+
+All routes except `/health` require Clerk JWT (`Authorization: Bearer <token>`) **and** `users.is_admin = 1` in D1. A non-admin authenticated user receives 403.
+
+| Method | Path | Auth Type | Description |
+|--------|------|-----------|-------------|
+| GET | `/health` | public | Returns basic health response. |
+| GET | `/admin/users` | Clerk JWT + is_admin | Returns all `users` rows. |
+| GET | `/admin/tokens` | Clerk JWT + is_admin | Returns all `invite_tokens` rows. |
+| POST | `/admin/invite` | Clerk JWT + is_admin | Generates an 8-char invite token (`crypto.randomUUID().split('-')[0].toUpperCase()`), inserts into `invite_tokens`. Returns the invite URL built from `env.APP_URL`. |
+| POST | `/admin/expire/:id` | Clerk JWT + is_admin | Sets `users.active = 0` and `users.expires_at = Date.now()` (current time, not future) for the specified user. |
+| GET | `/admin/api-keys` | Clerk JWT + is_admin | Returns all rows from `api_keys` joined with `api_key_state`. |
+| POST | `/admin/api-keys` | Clerk JWT + is_admin | Inserts a new row into `api_keys`. |
+| PATCH | `/admin/api-keys/:id` | Clerk JWT + is_admin | Updates fields on an `api_keys` row (e.g. `label`, `key_name`). |
+| DELETE | `/admin/api-keys/:id` | Clerk JWT + is_admin | Deletes from both `api_keys` AND `api_key_state` for the specified id. |
+| PATCH | `/admin/users/:id/asset-limit` | Clerk JWT + is_admin | Updates `users.asset_limit`. Enforces range 1–50. |
+| GET | `/admin/users/:id/assets` | Clerk JWT + is_admin | Returns all `user_assets` rows for the specified user. |
+| GET | `/admin/users/:id/tf-access` | Clerk JWT + is_admin | Returns `users.user_tf_access` JSON for the specified user. |
+| PATCH | `/admin/users/:id/tf-access` | Clerk JWT + is_admin | Updates `users.user_tf_access`. Valid values: `ALL_TF_ACCESS = ['M5','M15','M30','1H','4H','D','W']`. |
+| GET | `/admin/users/:id/nse-tf-access` | Clerk JWT + is_admin | Returns `users.nse_tf_access` JSON for the specified user. |
+| PATCH | `/admin/users/:id/nse-tf-access` | Clerk JWT + is_admin | Updates `users.nse_tf_access`. Valid values: `ALL_NSE_TF_ACCESS = ['M1','M5','M15','M30','1H','D']`. |
+
+**15 routes total** (confirmed from direct source count of `router.get/post/patch/delete` calls; prior summary incorrectly stated 16).
+
+---
+
+## 14. Deployment Procedures
+
+All commands use PowerShell syntax. Do not run `wrangler deploy` from this document — these are reference procedures only.
+
+---
+
+### Procedure A — Deploy a Single Worker
+
+1. Confirm you are on the coding branch (not `main`):
+   ```powershell
+   git branch --show-current
+   ```
+   If not on the coding branch, switch before deploying:
+   ```powershell
+   git checkout <coding-branch-name>
+   ```
+
+2. Deploy the worker (substitute the correct `wrangler.toml` path):
+   ```powershell
+   wrangler deploy --config .\worker\wrangler.toml
+   ```
+   Worker-specific config paths:
+   - EBP Worker: `.\worker\wrangler.toml`
+   - Sweep Worker: `.\sweep-worker\wrangler.toml`
+   - NSE Worker: `.\nse-worker\wrangler.toml`
+   - Compute Worker: `.\compute-worker\wrangler.toml`
+   - Watchdog Worker: `.\watchdog-worker\wrangler.toml`
+   - Admin Worker: `.\admin-worker\wrangler.toml`
+
+3. Smoke-test the /health endpoint immediately after deploy:
+   ```powershell
+   Invoke-RestMethod -Uri "https://<worker-subdomain>.workers.dev/health"
+   ```
+   Expected response varies by worker (see Section 13). A non-200 response means the deploy failed or the worker is crashing at startup — check Cloudflare dashboard logs before proceeding.
+
+4. If /health returns non-200:
+   - Do NOT commit the broken state.
+   - Check Cloudflare real-time logs: `wrangler tail --name <script-name>`
+   - Roll back if needed: re-deploy the last working commit.
+
+5. Commit and push the deployed state immediately:
+   ```powershell
+   git add .\<worker-dir>\src\
+   git commit -m "deploy: <description of change>"
+   git push -u origin <coding-branch-name>
+   ```
+   Never leave a deployed worker in an uncommitted state. An uncommitted deploy is unrecoverable if the working copy is lost.
+
+---
+
+### Procedure B — Deploy All Workers (Order)
+
+**Order does not matter** for most deployments because all workers share the same D1 database and communicate only through D1 — there are no direct inter-worker calls. Any worker can be deployed in any sequence.
+
+**Exception — schema migrations:** If a D1 migration must accompany the deploy, apply the migration FIRST (see Procedure F) before deploying any worker. All workers must be compatible with the new schema from the moment the migration is applied, since D1 changes take effect immediately across all workers. Deploy the workers immediately after the migration; do not leave workers in a mixed state overnight.
+
+Recommended order when deploying all workers (minimises user-facing disruption):
+1. Admin Worker (manages users — deploy first so admin control is available)
+2. EBP Worker (main user API — deploy before cron workers go live)
+3. NSE Worker
+4. Sweep Worker
+5. Compute Worker
+6. Watchdog Worker (deploy last so it monitors the already-live workers)
+
+---
+
+### Procedure C — Add or Rotate a Secret
+
+1. Rotate the secret value (interactive prompt — type or paste the new value):
+   ```powershell
+   wrangler secret put CRON_SECRET --name ebp-tracker-worker
+   ```
+   Replace `CRON_SECRET` with the secret name and `ebp-tracker-worker` with the target script name.
+
+   To pipe the value non-interactively in PowerShell:
+   ```powershell
+   "new-secret-value" | wrangler secret put CRON_SECRET --name ebp-tracker-worker
+   ```
+
+2. The secret takes effect on the **next cold-start** of the worker, not immediately. Warm instances continue using the old value until they are cycled. To force a cycle, redeploy the worker with a trivial no-op change (e.g. add a comment), which resets all instances.
+
+3. Verify the secret was registered (does not show the value):
+   ```powershell
+   wrangler secret list --name ebp-tracker-worker
+   ```
+   Confirm the secret name appears in the output.
+
+4. If the same secret must be updated on multiple workers (e.g. `CRON_SECRET` or `SHARED_BOT_TOKEN`), repeat step 1 for each worker script name.
+
+---
+
+### Procedure D — Clear a Native Cloudflare Cron Schedule
+
+**Why this is necessary:** Removing or commenting out `[triggers]` from `wrangler.toml` and redeploying does NOT clear the live Cloudflare cron registration. The `scheduled()` handler continues to fire on the old interval. The only way to clear it is via the Cloudflare API.
+
+1. Send a PUT request with an empty array as the body:
+   ```powershell
+   Invoke-RestMethod `
+     -Method Put `
+     -Uri "https://api.cloudflare.com/client/v4/accounts/$env:CF_ACCOUNT_ID/workers/scripts/<script-name>/schedules" `
+     -Headers @{ Authorization = "Bearer $env:CF_API_TOKEN" } `
+     -Body "[]" `
+     -ContentType "application/json"
+   ```
+   Replace `<script-name>` with the Cloudflare script name (e.g. `compute-worker`, `ebp-watchdog`).
+   `$env:CF_ACCOUNT_ID` and `$env:CF_API_TOKEN` must be set in your environment.
+
+2. Verify the schedule was cleared:
+   ```powershell
+   Invoke-RestMethod `
+     -Method Get `
+     -Uri "https://api.cloudflare.com/client/v4/accounts/$env:CF_ACCOUNT_ID/workers/scripts/<script-name>/schedules" `
+     -Headers @{ Authorization = "Bearer $env:CF_API_TOKEN" }
+   ```
+   The `result` array in the response should be empty (`[]`).
+
+3. **Current state:** `compute-worker` retains an active native CF cron (`5 * * * *` via `wrangler.toml [triggers]`). All other workers have no active native CF crons — their `scheduled()` handlers exist in source but no cron fires them in production. Watchdog's `scheduled()` is a heartbeat-only no-op; real ETL runs via cron-job.org POST routes.
+
+---
+
+### Procedure E — Verify a Worker Is Live
+
+Use `Invoke-RestMethod` to hit the `/health` route for each worker:
+
+```powershell
+# EBP Worker
+Invoke-RestMethod -Uri "https://ebp-tracker-worker.<subdomain>.workers.dev/health"
+
+# Sweep Worker
+Invoke-RestMethod -Uri "https://sweep-detector.<subdomain>.workers.dev/health"
+
+# NSE Worker
+Invoke-RestMethod -Uri "https://nse-tracker.<subdomain>.workers.dev/health"
+
+# Compute Worker
+Invoke-RestMethod -Uri "https://compute-worker.<subdomain>.workers.dev/health"
+
+# Watchdog Worker
+Invoke-RestMethod -Uri "https://ebp-watchdog.<subdomain>.workers.dev/health"
+
+# Admin Worker
+Invoke-RestMethod -Uri "https://admin-worker.<subdomain>.workers.dev/health"
+```
+
+Replace `<subdomain>` with your Cloudflare account Workers subdomain.
+
+Expected responses by worker:
+- EBP Worker: `{ status: 'ok' }` (or similar — exact shape NOT VERIFIED without re-read of /health handler)
+- Sweep Worker: `{ status: 'ok', worker: 'sweep-detector', timestamp: '<ISO>' }`
+- Compute Worker: `{ status: 'ok', worker: 'compute-worker' }`
+- Watchdog Worker: `{ ok: true, worker: 'ebp-watchdog', ts: '<ISO>' }`
+- NSE Worker and Admin Worker: NOT VERIFIED — /health handler body not confirmed from source in this session
+
+Any HTTP 5xx response or connection error indicates the worker has crashed on startup. Check Cloudflare dashboard logs immediately.
+
+---
+
+### Procedure F — Apply a D1 Migration
+
+1. Apply the migration file to the remote production database:
+   ```powershell
+   wrangler d1 execute ebp-tracker-db --remote --file .\migrations\<migration-file>.sql
+   ```
+   Replace `<migration-file>.sql` with the actual filename (e.g. `migration-014-some-change.sql`).
+
+2. Verify the migration was applied:
+   ```powershell
+   wrangler d1 execute ebp-tracker-db --remote --command "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+   ```
+   Or query a specific new table/column if the migration added one.
+
+3. **Important notes:**
+   - `schema.sql` at the repository root is a reference snapshot only — it is NOT auto-applied. All schema changes go through numbered migration files.
+   - D1 migrations apply immediately to the live database. There is no staging environment. Test migration SQL locally against a local D1 copy first: `wrangler d1 execute ebp-tracker-db --local --file .\migrations\<migration-file>.sql`
+   - Apply migrations before deploying workers that depend on the new schema.
+
+---
+
+## 15. User and Subscription Management
+
+---
+
+### 15.1 Runtime Access Gating
+
+All gating runs at the time of each cron tick or API request. There is no background job that pre-computes access — it is evaluated live on every call.
+
+**`users.active` (INTEGER 0/1)**
+
+Checked in the EBP cron query (`WHERE u.active = 1`) before any signal detection runs. A user with `active = 0` receives no alerts from any worker. The check in the SQL JOIN means zero rows are returned for inactive users — no per-user code path is needed.
+
+Source (ebp-worker.js, handleEBPCron):
+```sql
+WHERE ec.timeframe=? AND ec.enabled=1
+AND u.active=1
+AND ua.asset_type != 'nse'
+```
+
+**`users.expires_at` (INTEGER ms epoch)**
+
+Checked inside `getOrCreateUser()`, which runs on every authenticated API request. If `user.active = 1` and `user.expires_at < Date.now()`, the user is immediately deactivated:
+```javascript
+if (user?.active && user.expires_at < now) {
+  await db.prepare('UPDATE users SET active = 0 WHERE id = ?').bind(clerkUser.id).run();
+  user.active = 0;
+}
+```
+This means expiry is enforced lazily — the next API request after the expiry timestamp triggers deactivation. Users who stop using the app but are still configured will continue receiving cron alerts until any API request triggers the expiry check. Cron workers do not check `expires_at` directly.
+
+**`users.asset_limit` (INTEGER, range 1–50)**
+
+Enforced in `POST /user/assets` (ebp-worker.js) for non-NSE, non-system assets:
+```javascript
+if (assetType !== 'nse' && assetType !== 'system') {
+  const count = await env.DB.prepare(
+    "SELECT COUNT(*) as cnt FROM user_assets WHERE user_id = ? AND asset_type != 'nse' AND asset_type != 'system'"
+  ).bind(clerkUser.id).first();
+  if (count.cnt >= user.asset_limit) {
+    return json({ error: 'asset_limit_reached', limit: user.asset_limit }, 403, origin);
+  }
+}
+```
+NSE assets are unlimited regardless of `asset_limit`. The count query excludes both `nse` and `system` asset types.
+
+**`users.user_tf_access` (TEXT JSON array)**
+
+Checked in two places:
+
+1. On config creation (`POST /user/ebp-configs/:assetId` and `POST /user/sweep-configs/:assetId`) — returns 403 if the requested TF is not in the user's access list:
+   ```javascript
+   if (!tfAccess.includes(timeframe)) {
+     return json({ error: 'tf_access_denied', message: 'This timeframe is not enabled for your account' }, 403, origin);
+   }
+   ```
+
+2. During the EBP and Sweep cron loops — skips the user's config if the cron TF is not in their access list:
+   ```javascript
+   const userTfAccess = JSON.parse(row.user_tf_access || '["M5","M15","M30","1H","4H","D","W"]');
+   if (!userTfAccess.includes(tf)) continue;
+   ```
+   The fallback `["M5","M15","M30","1H","4H","D","W"]` applies when the field is NULL — i.e. all TFs are allowed by default.
+
+**`users.nse_tf_access` (TEXT JSON array)**
+
+Controls NSE timeframe access. Read by NSE Worker cron. NOT FOUND IN SOURCE — nse-worker/src/nse-cron.js not read in this session for the exact enforcement code. Valid values per admin-worker source: `['M1','M5','M15','M30','1H','D']`.
+
+---
+
+### 15.2 Admin Panel Actions and Their D1 Effects
+
+All actions are performed via admin-worker routes. All require Clerk JWT + `is_admin = 1`.
+
+| Action | Route | D1 Effect |
+|--------|-------|-----------|
+| Deactivate user | `POST /admin/expire/:id` | Sets `users.active = 0`, `users.expires_at = Date.now()` (current time). User immediately stops receiving cron alerts. |
+| Set asset limit | `PATCH /admin/users/:id/asset-limit` | Updates `users.asset_limit`. Range enforced: 1–50. Takes effect on the user's next `POST /user/assets` call. |
+| Grant TF access | `PATCH /admin/users/:id/tf-access` | Updates `users.user_tf_access` JSON. Valid set: `['M5','M15','M30','1H','4H','D','W']`. |
+| Grant NSE TF access | `PATCH /admin/users/:id/nse-tf-access` | Updates `users.nse_tf_access` JSON. Valid set: `['M1','M5','M15','M30','1H','D']`. |
+| Issue invite token | `POST /admin/invite` | Inserts a row into `invite_tokens` with an 8-character token (`crypto.randomUUID().split('-')[0].toUpperCase()`), `created_at = Date.now()`. Returns the full invite URL using `env.APP_URL`. No expiry column is set at creation time. |
+| View all API keys | `GET /admin/api-keys` | Read-only. Returns `api_keys` joined with `api_key_state`. |
+| Add API key | `POST /admin/api-keys` | Inserts into `api_keys`. |
+| Update API key | `PATCH /admin/api-keys/:id` | Updates `api_keys` fields. |
+| Delete API key | `DELETE /admin/api-keys/:id` | Deletes from **both** `api_keys` AND `api_key_state` for the specified id. |
+| View user assets | `GET /admin/users/:id/assets` | Read-only. Returns `user_assets` for the specified user. |
+
+---
+
+### 15.3 Invite Flow
+
+1. **Admin issues token:** Admin calls `POST /admin/invite`. A row is inserted into `invite_tokens` with an 8-char alphanumeric token and `active = 1`, `used_by = NULL`. The response contains the full invite URL (`env.APP_URL/invite/<token>`).
+
+2. **Admin shares the URL** with the prospective user out-of-band (e.g. email, Slack).
+
+3. **User visits the invite URL:** The browser hits `GET /invite/:token` on the EBP Worker. The handler queries `invite_tokens WHERE token = ? AND active = 1 AND used_by IS NULL`. If valid, returns `{ valid: true, token }`. If already used or invalid, returns `{ valid: false, error: 'Invalid or already used token' }` (HTTP 400).
+
+4. **User completes registration:** The frontend uses the validated token to complete Clerk registration. The exact step that marks `invite_tokens.used_by` and `active = 0` is NOT FOUND IN SOURCE — ebp-worker.js lines covering the Clerk webhook or post-registration handler were not read in sufficient detail in this session. Manual verification required for the token consumption step.
+
+5. **Expired/used token:** `GET /invite/:token` returns HTTP 400 with `{ valid: false, error: 'Invalid or already used token' }`. The user cannot proceed with registration.
+
+---
+
+## 16. Dead Secrets Audit
+
+**Methodology:** wrangler.toml files in this repository do not list secrets. Secrets are registered via `wrangler secret put` and stored in Cloudflare only. Therefore the "Configured" column cannot be confirmed from source files alone. All "Configured" entries are marked `NOT VERIFIED — wrangler secret list output needed`.
+
+The "Read by Source" column is confirmed from direct file reads.
+
+---
+
+### 16.1 ebp-tracker-worker (`worker/src/ebp-worker.js`)
+
+| Secret | Configured | Read by Source | Status |
+|--------|-----------|----------------|--------|
+| `CRON_SECRET` | NOT VERIFIED | Yes — `POST /cron/ebp` auth header check | Active |
+| `CLERK_SECRET_KEY` | NOT VERIFIED | Yes — all Clerk JWT route verification | Active |
+| `SHARED_BOT_TOKEN` | NOT VERIFIED | Yes — Telegram alert sending | Active |
+| `JOURNAL_API_SECRET` | NOT VERIFIED | Yes — `GET /signals/:id` and `PATCH /signals/:id/traded` (X-Journal-Secret header) | Active |
+| `TWELVE_DATA_API_KEY` | NOT VERIFIED | Yes — `validateSymbol()` called from `POST /user/assets` | Active (note: Twelve Data fetching was moved to Watchdog; this secret remains in EBP Worker for symbol validation only) |
+| `WATCHDOG_BOT_TOKEN` | NOT VERIFIED | NOT IN SOURCE — no reference in ebp-worker.js | Dead — remove if configured |
+| `WATCHDOG_ADMIN_CHAT_ID` | NOT VERIFIED | NOT IN SOURCE — no reference in ebp-worker.js | Dead — remove if configured |
+
+---
+
+### 16.2 sweep-detector (`sweep-worker/src/index.js` + `sweep-cron.js`)
+
+| Secret | Configured | Read by Source | Status |
+|--------|-----------|----------------|--------|
+| `CRON_SECRET` | NOT VERIFIED | Yes — `POST /cron/sweep` auth header check | Active |
+| `SHARED_BOT_TOKEN` | NOT VERIFIED | Yes — Telegram alert sending in sweep-cron.js | Active |
+
+---
+
+### 16.3 nse-tracker (`nse-worker/`)
+
+Source confirmation is partial — nse-worker/src/nse-cron.js was not read in this session. The following is based on nse-worker/wrangler.toml comment which explicitly listed: `CRON_SECRET`, `CLERK_SECRET_KEY`.
+
+| Secret | Configured | Read by Source | Status |
+|--------|-----------|----------------|--------|
+| `CRON_SECRET` | NOT VERIFIED | Confirmed from wrangler.toml comment | Active |
+| `CLERK_SECRET_KEY` | NOT VERIFIED | Confirmed from wrangler.toml comment | Active |
+| `SHARED_BOT_TOKEN` | NOT VERIFIED | NOT VERIFIED — nse-worker/src/nse-cron.js not read; likely used for Telegram alerts | NOT VERIFIED |
+
+---
+
+### 16.4 compute-worker (`compute-worker/src/index.js`)
+
+| Secret | Configured | Read by Source | Status |
+|--------|-----------|----------------|--------|
+| `CRON_SECRET` | NOT VERIFIED | Yes — `POST /cron/sma` auth header check | Active |
+| `SHARED_BOT_TOKEN` | NOT VERIFIED | Yes — Telegram alert sending | Active |
+| `TWELVE_DATA_API_KEY` | NOT VERIFIED | NOT FOUND IN SOURCE — compute-worker reads Twelve Data keys from the `api_keys` D1 table, not from env. This secret is NOT read in compute-worker/src/index.js. | Dead — remove if configured |
+
+---
+
+### 16.5 ebp-watchdog (`watchdog-worker/src/index.js`)
+
+| Secret | Configured | Read by Source | Status |
+|--------|-----------|----------------|--------|
+| `CRON_SECRET` | NOT VERIFIED | Yes — all five POST routes check `X-Cron-Secret !== env.CRON_SECRET` | Active |
+| `WATCHDOG_BOT_TOKEN` | NOT VERIFIED | Yes — `sendWatchdogAlert()` uses this to send Telegram messages | Active |
+| `WATCHDOG_ADMIN_CHAT_ID` | NOT VERIFIED | Yes — `sendWatchdogAlert()` uses this as the Telegram chat target | Active |
+
+---
+
+### 16.6 admin-worker (`admin-worker/src/index.js`)
+
+| Secret | Configured | Read by Source | Status |
+|--------|-----------|----------------|--------|
+| `CLERK_SECRET_KEY` | NOT VERIFIED | Yes — all admin Clerk JWT verification | Active |
+| `APP_URL` | NOT VERIFIED | Yes — `POST /admin/invite` uses `env.APP_URL` to build the invite URL | Active (note: this is an environment variable, not a Cloudflare secret. It may be set via `wrangler secret put` or via [vars] in wrangler.toml. admin-worker/wrangler.toml has no [vars] section — status of this env var is NOT VERIFIED. If missing, invite URL will be malformed.) |
+
+---
+
+## 17. Repository and Branch Discipline
+
+---
+
+### Branch Policy
+
+The repository operates on a two-branch model:
+
+- **`coding` branch** (or equivalent named development branch, e.g. `claude/sync-verify-unmerged-h8k771`): All active development happens here. Worker source changes, migration files, and configuration changes are committed and pushed to this branch.
+
+- **`main` branch**: Receives changes only via merge from the coding branch. Direct pushes to `main` for worker code are prohibited.
+
+**Why this matters:** Cloudflare Pages is connected to `main` via GitHub integration. Any push to `main` triggers an automatic Pages rebuild and frontend deployment. Pushing worker changes directly to `main` can accidentally trigger a frontend rebuild with no frontend change, and bypasses code review on the coding branch.
+
+---
+
+### Cloudflare Pages Auto-Deploy
+
+The frontend (`frontend/`) is deployed by Cloudflare Pages from `main`. The trigger is any push (or merge) to `main`. This happens automatically — there is no manual step.
+
+Worker deployments are entirely separate: `wrangler deploy` pushes to Cloudflare Workers and has no connection to Pages or the `main` branch. Workers and Pages can be at different states.
+
+---
+
+### The Commit-After-Deploy Invariant
+
+Every `wrangler deploy` must be immediately followed by `git commit` and `git push origin <coding-branch>`.
+
+Rationale:
+- An uncommitted deploy creates a state where the live Cloudflare Worker does not match the repository. If the working copy is lost (container reset, machine failure), the deployed version cannot be recovered from git.
+- Two confirmed incidents in August 2026 where uncommitted deploys caused repo/production divergence: debugging was severely hampered because the git history did not reflect what was actually running.
+
+Safe pattern:
+```powershell
+wrangler deploy --config .\<worker-dir>\wrangler.toml
+# Verify /health returns 200 before committing
+git add .\<worker-dir>\src\
+git commit -m "deploy: <description>"
+git push -u origin <coding-branch>
+```
+
+Never deploy from an uncommitted working copy if you are not immediately committing.
+
+---
+
+### No CI/CD Pipeline
+
+There is no automated CI/CD. All deployments are performed manually by running `wrangler deploy` from the local machine or remote session. There are no GitHub Actions, no deploy-on-push workflows, and no staging environment. Production is the only environment.
+
+---
+
+## 18. Operational Constants Quick Reference
+
+| Constant | Value | Location | Notes |
+|----------|-------|----------|-------|
+| **Alert Dedup Windows (ALERT_INTERVAL_MS)** | | | Defined identically in ebp-worker.js, sweep-cron.js, compute-worker/src/index.js |
+| `M1` | not in map → fallback 3,600,000 ms (1H) | All three workers | M1 is not a key in ALERT_INTERVAL_MS. Unknown TF falls back to `60 * 60 * 1000`. |
+| `M5` | not in map → fallback 3,600,000 ms (1H) | All three workers | Same fallback as M1. |
+| `M15` | 900,000 ms (15 min) | All three workers | |
+| `M30` | 1,800,000 ms (30 min) | All three workers | |
+| `1H` | 3,600,000 ms (1 hour) | All three workers | |
+| `4H` | 14,400,000 ms (4 hours) | All three workers | |
+| `D` | 86,400,000 ms (24 hours) | All three workers | |
+| `W` | 604,800,000 ms (7 days) | All three workers | |
+| **Chain Expiry** | | | |
+| T1, T2, T4 expiry | `endOfUTCMonthISO()` = `new Date(Date.UTC(year, month+1, 0, 23, 59, 59)).toISOString()` | ebp-worker.js, sweep-cron.js | Last second of the current UTC month. |
+| T3 expiry | `Date.now() + window_mins × 60,000` | sweep-cron.js | `window_mins` range: 15–240 min. Countdown starts from chain arm time. |
+| T4 dedup guard | `(window_mins \|\| 60) × 60,000` ms | sweep-cron.js | Separate from chain expiry. Prevents re-arming T4 within the window. Default 60 min if `window_mins` is null. |
+| **Twelve Data / Candle Fetch** | | | |
+| CHUNK_SIZE | 7 symbols per batch | watchdog-worker/src/index.js line 378 | Symbols are split into chunks of 7; one API key is assigned per chunk. |
+| MAJOR_PAIRS | 29 forex pairs | watchdog-worker/src/index.js | 28 from C(8,2) over 8 major currencies + USD/SEK = 29. |
+| NY_4H_BOUNDARIES | `[17, 21, 1, 5, 9, 13]` (NY hours) | watchdog-worker/src/index.js | 4H candle fetch triggers at these NY wall-clock hours at minute === 0. |
+| Twelve Data key formula | `⌈N÷8⌉×4` | watchdog-worker notes | N = active signal symbols. Capacity: 4 current keys support up to 8 signal symbols. |
+| Yahoo Finance candle fetch | used for all breadth symbols; fallback for signal symbols when all TD keys exhausted | watchdog-worker/src/index.js | Breadth is always Yahoo. Signal symbols try TD first; fall back to Yahoo only on full exhaustion. |
+| **getDailyCandlesFromCache LIMIT** | | | Differs by worker — use care when reading source |
+| sweep-cron.js | LIMIT 25 | sweep-worker/src/sweep-cron.js | |
+| compute-worker | LIMIT 25 | compute-worker/src/index.js | |
+| ebp-worker.js | LIMIT 5 | worker/src/ebp-worker.js | Smaller limit — reads only recent candles for EBP detection |
+| **DXY** | | | |
+| DXY_K (ICE constant) | 50.14348112 | watchdog-worker/src/index.js | ICE DXY formula coefficient |
+| DXY constituents | EUR/USD, USD/JPY, GBP/USD, USD/CAD, USD/SEK, USD/CHF | watchdog-worker/src/index.js | See Section 7 for weights and formula |
+| Minimum candles for DXY seed | 10 common timestamps required | watchdog-worker/src/index.js | `seedDXYHistory` aborts if fewer than 10 common timestamps across all 6 constituents |
+| **SMA Watch Expiry** | | | Both FOREX_SMA_WATCH_EXPIRY_MS and FOREX_SMA_TYPE2_COOLDOWN_MS have identical values |
+| `M15` | 14,400,000 ms (4 hours) | compute-worker/src/index.js | |
+| `M30` | 14,400,000 ms (4 hours) | compute-worker/src/index.js | |
+| `1H` (4H phase) | 14,400,000 ms (4 hours) | compute-worker/src/index.js | |
+| `1H` (D phase) | 86,400,000 ms (24 hours) | compute-worker/src/index.js | 1H TF expiry depends on which HTF phase (4H or D) is being watched |
+| `4H` | 86,400,000 ms (24 hours) | compute-worker/src/index.js | |
+| NSE SMA equivalents | NOT FOUND IN SOURCE — nse-worker/src/nse-cron.js not read in this session. Manual verification required. | | |
+| **Data Retention** | | | |
+| market_breadth_intraday | 40 days | compute-worker/src/index.js | `DELETE WHERE snapshot_at < now - 40 × 24 × 60 × 60 × 1000`. Runs on every breadth computation. |
+| dxy_candle_cache — 1H | LIMIT 168 rows | watchdog-worker/src/index.js | ~7 days of hourly rows |
+| dxy_candle_cache — 4H | LIMIT 42 rows | watchdog-worker/src/index.js | ~7 days of 4H rows |
+| dxy_candle_cache — Daily | LIMIT 30 rows | watchdog-worker/src/index.js | ~30 trading days |
+| dxy_candle_cache — Weekly | LIMIT 12 rows | watchdog-worker/src/index.js | ~12 weeks |
+| daily_candle_cache | LIMIT 130 per symbol | watchdog-worker/src/index.js | Rolling window; oldest rows deleted when count exceeds 130 |
+| weekly_candle_cache | LIMIT 26 per symbol | watchdog-worker/src/index.js | ~26 weeks |
+| watchdog_log | 7 days | watchdog-worker/src/index.js | `DELETE WHERE created_at < datetime('now', '-7 days')`. Runs on every breadth fetch tick. |
+| nse_indicator_candle_cache | NOT FOUND IN SOURCE — nse-worker/src/nse-cron.js not read in this session. Manual verification required. | | |
+| computeWeeklyBreadth cutoff | 35-day window; minimum 3 trading days | compute-worker/src/index.js | Week is only included in breadth if it has at least 3 completed trading days |
+| **Staleness Thresholds (watchdog health check)** | | | Defined in `handleWatchdogHealthCheck()`, watchdog-worker/src/index.js |
+| STALE_20MIN | 1,200,000 ms (20 min) | watchdog-worker/src/index.js | Used for: NSE `nse_candle_cache` freshness check |
+| STALE_30MIN | 1,800,000 ms (30 min) | watchdog-worker/src/index.js | Used for: most recent `candle_cache` row (any symbol/TF) |
+| STALE_35MIN | 2,100,000 ms (35 min) | watchdog-worker/src/index.js | Used for: `swing_states` (EBP cron activity), `forex_sma_state`, `nse_swing_states` |
+| STALE_65MIN | 3,900,000 ms (65 min) | watchdog-worker/src/index.js | Used for: `market_breadth_intraday` last snapshot |
+| STALE_2HR | 7,200,000 ms (2 hours) | watchdog-worker/src/index.js | Used for: `nse_sma_state` freshness check |
+| **Candle Write Threshold** | | | |
+| Minimum closed candles | 20 | watchdog-worker/src/index.js | Candle writes to D1 are skipped if fewer than 20 closed candles are returned for a symbol/TF. Prevents partial data from polluting the cache. |
+| **Health Check Reporting Windows** | | | |
+| 2-hourly all-clear | `utcHour % 2 === 0 && utcMinute < 15` | watchdog-worker/src/index.js | Sends healthy confirmation Telegram message on first 15-min tick of every even UTC hour |
+| EOD report | `nyHour === 17 && nyMinute < 15` | watchdog-worker/src/index.js | Sends full EOD check report on first 15-min tick after NY 17:00 |
+| TF_STALE_MIN (EOD candle freshness) | M15=30, M30=35, 1H=65, 4H=245 (minutes) | watchdog-worker/src/index.js | Per-TF threshold for candle freshness reporting in EOD digest |
+
+---
+
+## 19. Key Operational Learnings
+
+Concrete operational consequences from confirmed incidents and architectural constraints. Each bullet states: what, why it matters, and the safe pattern.
+
+1. **Removing `[triggers]` from wrangler.toml does not clear the live Cloudflare cron.**
+   The Cloudflare cron registration is separate from the wrangler.toml file. After commenting out or removing `[triggers]` and redeploying, the `scheduled()` handler continues to fire on the original schedule. This caused unexpected duplicate processing before cron responsibilities were migrated to cron-job.org. Safe pattern: after removing `[triggers]`, explicitly clear the schedule via `PUT .../schedules` with body `[]` (see Section 14, Procedure D). Verify with a follow-up GET that the `result` array is empty.
+
+2. **Deploy-timestamp heuristics are unreliable — compare source directly.**
+   Cloudflare's "last deployed" timestamp and the wrangler deployment output timestamp do not reliably indicate what code is actually running. Cold-start timing, gradual rollout, and partial failures can result in mixed instances. Safe pattern: after any deploy, hit `/health` and compare its response against the expected output for the version you just pushed. For deeper verification, add a version string to the health response temporarily.
+
+3. **`strftime('%Y-%m-%dT%H:%M:%fZ', ...)` is the correct D1 ISO timestamp pattern.**
+   D1 SQLite's `datetime()` function returns `YYYY-MM-DD HH:MM:SS` (no `T`, no `Z`, no milliseconds) — this is incompatible with JavaScript `new Date()` parsing and ISO 8601 string comparisons. Using `datetime()` in SQL WHERE clauses against JavaScript-generated ISO strings (`new Date().toISOString()`) produces silent wrong results. Safe pattern: always use `strftime('%Y-%m-%dT%H:%M:%fZ', col)` when converting stored values to ISO in SQL, or store and compare as UTC ms integers.
+
+4. **All NY-time logic must use `Intl.DateTimeFormat` with `America/New_York` — never a manual UTC offset.**
+   Hard-coded offsets (`-5`, `-4`) break twice yearly at DST transitions. The watchdog health check's manual DST rule (`getNYOffset()`) has a documented ~6-7 hour window on transition days where it is off by one hour. For gates where even one hour of error is unacceptable (e.g. the NY 17:00 daily digest gate), use `Intl.DateTimeFormat` with `timeZoneName: 'shortOffset'` to extract the current offset dynamically. The manual rule is retained only for 4H boundary gates where an occasional ±1h error on DST days is accepted.
+
+5. **DXY asset type is `system` — use `!isNse` checks, not `isForex`.**
+   DXY is stored in `user_assets` with `asset_type = 'system'`, not `asset_type = 'forex'`. Any code that filters for `asset_type = 'forex'` will exclude DXY. This was the source of DXY data appearing in the wrong cache tables and missing from breadth computations. Safe pattern: when you need "all non-NSE assets," use `WHERE asset_type != 'nse'`. When you need "signal symbols including DXY," use `WHERE asset_type IN ('forex','crypto','commodity','system')` or `WHERE asset_type != 'nse'`.
+
+6. **Forex daily candle closes at NY 17:00 — not UTC midnight.**
+   Grouping hourly bars by calendar date (UTC or NY) produces incorrect daily candles. A forex "trading day" runs from NY 17:00 to the next day's NY 16:59. Bars from NY 17:00–23:59 belong to the next calendar date's trading day. The `groupHourlyByTradingDay()` function handles this with a +1 day offset for hours ≥ 17. Any code that reads daily candles from `daily_candle_cache` must understand that the `date_ny` column represents the NY trading date — the close date, not the open date of the session.
+
+7. **`getClosedCandles` filter rule is `openTime + intervalMs <= now`.**
+   A candle is only included in the result if its close time has already passed. The filter is `c.time + intervalMs <= now` (strictly ≤, not <). A forming candle — one whose close time is in the future — is excluded. This is intentional: including a forming candle in signal detection produces false positives based on incomplete price action. If you see a missing latest candle in a freshness report, it is almost always a forming candle being correctly excluded, not a data gap.
+
+8. **`isDuplicateAlert` uses TEXT ISO 8601 timestamps — integer ms comparisons are broken.**
+   Before migration-013, `alert_history.fired_at` was stored as a TEXT ISO 8601 string. Dedup queries that compare this column against JavaScript `Date.now()` (an integer ms epoch) return wrong results because SQLite cannot compare text ISO strings against integers numerically. The `/alerts/export` endpoint has a known bug of this type: its `from`/`to` parameters are integer ms epochs but the WHERE clause compares them against the TEXT `fired_at` column. Safe pattern: when querying `alert_history`, always compare `fired_at` against another ISO string: `WHERE fired_at > ?` with `new Date(cutoffMs).toISOString()` as the bind parameter.
+
+9. **Every `wrangler deploy` must be immediately committed and pushed to the coding branch.**
+   An uncommitted deploy creates an unrecoverable divergence between the repository and production. If the working copy is lost (container reset, machine failure, session expiry), the deployed version cannot be reconstructed from git. Two incidents in August 2026 required manual reconstruction of deployed changes from Cloudflare's live worker source because the working copy was in a remote container that was reclaimed. Safe pattern: deploy → verify /health → `git commit` → `git push`. Never deploy from an uncommitted state unless you commit within minutes.
+
+10. **Never push worker code changes directly to `main`.**
+    Cloudflare Pages auto-deploys the frontend from `main` on every push. A push to `main` that only changes worker source code will still trigger a Pages rebuild, wasting build minutes and potentially deploying a partially-ready frontend if any frontend changes were staged. More critically, bypassing the coding branch removes the ability to review or roll back worker changes before they propagate. Safe pattern: all worker changes go to the coding branch; `main` receives changes only via explicit merge, and only when the frontend is ready to ship.
+
+---
+
+*Sections 13–19 appended 2026-08-13. All facts are sourced from direct file reads of the production codebase. Items marked NOT FOUND IN SOURCE or NOT VERIFIED require the specified supplementary source (wrangler secret list, or reading the named file) to confirm.*
