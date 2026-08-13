@@ -385,7 +385,7 @@ function guessAssetType(symbol) {
   return 'forex';
 }
 
-async function validateSymbol(symbol, apiKey) {
+async function validateSymbol(symbol) {
   // Yahoo Finance only — preserves Twelve Data quota for candle fetching
   try {
     const yahooSymbol = toYahooSymbol(symbol);
@@ -1290,7 +1290,7 @@ router.post('/user/assets', async (req, env) => {
     // NSE ('nse') and any unrecognised type still go through Yahoo validation.
     // Forex/crypto come from the hardcoded asset browser list, and 'system'
     // symbols (e.g. DXY) are known-valid — all skip this call.
-    const validation = await validateSymbol(symbolStr, env.TWELVE_DATA_API_KEY);
+    const validation = await validateSymbol(symbolStr);
     if (!validation.valid) {
       return json({ error: 'Symbol not found on any data source.' }, 400, origin);
     }
@@ -1342,6 +1342,8 @@ router.delete('/user/assets/:id', async (req, env) => {
   await env.DB.prepare('DELETE FROM user_sweep_configs WHERE asset_id = ?').bind(params.id).run();
   await env.DB.prepare('DELETE FROM user_templates WHERE asset_id = ?').bind(params.id).run();
   await env.DB.prepare('DELETE FROM chain_state WHERE asset_id = ?').bind(params.id).run();
+  await env.DB.prepare('DELETE FROM nse_indicator_configs WHERE asset_id = ?').bind(params.id).run();
+  await env.DB.prepare('DELETE FROM nse_indicator_chain WHERE asset_id = ?').bind(params.id).run();
   await env.DB.prepare(
     'DELETE FROM user_assets WHERE id = ? AND user_id = ?'
   ).bind(params.id, clerkUser.id).run();
