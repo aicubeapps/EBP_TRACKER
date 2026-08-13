@@ -926,6 +926,23 @@ Recommended order when deploying all workers (minimises user-facing disruption):
 
 4. If the same secret must be updated on multiple workers (e.g. `CRON_SECRET` or `SHARED_BOT_TOKEN`), repeat step 1 for each worker script name.
 
+**Secrets requiring multi-worker sync rotation**
+
+The following secrets are shared across multiple workers and MUST be rotated on all listed workers simultaneously. Missing any one worker causes silent failures:
+
+| Secret | Workers — ALL must be updated together |
+|--------|----------------------------------------|
+| `SHARED_BOT_TOKEN` | ebp-tracker-worker, sweep-detector, nse-tracker, compute-worker |
+| `CRON_SECRET` | ebp-tracker-worker, sweep-detector, nse-tracker, compute-worker, ebp-watchdog |
+
+When rotating a shared secret, run `wrangler secret put` for every worker in the table before verifying any of them. After all puts complete, run `wrangler secret list` for each worker to confirm.
+
+**Failure modes if a worker is missed:**
+
+`SHARED_BOT_TOKEN` — Telegram delivery fails silently on the missed worker. `sendTelegramMessage()` throws before the `alert_history` INSERT, so no row is written. Detection: query `alert_history` for the affected alert type — absence of recent rows when the feature should be active is the signal. Confirmed incident: 2026-08-14, compute-worker missed during a SHARED_BOT_TOKEN rotation, SMA Cloud alerts failed silently until discovered via secret audit. 24 `sma_exhaustion` and 5 `sma_type1` rows confirmed the feature had worked previously.
+
+`CRON_SECRET` — all cron-job.org triggers for the missed worker return 401 and stop processing. Detected immediately via watchdog health checks going stale within one cron cycle.
+
 ---
 
 ### Procedure D — Clear a Native Cloudflare Cron Schedule
@@ -1316,6 +1333,9 @@ Concrete operational consequences from confirmed incidents and architectural con
 
 10. **Never push worker code changes directly to `main`.**
     Cloudflare Pages auto-deploys the frontend from `main` on every push. A push to `main` that only changes worker source code will still trigger a Pages rebuild, wasting build minutes and potentially deploying a partially-ready frontend if any frontend changes were staged. More critically, bypassing the coding branch removes the ability to review or roll back worker changes before they propagate. Safe pattern: all worker changes go to the coding branch; `main` receives changes only via explicit merge, and only when the frontend is ready to ship.
+
+11. **`SHARED_BOT_TOKEN` rotation must cover all four workers — a missed worker fails silently.**
+    Unlike `CRON_SECRET` (detected immediately via stale health checks), a missing `SHARED_BOT_TOKEN` produces no JS exception and no `alert_history` row. The only detection signal is absence of expected alert types in `alert_history`. Always rotate `SHARED_BOT_TOKEN` on ebp-tracker-worker, sweep-detector, nse-tracker, and compute-worker in the same session. Verify with `wrangler secret list` on all four before closing.
 
 ---
 
