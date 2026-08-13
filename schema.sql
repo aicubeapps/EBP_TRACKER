@@ -107,25 +107,6 @@ CREATE TABLE IF NOT EXISTS watchdog_log (
   created_at TEXT NOT NULL
 );
 
--- ORPHANED TABLE: sma_cloud_states exists in production D1 but is never read or written
--- by any worker code. The active SMA Cloud state table is nse_sma_state (different name,
--- different schema). Do not use this table. Do not drop it without a migration.
-CREATE TABLE IF NOT EXISTS sma_cloud_states (
-  id                        INTEGER PRIMARY KEY AUTOINCREMENT,
-  symbol                    TEXT NOT NULL,
-  tf                        TEXT NOT NULL,
-  phase                     TEXT NOT NULL,
-  phase_started_at          TEXT NOT NULL,
-  sma1_last                 REAL,
-  sma9_last                 REAL,
-  atr_last                  REAL,
-  crossovers_in_transition  INTEGER DEFAULT 0,
-  widening_candles          INTEGER DEFAULT 0,
-  last_signal_date          TEXT,
-  updated_at                TEXT NOT NULL,
-  UNIQUE(symbol, tf)
-);
-
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_ua_user_id      ON user_assets(user_id);
 CREATE INDEX IF NOT EXISTS idx_ua_symbol       ON user_assets(symbol);

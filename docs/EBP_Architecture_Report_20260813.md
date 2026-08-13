@@ -595,15 +595,15 @@ Each issue is classified: **Bug** (incorrect behavior), **Maintenance Hazard** (
 
 ---
 
-### 12.1 NSE Indicator Orphan on Asset Delete — Bug
+### 12.1 NSE Indicator Orphan on Asset Delete — CLOSED (2026-08-14)
 
 **Location:** `worker/src/ebp-worker.js`, `DELETE /user/assets/:id` handler.
 
-**Problem:** Deleting a user asset cascades to `user_ebp_configs`, `user_sweep_configs`, `user_templates`, and `chain_state`, but does **not** delete `nse_indicator_configs` or `nse_indicator_chain` rows for that asset. These rows become orphans with a foreign key on a deleted asset.
+**Problem (fixed):** Deleting a user asset cascaded to `user_ebp_configs`, `user_sweep_configs`, `user_templates`, and `chain_state`, but did **not** delete `nse_indicator_configs` or `nse_indicator_chain` rows for that asset.
 
-**Impact:** Orphaned NSE configs are never cleaned up. If `nse_indicator_configs.asset_id` has a foreign key constraint with `ON DELETE CASCADE`, D1 will handle it; if not (no FK enforcement in SQLite by default without `PRAGMA foreign_keys = ON`), the orphans accumulate silently.
+**Fix:** Two deletes (`nse_indicator_configs`, `nse_indicator_chain`) inserted into the existing cascade, between `chain_state` and `user_assets`.
 
-**Status:** NOT VERIFIED whether D1 enforces foreign keys — manual check needed. The cascade omission in ebp-worker code is confirmed from source.
+**FK note:** `PRAGMA foreign_keys` confirmed `1` (enabled) on production D1, but `nse_indicator_configs.asset_id` has no `FOREIGN KEY REFERENCES` constraint declared in schema.sql — enforcement being on was never going to catch this regardless. Closed permanently, no further action.
 
 ---
 
@@ -645,13 +645,11 @@ A comment in admin-worker explicitly flags this duplication. Adding or removing 
 
 ### 12.5 Chunk-Dropping Under Key Exhaustion — Bug
 
-**Location:** `watchdog-worker/src/index.js`, `POST /cron/candle-fetch`.
+### 12.5 Chunk-Dropping Under Key Exhaustion — CLOSED (already implemented, verified 2026-08-14)
 
-**Problem:** If all Twelve Data keys are exhausted for a given TF, batches (chunks of 7 symbols) are silently dropped. No error is written to `watchdog_log` and no alert is sent for skipped batches. Downstream consumers (`candle_cache`) receive stale data without warning.
+**Location:** `watchdog-worker/src/index.js`, `fetchSignalTF()`.
 
-**Impact:** Signal evaluation in ebp-worker and compute-worker uses stale candles for affected symbols until the next successful fetch.
-
-**Fix path:** Write a `watchdog_log` entry and consider a Telegram alert to `WATCHDOG_ADMIN_CHAT_ID` when a full TF exhaustion occurs.
+**Re-investigation finding:** This was already fixed in source prior to this session. When `chunks.length > keys.length`, `fetchSignalTF()` already calls `logWatchdog(env.DB, 'warning', ...)` with the TF, chunk/key counts, and the list of skipped symbols, before truncating to `keys.length` chunks. No code change was needed. Closed permanently, no further action.
 
 ---
 
@@ -693,6 +691,23 @@ The route reads `tf` from the request body, then falls back to a query parameter
 ### 12.9 Invite Token Feature — REMOVED PERMANENTLY (2026-08-14)
 
 Feature had zero enforcement: token was display-only text in `Landing.jsx`, never passed into the Clerk sign-in modal, never validated server-side by any frontend caller, no write path to `used_by` or `active`. Any visitor could register identically with or without a token. Full removal: `GET /invite/:token` removed from ebp-worker, `GET /admin/tokens` and `POST /admin/invite` removed from admin-worker, `Landing.jsx`'s token-display block and `.landing-invite` CSS removed, Admin.jsx's "Invite Tokens" tab removed, `invite_tokens` table dropped via migration 014. Closed permanently. No further action.
+
+---
+
+### 12.10 2026-08-14 Bug-Sweep Closures
+
+A backlog of pre-diagnosed items was worked through this date. Items with their own dedicated subsection above (12.1, 12.5, 12.9) were updated in place; the remainder are consolidated here:
+
+- **EOD digest wrong-time gate — CLOSED.** `runWatchdog()`'s digest gate was already correct (NY 17:00 via `getNYHour()`) prior to this session, but dead — that native cron is dormant (no `[triggers]` entry). The actual production trigger, `POST /cron/daily-digest` (called by cron-job.org with no gate of its own), had no time gate and no dedup. Added an NY 17:00 (±15 min) gate plus a module-level `lastDigestNYDate` dedup guard directly to that route.
+- **Duplicate EOD Telegram alert — CLOSED.** `handleWatchdogHealthCheck()` had its own independent `isEodWindow` gate sending a second, shorter "EOD Report (NY 5PM)" message alongside the full "EOD Operations Report" from the item above — both fired in the same NY 17:00 window. Removed the redundant send and its now-unused `isEodWindow`/`nyMinute` variables; the 2-hourly all-clear and failure-alert paths are unaffected.
+- **Yahoo breadth fetch parallelization — CLOSED, already implemented.** `fetchBreadthFromYahoo()` already used `Promise.all` with a per-symbol `.catch` prior to this session. No code change.
+- **`validateSymbol()` dead `apiKey` param — CLOSED.** Parameter was never read in the function body; removed from the signature and its one call site.
+- **`/upgrade` dead route — CLOSED, no code change.** `ExpiryBanner`'s `navigate('/upgrade')` hits the catch-all `NotFound` route (no `/upgrade` registered in `App.jsx`). Current behavior is the final intended implementation.
+- **NSE `nse_tf_access` gate — CLOSED, already implemented.** Confirmed enforced in two places: `tryDeliverNseAlert()` (nse-cron.js) gates EBP/Sweep/MSS alerts, and `deliverNseIndicatorAlert()` gates TDI/SMA alerts. No code change.
+- **`alerts/export` timestamp bug — CLOSED.** `from`/`to` were bound as raw integer ms epoch against `fired_at` (TEXT ISO 8601 per migration 013) — SQLite type-affinity ordering meant the WHERE clause could never match real rows. Now converted to ISO strings before binding.
+- **Dead secrets audit (Check 5A) — no action, nothing found.** None of the three flagged secrets (`WATCHDOG_BOT_TOKEN`/`WATCHDOG_ADMIN_CHAT_ID` on `ebp-tracker-worker`, `TWELVE_DATA_API_KEY` on `compute-worker`) exist on those workers per `wrangler secret list` — the flag itself was stale. No secrets deleted.
+- **D1 FK enforcement (Check 5B) — informational.** `PRAGMA foreign_keys` = `1` (enabled) on production D1.
+- **`sma_cloud_states` orphaned table (Check 5C) — CLOSED.** Confirmed 0 rows, dropped via migration 015 (014 was already used for `invite_tokens`), also removed from schema.sql.
 
 ---
 
