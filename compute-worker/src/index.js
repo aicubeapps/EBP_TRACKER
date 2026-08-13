@@ -161,13 +161,14 @@ const ALERT_INTERVAL_MS = {
   W:   7  * 24 * 60 * 60 * 1000,
 };
 
-// fired_at is stored as an INTEGER ms epoch (Date.now(), never
-// toISOString()) — the cutoff bound here must match that type, or SQLite's
-// NULL < INTEGER/REAL < TEXT affinity rule makes every comparison against
-// an INTEGER column silently false regardless of the TEXT value.
+// fired_at is stored as a TEXT ISO 8601 string (migration 013, 2026-08-06)
+// — the cutoff bound here must match that type, or SQLite's storage-class
+// comparison rules (TEXT always compares greater than INTEGER/REAL
+// regardless of content) make every comparison against this column
+// silently true instead of silently false.
 async function isDuplicateAlert(db, userId, symbol, tf, direction, alertType) {
   const windowMs = ALERT_INTERVAL_MS[tf] || 60 * 60 * 1000;
-  const cutoff = Date.now() - windowMs;
+  const cutoff = new Date(Date.now() - windowMs).toISOString();
 
   const existing = await db.prepare(`
     SELECT id FROM alert_history
@@ -667,7 +668,7 @@ async function deliverForexSmaAlert(env, { userId, chatId, symbol, timeframe, di
     INSERT INTO alert_history (id, user_id, symbol, timeframe, direction, trend_bias, candle_time, fired_at, alert_type)
     VALUES (?,?,?,?,?,?,?,?,?)
   `).bind(
-    crypto.randomUUID(), userId, symbol, timeframe, direction, trendBias ?? 'neutral', candleTime, Date.now(), alertType
+    crypto.randomUUID(), userId, symbol, timeframe, direction, trendBias ?? 'neutral', candleTime, new Date().toISOString(), alertType
   ).run();
   return true;
 }
