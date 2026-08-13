@@ -334,7 +334,6 @@ tr:hover td { background: var(--accent-dim); }
 <tr><td><code>users</code></td><td><code>id</code> (PK TEXT=Clerk user_id), <code>email</code>, <code>asset_limit</code> INT DEFAULT 3, <code>nse_asset_limit</code> INT DEFAULT 0, <code>is_admin</code> INT DEFAULT 0, <code>active</code> INT DEFAULT 1, <code>expires_at</code> INT, <code>created_at</code> TEXT, <code>user_tf_access</code> TEXT (JSON), <code>nse_tf_access</code> TEXT (JSON)</td><td>Clerk user_id is PK. <code>active=0</code> blocks signal delivery.</td></tr>
 <tr><td><code>user_assets</code></td><td><code>id</code> INT PK, <code>user_id</code> TEXT, <code>symbol</code> TEXT, <code>asset_type</code> TEXT ('forex'|'crypto'|'commodity'|'nse'|'system'), <code>display_name</code> TEXT, <code>created_at</code> TEXT</td><td>Migration 008 hard-deleted soft-deleted rows and removed <code>active</code> column.</td></tr>
 <tr><td><code>user_telegram</code></td><td><code>user_id</code> TEXT PK, <code>chat_id</code> TEXT, <code>verified</code> INT DEFAULT 0, <code>link_token</code> TEXT, <code>link_expires_at</code> INT</td><td>Link token generated via <code>/user/telegram/initlink</code>; verified by Telegram bot sending token.</td></tr>
-<tr><td><code>invite_tokens</code></td><td><code>id</code> INT PK, <code>token</code> TEXT UNIQUE, <code>used_by</code> TEXT, <code>created_at</code> TEXT, <code>expires_at</code> INT</td><td>Token = <code>crypto.randomUUID().split('-')[0].toUpperCase()</code> (first 8 chars of UUID hex). <code>expires_at</code> set to <code>Date.now()</code> on POST /admin/expire/:id (sets <code>active=0</code>).</td></tr>
 </table></div>
 
 <h3>Signal Configuration Tables</h3>
@@ -385,7 +384,6 @@ tr:hover td { background: var(--accent-dim); }
 <tr><td><code>forex_sma_state</code></td><td><code>id</code>, <code>symbol</code>, <code>tf</code>, <code>phase</code> TEXT ('accumulation'|'distribution'), <code>direction</code> TEXT, <code>separation</code> REAL, <code>velocity</code> REAL, <code>crossover_3</code> INT, <code>crossover_5</code> INT, <code>sma1_last</code> REAL, <code>sma9_last</code> REAL, <code>consecutive_widening</code> INT DEFAULT 0, <code>updated_at</code> TEXT</td><td><code>consecutive_widening</code> is retired — always written as 0.</td></tr>
 <tr><td><code>nse_sma_state</code></td><td>Same shape as <code>forex_sma_state</code> + <code>cisd_watch_active</code> INT, <code>cisd_watch_direction</code> TEXT, <code>cisd_watch_expires_at</code> INT, <code>mss_watch_active</code> INT, <code>mss_watch_expires_at</code> INT</td><td><code>updated_at</code> is TEXT (toISOString()), but declared with INTEGER affinity (mismatch). Migration_sma_revamp.sql deleted all rows on rename. <code>consecutive_widening</code> also retired here.</td></tr>
 <tr><td><code>nse_indicator_chain</code></td><td><code>id</code>, <code>user_id</code>, <code>asset_id</code>, <code>symbol</code>, <code>timeframe</code>, <code>indicator</code>, <code>direction</code>, <code>state</code> INT DEFAULT 1, <code>signal_id</code>, <code>created_at</code> TEXT, <code>expires_at</code> INT</td><td>2-state chain: 1=setup awaiting confirmation, 2=confirmed. <code>expires_at=created_at + 4×TF_minutes_ms</code>.</td></tr>
-<tr><td><code>sma_cloud_states</code></td><td>(schema present)</td><td><span class="pill pill-bear">ORPHANED</span> Exists in production D1 but never read or written by any worker.</td></tr>
 </table></div>
 
 <h3>API Key Management</h3>
@@ -949,7 +947,6 @@ STALE_2HR   = 2  × 60 × 60 × 1000
 <ul>
 <li><strong>Failures</strong>: immediate Telegram alert via <code>WATCHDOG_BOT_TOKEN</code></li>
 <li><strong>2-hourly OK</strong>: <code>utcHour%2===0 &amp;&amp; utcMinute&lt;15</code> → "All Systems OK" message</li>
-<li><strong>EOD report</strong>: <code>nyHour===17 &amp;&amp; nyMinute&lt;15</code> → EOD Report message</li>
 </ul>
 
 <h3>Daily Digest — <code>sendWatchdogDailyDigest(env)</code></h3>
@@ -957,7 +954,7 @@ STALE_2HR   = 2  × 60 × 60 × 1000
 <pre>
 TF_STALE_MIN = { M15:30, M30:35, '1H':65, '4H':245 }
 </pre>
-<p>Digest fires at NY 17:00 if <code>minute&lt;15 &amp;&amp; getNYHour()==17</code>. Triggered by <code>runWatchdog</code> (heartbeat function).</p>
+<p>Digest fires at NY 17:00 if <code>nyHour===17 &amp;&amp; nyMinute&lt;15</code>, gated directly inside the <code>POST /cron/daily-digest</code> handler (cron-job.org's actual trigger), with a module-level <code>lastDigestNYDate</code> dedup guard against double-firing within the same NY calendar date. Outside the window the route returns 200 with <code>{skipped:true}</code>.</p>
 
 <h3>Logging — <code>logWatchdog(db, eventType, message)</code></h3>
 <p>INSERT INTO <code>watchdog_log</code>. For <code>eventType='error'</code> or <code>'warning'</code>: also calls <code>sendWatchdogAlert</code> via module-level <code>_watchdogAlertEnv</code> reference (set at start of <code>runWatchdog</code>).</p>
@@ -1312,6 +1309,8 @@ T3 window_mins range: 15–240
 <tr><td>phase1_to_3</td><td>Drops old FVG/swing/chain tables; creates new; seeds T1/T2/T3/T4 counters</td></tr>
 <tr><td>forex_sma</td><td>Creates forex_indicator_configs, forex_sma_state</td></tr>
 <tr><td>sma_revamp</td><td>RENAME stack_mode→confirmation_mode; ADD CISD/MSS columns; DELETE all nse_sma_state rows</td></tr>
+<tr><td>014</td><td>DROP TABLE invite_tokens — invite token feature removed entirely 2026-08-14</td></tr>
+<tr><td>015</td><td>DROP TABLE sma_cloud_states — orphaned table never read or written post-SMA migration, dropped 2026-08-14</td></tr>
 </table></div>
 </section>
 
@@ -1322,7 +1321,6 @@ T3 window_mins range: 15–240
 <h2><span class="sec-badge">M</span>Known Gaps / Bugs / Dead Code</h2>
 
 <h3>Dead Code</h3>
-<div class="callout dead"><strong>Orphaned Table: sma_cloud_states</strong><br>Exists in production D1 schema but is never read or written by any worker. Completely unused since cloud states were migrated to <code>forex_sma_state</code> and <code>nse_sma_state</code>.</div>
 <div class="callout dead"><strong>Dead Column: user_indicator_settings.sma_forex_hours</strong><br>Column exists and is written by admin-worker but is never read by any worker. No effect on behavior.</div>
 <div class="callout dead"><strong>Dead Column: nse_indicator_configs.day_filter</strong><br>Previously used to filter NSE SMA alerts by day of week. Functionality removed in "SMA Cloud corrective patch". Column retained in schema, always NULL.</div>
 <div class="callout dead"><strong>Retired Column: forex_sma_state.consecutive_widening</strong><br>Always written as 0. Never read for logic. Same applies to nse_sma_state.consecutive_widening.</div>
@@ -1330,7 +1328,6 @@ T3 window_mins range: 15–240
 
 <h3>Bugs &amp; Inconsistencies</h3>
 <div class="callout"><strong>step2_signal_id never populated for T1/T2/T4</strong><br><code>chain_state.step2_signal_id</code> column exists and is set by <code>completeFvgEntryChain</code>, but <code>ChainProgressBar.jsx</code> notes this is never actually populated in practice for T1, T2, or T4 chains. T3 sets it correctly.</div>
-<div class="callout"><strong>/upgrade route not defined</strong><br><code>ExpiryBanner.jsx</code> navigates to <code>/upgrade</code> when user clicks "Renew". This route does not exist in <code>App.jsx</code>. Users clicking Renew will hit a 404/no-match route.</div>
 <div class="callout"><strong>nse_sma_state.updated_at type mismatch</strong><br>Column declared with INTEGER affinity in schema (legacy declaration), but workers write it via <code>toISOString()</code> producing a TEXT value. SQLite stores the text correctly due to flexible typing, but the declared affinity is incorrect.</div>
 <div class="callout"><strong>nse_candle_cache.updated_at vs forex timestamps</strong><br>NSE candle cache stores <code>updated_at</code> as INTEGER epoch (seconds). All forex cache tables use TEXT ISO strings. Watchdog health check handles this: it reads NSE field as epoch seconds, not as ISO text.</div>
 <div class="callout"><strong>sweep-worker BIAS_SOURCE.sweep missing M30</strong><br>In <code>BIAS_SOURCE_FRONTEND.sweep</code>, M30→'4H' is present, but the backend <code>BIAS_SOURCE.sweep</code> in ebp-worker.js shows M5:'1H', M15:'1H', M30:'4H', 1H:'D', 4H:'W'. Frontend mirrors this correctly — no mismatch. (Not a bug, but worth verifying if sweep configs are added for M5.)</div>
@@ -1344,7 +1341,6 @@ T3 window_mins range: 15–240
 <div class="callout class="info"><strong>T3 step2_signal_id not stored</strong><br>When T3 advances from sweep to MSS, no intermediate signal ID is stored in <code>chain_state.step2_signal_id</code>. Only the final completion sets the chain record.</div>
 <div class="callout class="info"><strong>Upstox source not selectable in Admin key form</strong><br>Admin.jsx only offers 'twelvedata' or 'yahoo' as source options when creating API keys. Upstox credentials are managed separately and cannot be added via the same key management UI.</div>
 <div class="callout class="info"><strong>market_breadth_cache weekly rows have empty heatmap</strong><br>Weekly breadth rows are computed by averaging intraday strength scores. There is no pair-level breakdown available; <code>heatmap_json</code> is always stored as <code>'{}'</code> for <code>tf='1W'</code> and <code>tf='1W_current'</code>.</div>
-<div class="callout class="info"><strong>Alert dedup cutoff uses current time (not lookback)</strong><br><code>isDuplicateAlert</code> uses <code>new Date().toISOString()</code> as the comparison cutoff directly, rather than computing <code>cutoff = now - ALERT_INTERVAL_MS</code>. This means it queries <code>WHERE fired_at &gt; {iso_string}</code> — which is effectively querying for alerts fired in the future, making dedup always pass. This may be an intentional simplification or a latent bug depending on the SQL WHERE direction. Needs verification against actual SQL text.</div>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════
@@ -1800,7 +1796,7 @@ EBP Tracker</pre>
 <section id="sec-n8">
 <h2><span class="sec-badge">N8</span>isDuplicateAlert — Actual SQL &amp; Bug Verdict</h2>
 
-<p>Section M of this encyclopedia states that <code>isDuplicateAlert</code> "uses <code>new Date().toISOString()</code> as the comparison cutoff directly … making dedup always pass." <strong>This is factually incorrect.</strong> The verified source (sweep-cron.js lines 320–336) shows the function is working correctly:</p>
+<p>Verified source (sweep-cron.js lines 320–336) — <code>isDuplicateAlert</code> is working correctly:</p>
 
 <pre><span class="kw">async function</span> <span class="fn">isDuplicateAlert</span>(db, userId, symbol, tf, direction, alertType) {
   <span class="kw">const</span> windowMs = ALERT_INTERVAL_MS[tf] || 60 * 60 * 1000;
@@ -1835,7 +1831,6 @@ EBP Tracker</pre>
 <tr><td>fallback</td><td>1H</td><td>3,600,000</td></tr>
 </table></div>
 
-<div class="callout dead"><strong>Section M correction:</strong> The "Alert dedup cutoff uses current time (not lookback)" entry in section M should be disregarded. The cutoff is always <code>now − ALERT_INTERVAL_MS[tf]</code>. Dedup is functional and correct.</div>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════
@@ -1986,7 +1981,7 @@ EBP Tracker</pre>
 <section id="sec-n12">
 <h2><span class="sec-badge">N12</span>Cascade Delete — DELETE /user/assets/:id</h2>
 
-<p>Route handler in <code>worker/src/ebp-worker.js</code> lines 1337–1349. D1 SQLite foreign-key enforcement is not enabled; all cascade logic is explicit application code:</p>
+<p>Route handler in <code>worker/src/ebp-worker.js</code> lines 1337–1351. D1 SQLite foreign-key enforcement is not enabled; all cascade logic is explicit application code:</p>
 
 <h3>Delete Sequence</h3>
 <pre><span class="cm">// 1. All EBP signal configs for this asset</span>
@@ -2001,6 +1996,12 @@ EBP Tracker</pre>
 <span class="cm">// 4. All active/pending chain progress rows</span>
 <span class="kw">await</span> env.DB.prepare(<span class="st">'DELETE FROM chain_state WHERE asset_id = ?'</span>).bind(params.id).run();
 
+<span class="cm">// 4a. NSE indicator configs (added 2026-08-14)</span>
+<span class="kw">await</span> env.DB.prepare(<span class="st">'DELETE FROM nse_indicator_configs WHERE asset_id = ?'</span>).bind(params.id).run();
+
+<span class="cm">// 4b. NSE indicator chains (added 2026-08-14)</span>
+<span class="kw">await</span> env.DB.prepare(<span class="st">'DELETE FROM nse_indicator_chain WHERE asset_id = ?'</span>).bind(params.id).run();
+
 <span class="cm">// 5. The asset record itself — ownership check here</span>
 <span class="kw">await</span> env.DB.prepare(<span class="st">'DELETE FROM user_assets WHERE id = ? AND user_id = ?'</span>)
   .bind(params.id, clerkUser.id).run();</pre>
@@ -2009,8 +2010,6 @@ EBP Tracker</pre>
 <div class="table-wrap"><table>
 <tr><th>Table</th><th>Reason</th></tr>
 <tr><td>forex_indicator_configs</td><td>Has its own DELETE route with <code>forex_sma_state</code> shared-state cleanup logic. Not touched by asset delete.</td></tr>
-<tr><td>nse_indicator_configs</td><td>No asset-level delete. Orphaned rows persist until manually cleaned.</td></tr>
-<tr><td>nse_indicator_chain</td><td>Not deleted on asset removal. Orphaned rows expire naturally via <code>expires_at</code>.</td></tr>
 <tr><td>alert_history</td><td>Intentionally retained as historical record.</td></tr>
 <tr><td>signals</td><td>Intentionally retained as historical record.</td></tr>
 <tr><td>fvg_zones / nse_fvg_zones</td><td>Shared symbol-level data; no user or asset scope.</td></tr>

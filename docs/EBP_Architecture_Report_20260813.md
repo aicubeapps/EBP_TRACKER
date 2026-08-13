@@ -80,7 +80,7 @@ Full inventory of cron-driven HTTP routes:
 |---|---|---|---|
 | `POST /cron/candle-fetch` | watchdog | every 15 min | — |
 | `POST /cron/breadth-fetch` | watchdog | every 1 hour | — |
-| `POST /cron/daily-digest` | watchdog | weekdays 21:05 UTC | — |
+| `POST /cron/daily-digest` | watchdog | weekdays 21:05 UTC — gated: only executes if NY hour = 17 and NY minute < 15; module-level `lastDigestNYDate` dedup prevents double-firing within the same NY calendar date; outside the window returns 200 with `{skipped:true}` | — |
 | `POST /health/watchdog-check` | watchdog | every 2 hours | — |
 | `POST /cron/sweep` | sweep | every 15 min × 4 jobs (M15/M30/1H/4H) | `{tf}` |
 | `POST /cron/sma` | compute | via cron-job.org | `{tf}` |
@@ -170,7 +170,7 @@ NSE Worker also holds `CRON_SECRET` and `CLERK_SECRET_KEY`. NSE Worker `wrangler
 ## 4. D1 Database — Tables and Ownership
 
 **Database:** `ebp-tracker-db` | ID: `b93b206a-5537-4d12-8c86-a4b2372aae7f`  
-**Migration count:** 13 (migration-001 through migration-013)
+**Migration count:** 15 (migration-001 through migration-013, plus migration-014 and migration-015 applied 2026-08-14)
 
 "Writer" = worker that INSERTs or UPDATEs rows. "Reader" = reads only. A worker omitted for a table does not touch it.
 
@@ -259,6 +259,8 @@ NSE Worker also holds `CRON_SECRET` and `CLERK_SECRET_KEY`. NSE Worker `wrangler
 | 011 | Seed `signal_counters` for EBP-M15 and EBP-1H |
 | 012 | SMA Cloud: `bias_mode`/`htf_timeframe` on `nse_indicator_configs`; create `user_indicator_settings`, `forex_sma_state`, `forex_indicator_configs` |
 | 013 | Convert `alert_history.fired_at` INTEGER ms → TEXT ISO 8601 |
+| 014 | Drop `invite_tokens` — feature removed entirely 2026-08-14 |
+| 015 | Drop `sma_cloud_states` — orphaned table, never read or written post-SMA migration, 0 rows at drop time |
 
 **Apply a migration (PowerShell):**
 ```powershell
@@ -585,7 +587,7 @@ npx wrangler pages deploy dist --project-name ebp-tracker
 |---|---|
 | `/admin/*` | admin-worker |
 | `/nse/*`, `/user/nse-indicator-configs/*` | nse-worker |
-| All other `/user/*`, `/dashboard`, `/market/*`, `/alerts/*`, `/telegram/*`, `/signals/*`, `/sweep/*`, `/invite/*`, `/health/*` | ebp-worker |
+| All other `/user/*`, `/dashboard`, `/market/*`, `/alerts/*`, `/telegram/*`, `/signals/*`, `/sweep/*`, `/health/*` | ebp-worker |
 
 ---
 
@@ -642,8 +644,6 @@ A comment in admin-worker explicitly flags this duplication. Adding or removing 
 **Fix path:** Implement weekly heatmap computation in `handleMarketBreadthCron`, sourcing from `weekly_candle_cache`.
 
 ---
-
-### 12.5 Chunk-Dropping Under Key Exhaustion — Bug
 
 ### 12.5 Chunk-Dropping Under Key Exhaustion — CLOSED (already implemented, verified 2026-08-14)
 
@@ -755,7 +755,7 @@ A backlog of pre-diagnosed items was worked through this date. Items with their 
 | GET | `/user/bias/:symbol` | Clerk JWT | Returns the computed bias for the specified symbol from `swing_states`. |
 | GET | `/health/datasources` | Clerk JWT | Returns freshness status of `candle_cache` and `market_breadth_cache` rows relevant to the user. |
 | GET | `/alerts/history` | Clerk JWT | Returns recent `alert_history` rows for the user. |
-| GET | `/alerts/export` | Clerk JWT | Exports `alert_history` rows filtered by `from`/`to` query params (integer ms epoch). **Known bug:** compares TEXT `fired_at` column against integer epoch values; result set may be empty or incorrect. |
+| GET | `/alerts/export` | Clerk JWT | Exports `alert_history` rows filtered by `from`/`to` query params (integer ms epoch). `from`/`to` are converted to ISO 8601 strings before binding so they compare correctly against the TEXT `fired_at` column. |
 | GET | `/user/telegram` | Clerk JWT | Returns the user's linked Telegram chat record from `telegram_links`. |
 | POST | `/user/telegram/initlink` | Clerk JWT | Initiates the Telegram deep-link flow; generates and stores a link token. |
 | POST | `/user/telegram/test` | Clerk JWT | Sends a test Telegram message to the user's linked chat. |
@@ -769,7 +769,7 @@ A backlog of pre-diagnosed items was worked through this date. Items with their 
 | GET | `/sweep/dashboard` | Clerk JWT | Returns Sweep-specific dashboard data for the user's assets. |
 | GET | `/sweep/history` | Clerk JWT | Returns recent Sweep alert history for the user. |
 
-**43 routes total** (source: `router.get/post/patch/delete` calls in ebp-worker.js; was 44, `GET /invite/:token` removed 2026-08-14).
+**43 routes total** (source: `router.get/post/patch/delete` calls in ebp-worker.js).
 
 ---
 
@@ -805,7 +805,7 @@ A backlog of pre-diagnosed items was worked through this date. Items with their 
 | POST | `/health/watchdog-check` | X-Cron-Secret | External health probe. Reads `candle_cache`, `swing_states`, `market_breadth_intraday`, `forex_sma_state`, `nse_candle_cache`, `nse_swing_states`, `nse_fvg_zones`, `nse_sma_state`, and `watchdog_log`. Sends Telegram alert on failures; sends all-clear every 2h. Driven by cron-job.org every 15 min. |
 | POST | `/cron/candle-fetch` | X-Cron-Secret | Signal-symbol ETL. Fetches M15 every tick; M30 when `minute % 30 === 0`; 1H at `minute === 0`; 4H at `minute === 0` and NY hour in `NY_4H_BOUNDARIES`. Respects `isForexClosedWindow` (skips forex/commodity; fetches crypto). Driven by cron-job.org every 15 min. |
 | POST | `/cron/breadth-fetch` | X-Cron-Secret | Breadth + DXY + daily/weekly synthesis ETL. Fetches all `BREADTH_SYMBOLS` from Yahoo Finance; computes synthetic DXY; synthesises 4H/Daily/Weekly DXY candles at their respective NY boundaries; runs `attemptDailySynthesis` at NY 17:00; runs `attemptWeeklySynthesis` on Friday NY 17:00. Driven by cron-job.org hourly. |
-| POST | `/cron/daily-digest` | X-Cron-Secret | EOD operations report. Calls `sendWatchdogDailyDigest()` which sends an 11-section Telegram report covering candle fetch, breadth, DXY, signal symbols, daily/weekly synthesis, market breadth, NSE, and watchdog_log health. Driven by cron-job.org weekdays at 21:05 UTC. |
+| POST | `/cron/daily-digest` | X-Cron-Secret | EOD operations report. Gated to NY 17:00 window (nyHour===17 && nyMinute<15) with NY-date dedup via module-level `lastDigestNYDate`. Outside the window returns 200 with `{skipped:true}`. Calls `sendWatchdogDailyDigest()` on gate pass. |
 
 **5 fetch routes total.**
 
@@ -833,7 +833,7 @@ All routes except `/health` require Clerk JWT (`Authorization: Bearer <token>`) 
 | GET | `/admin/users/:id/nse-tf-access` | Clerk JWT + is_admin | Returns `users.nse_tf_access` JSON for the specified user. |
 | PATCH | `/admin/users/:id/nse-tf-access` | Clerk JWT + is_admin | Updates `users.nse_tf_access`. Valid values: `ALL_NSE_TF_ACCESS = ['M1','M5','M15','M30','1H','D']`. |
 
-**15 routes total** (confirmed from direct source count of `router.get/post/patch/delete` calls; prior summary incorrectly stated 16).
+**13 routes total** (invite token routes removed 2026-08-14).
 
 ---
 
@@ -1080,7 +1080,7 @@ Checked in two places:
 
 **`users.nse_tf_access` (TEXT JSON array)**
 
-Controls NSE timeframe access. Read by NSE Worker cron. NOT FOUND IN SOURCE — nse-worker/src/nse-cron.js not read in this session for the exact enforcement code. Valid values per admin-worker source: `['M1','M5','M15','M30','1H','D']`.
+Controls NSE timeframe access. Read by NSE Worker cron in two places: `tryDeliverNseAlert()` (nse-cron.js:1482–1484) gates EBP/Sweep/MSS alerts, and `deliverNseIndicatorAlert()` (nse-cron.js:627–630) gates TDI/SMA alerts. If the cron TF is not in the user's `nse_tf_access` list, that user's processing is skipped. Fallback when NULL: all TFs allowed (`['M1','M5','M15','M30','1H','D']`).
 
 ---
 
@@ -1094,7 +1094,6 @@ All actions are performed via admin-worker routes. All require Clerk JWT + `is_a
 | Set asset limit | `PATCH /admin/users/:id/asset-limit` | Updates `users.asset_limit`. Range enforced: 1–50. Takes effect on the user's next `POST /user/assets` call. |
 | Grant TF access | `PATCH /admin/users/:id/tf-access` | Updates `users.user_tf_access` JSON. Valid set: `['M5','M15','M30','1H','4H','D','W']`. |
 | Grant NSE TF access | `PATCH /admin/users/:id/nse-tf-access` | Updates `users.nse_tf_access` JSON. Valid set: `['M1','M5','M15','M30','1H','D']`. |
-| Issue invite token | `POST /admin/invite` | Inserts a row into `invite_tokens` with an 8-character token (`crypto.randomUUID().split('-')[0].toUpperCase()`), `created_at = Date.now()`. Returns the full invite URL using `env.APP_URL`. No expiry column is set at creation time. |
 | View all API keys | `GET /admin/api-keys` | Read-only. Returns `api_keys` joined with `api_key_state`. |
 | Add API key | `POST /admin/api-keys` | Inserts into `api_keys`. |
 | Update API key | `PATCH /admin/api-keys/:id` | Updates `api_keys` fields. |
@@ -1103,17 +1102,9 @@ All actions are performed via admin-worker routes. All require Clerk JWT + `is_a
 
 ---
 
-### 15.3 Invite Flow — REMOVED (2026-08-14)
-
-Removed entirely. Investigation (2026-08-14) found the feature had zero actual enforcement: the token was display-only text in `Landing.jsx`, never passed into the Clerk sign-in modal, and `GET /invite/:token` was never called by any frontend code — confirmed by a repo-wide search. Any visitor could register identically with or without a token; `used_by`/`active` were inert columns with no write path (consistent with this section's prior finding that the consumption step was never found in source — it never existed).
-
-`GET /invite/:token` removed from ebp-worker, `GET /admin/tokens` and `POST /admin/invite` removed from admin-worker, `Landing.jsx`'s token-display block removed (the page itself remains — it's also the plain `/` sign-in landing page), the "Invite Tokens" admin tab removed, `invite_tokens` table dropped via migration 014.
-
----
-
 ## 16. Dead Secrets Audit
 
-**Methodology:** wrangler.toml files in this repository do not list secrets. Secrets are registered via `wrangler secret put` and stored in Cloudflare only. Therefore the "Configured" column cannot be confirmed from source files alone. All "Configured" entries are marked `NOT VERIFIED — wrangler secret list output needed`.
+**Methodology:** wrangler.toml files in this repository do not list secrets. Secrets are registered via `wrangler secret put` and stored in Cloudflare only. `wrangler secret list` was run against all six workers on 2026-08-14. The "Configured" column reflects that audit.
 
 The "Read by Source" column is confirmed from direct file reads.
 
@@ -1123,13 +1114,11 @@ The "Read by Source" column is confirmed from direct file reads.
 
 | Secret | Configured | Read by Source | Status |
 |--------|-----------|----------------|--------|
-| `CRON_SECRET` | NOT VERIFIED | Yes — `POST /cron/ebp` auth header check | Active |
-| `CLERK_SECRET_KEY` | NOT VERIFIED | Yes — all Clerk JWT route verification | Active |
-| `SHARED_BOT_TOKEN` | NOT VERIFIED | Yes — Telegram alert sending | Active |
-| `JOURNAL_API_SECRET` | NOT VERIFIED | Yes — `GET /signals/:id` and `PATCH /signals/:id/traded` (X-Journal-Secret header) | Active |
-| `TWELVE_DATA_API_KEY` | NOT VERIFIED | Yes — `validateSymbol()` called from `POST /user/assets` | Active (note: Twelve Data fetching was moved to Watchdog; this secret remains in EBP Worker for symbol validation only) |
-| `WATCHDOG_BOT_TOKEN` | NOT VERIFIED | NOT IN SOURCE — no reference in ebp-worker.js | Dead — remove if configured |
-| `WATCHDOG_ADMIN_CHAT_ID` | NOT VERIFIED | NOT IN SOURCE — no reference in ebp-worker.js | Dead — remove if configured |
+| `CRON_SECRET` | Yes — confirmed 2026-08-14 | Yes — `POST /cron/ebp` auth header check | Active |
+| `CLERK_SECRET_KEY` | Yes — confirmed 2026-08-14 | Yes — all Clerk JWT route verification | Active |
+| `SHARED_BOT_TOKEN` | Yes — confirmed 2026-08-14 | Yes — Telegram alert sending | Active |
+| `JOURNAL_API_SECRET` | Yes — confirmed 2026-08-14 | Yes — `GET /signals/:id` and `PATCH /signals/:id/traded` (X-Journal-Secret header) | Active |
+| `TWELVE_DATA_API_KEY` | No — confirmed not configured 2026-08-14 | `validateSymbol()`'s `apiKey` parameter was never read in its body — removed 2026-08-14 (Section 12.10) | Dead — not configured, and the one call site that used to pass this secret no longer does |
 
 ---
 
@@ -1137,20 +1126,18 @@ The "Read by Source" column is confirmed from direct file reads.
 
 | Secret | Configured | Read by Source | Status |
 |--------|-----------|----------------|--------|
-| `CRON_SECRET` | NOT VERIFIED | Yes — `POST /cron/sweep` auth header check | Active |
-| `SHARED_BOT_TOKEN` | NOT VERIFIED | Yes — Telegram alert sending in sweep-cron.js | Active |
+| `CRON_SECRET` | Yes — confirmed 2026-08-14 | Yes — `POST /cron/sweep` auth header check | Active |
+| `SHARED_BOT_TOKEN` | Yes — confirmed 2026-08-14 | Yes — Telegram alert sending in sweep-cron.js | Active |
 
 ---
 
 ### 16.3 nse-tracker (`nse-worker/`)
 
-Source confirmation is partial — nse-worker/src/nse-cron.js was not read in this session. The following is based on nse-worker/wrangler.toml comment which explicitly listed: `CRON_SECRET`, `CLERK_SECRET_KEY`.
-
 | Secret | Configured | Read by Source | Status |
 |--------|-----------|----------------|--------|
-| `CRON_SECRET` | NOT VERIFIED | Confirmed from wrangler.toml comment | Active |
-| `CLERK_SECRET_KEY` | NOT VERIFIED | Confirmed from wrangler.toml comment | Active |
-| `SHARED_BOT_TOKEN` | NOT VERIFIED | NOT VERIFIED — nse-worker/src/nse-cron.js not read; likely used for Telegram alerts | NOT VERIFIED |
+| `CRON_SECRET` | Yes — confirmed 2026-08-14 | Confirmed from wrangler.toml comment | Active |
+| `CLERK_SECRET_KEY` | Yes — confirmed 2026-08-14 | Confirmed from wrangler.toml comment | Active |
+| `SHARED_BOT_TOKEN` | Yes — confirmed 2026-08-14 | Yes — `sendTelegramMessage(env.SHARED_BOT_TOKEN, ...)` in `tryDeliverNseAlert()` and `deliverNseIndicatorAlert()`, nse-cron.js | Active |
 
 ---
 
@@ -1158,9 +1145,8 @@ Source confirmation is partial — nse-worker/src/nse-cron.js was not read in th
 
 | Secret | Configured | Read by Source | Status |
 |--------|-----------|----------------|--------|
-| `CRON_SECRET` | NOT VERIFIED | Yes — `POST /cron/sma` auth header check | Active |
-| `SHARED_BOT_TOKEN` | NOT VERIFIED | Yes — Telegram alert sending | Active |
-| `TWELVE_DATA_API_KEY` | NOT VERIFIED | NOT FOUND IN SOURCE — compute-worker reads Twelve Data keys from the `api_keys` D1 table, not from env. This secret is NOT read in compute-worker/src/index.js. | Dead — remove if configured |
+| `CRON_SECRET` | Yes — confirmed 2026-08-14 | Yes — `POST /cron/sma` auth header check | Active |
+| `SHARED_BOT_TOKEN` | No — confirmed not configured 2026-08-14 | Yes — Telegram alert sending | **Configured/read mismatch** — code sends Telegram alerts via this secret but it is not set on this worker; those sends fail silently at runtime. Flagged 2026-08-14, not yet investigated further. |
 
 ---
 
@@ -1168,9 +1154,9 @@ Source confirmation is partial — nse-worker/src/nse-cron.js was not read in th
 
 | Secret | Configured | Read by Source | Status |
 |--------|-----------|----------------|--------|
-| `CRON_SECRET` | NOT VERIFIED | Yes — all five POST routes check `X-Cron-Secret !== env.CRON_SECRET` | Active |
-| `WATCHDOG_BOT_TOKEN` | NOT VERIFIED | Yes — `sendWatchdogAlert()` uses this to send Telegram messages | Active |
-| `WATCHDOG_ADMIN_CHAT_ID` | NOT VERIFIED | Yes — `sendWatchdogAlert()` uses this as the Telegram chat target | Active |
+| `CRON_SECRET` | Yes — confirmed 2026-08-14 | Yes — all five POST routes check `X-Cron-Secret !== env.CRON_SECRET` | Active |
+| `WATCHDOG_BOT_TOKEN` | Yes — confirmed 2026-08-14 | Yes — `sendWatchdogAlert()` uses this to send Telegram messages | Active |
+| `WATCHDOG_ADMIN_CHAT_ID` | Yes — confirmed 2026-08-14 | Yes — `sendWatchdogAlert()` uses this as the Telegram chat target | Active |
 
 ---
 
@@ -1178,8 +1164,8 @@ Source confirmation is partial — nse-worker/src/nse-cron.js was not read in th
 
 | Secret | Configured | Read by Source | Status |
 |--------|-----------|----------------|--------|
-| `CLERK_SECRET_KEY` | NOT VERIFIED | Yes — all admin Clerk JWT verification | Active |
-| `APP_URL` | NOT VERIFIED | Yes — `POST /admin/invite` uses `env.APP_URL` to build the invite URL | Active (note: this is an environment variable, not a Cloudflare secret. It may be set via `wrangler secret put` or via [vars] in wrangler.toml. admin-worker/wrangler.toml has no [vars] section — status of this env var is NOT VERIFIED. If missing, invite URL will be malformed.) |
+| `CLERK_SECRET_KEY` | Yes — confirmed 2026-08-14 | Yes — all admin Clerk JWT verification | Active |
+| `APP_URL` | No — confirmed not configured 2026-08-14 | Not read anywhere in current source | Dead — not configured, not referenced |
 
 ---
 
@@ -1293,7 +1279,6 @@ There is no automated CI/CD. All deployments are performed manually by running `
 | Minimum closed candles | 20 | watchdog-worker/src/index.js | Candle writes to D1 are skipped if fewer than 20 closed candles are returned for a symbol/TF. Prevents partial data from polluting the cache. |
 | **Health Check Reporting Windows** | | | |
 | 2-hourly all-clear | `utcHour % 2 === 0 && utcMinute < 15` | watchdog-worker/src/index.js | Sends healthy confirmation Telegram message on first 15-min tick of every even UTC hour |
-| EOD report | `nyHour === 17 && nyMinute < 15` | watchdog-worker/src/index.js | Sends full EOD check report on first 15-min tick after NY 17:00 |
 | TF_STALE_MIN (EOD candle freshness) | M15=30, M30=35, 1H=65, 4H=245 (minutes) | watchdog-worker/src/index.js | Per-TF threshold for candle freshness reporting in EOD digest |
 
 ---
@@ -1323,8 +1308,8 @@ Concrete operational consequences from confirmed incidents and architectural con
 7. **`getClosedCandles` filter rule is `openTime + intervalMs <= now`.**
    A candle is only included in the result if its close time has already passed. The filter is `c.time + intervalMs <= now` (strictly ≤, not <). A forming candle — one whose close time is in the future — is excluded. This is intentional: including a forming candle in signal detection produces false positives based on incomplete price action. If you see a missing latest candle in a freshness report, it is almost always a forming candle being correctly excluded, not a data gap.
 
-8. **`isDuplicateAlert` uses TEXT ISO 8601 timestamps — integer ms comparisons are broken.**
-   Before migration-013, `alert_history.fired_at` was stored as a TEXT ISO 8601 string. Dedup queries that compare this column against JavaScript `Date.now()` (an integer ms epoch) return wrong results because SQLite cannot compare text ISO strings against integers numerically. The `/alerts/export` endpoint has a known bug of this type: its `from`/`to` parameters are integer ms epochs but the WHERE clause compares them against the TEXT `fired_at` column. Safe pattern: when querying `alert_history`, always compare `fired_at` against another ISO string: `WHERE fired_at > ?` with `new Date(cutoffMs).toISOString()` as the bind parameter.
+8. **`alert_history.fired_at` is TEXT ISO 8601 — integer ms comparisons are broken.**
+   `alert_history.fired_at` is stored as a TEXT ISO 8601 string (migration-013). Queries that compare this column against JavaScript `Date.now()` (an integer ms epoch) return wrong results because SQLite cannot compare text ISO strings against integers numerically. Safe pattern: when querying `alert_history`, always compare `fired_at` against another ISO string: `WHERE fired_at > ?` with `new Date(cutoffMs).toISOString()` as the bind parameter — the pattern `isDuplicateAlert()` and `GET /alerts/export` both use.
 
 9. **Every `wrangler deploy` must be immediately committed and pushed to the coding branch.**
    An uncommitted deploy creates an unrecoverable divergence between the repository and production. If the working copy is lost (container reset, machine failure, session expiry), the deployed version cannot be reconstructed from git. Two incidents in August 2026 required manual reconstruction of deployed changes from Cloudflare's live worker source because the working copy was in a remote container that was reclaimed. Safe pattern: deploy → verify /health → `git commit` → `git push`. Never deploy from an uncommitted state unless you commit within minutes.
