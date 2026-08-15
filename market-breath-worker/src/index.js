@@ -1092,13 +1092,7 @@ async function handleWatchdogHealthCheck(env) {
   }
 
   // ── Check A: Most recent candle_cache row, any symbol/TF ──────────────────
-  // Not market-hours gated — Watchdog's own M15 fetch tick runs on a fixed
-  // */15 schedule year-round for the whole signal-symbol pool (forex,
-  // crypto, commodity alike), and writeCandleCache() stamps fetched_at to
-  // "now" on every successful write regardless of whether the underlying
-  // candle itself is a stale weekend bar. So fetched_at tracks "is
-  // Watchdog's cron alive and writing," not "is the market open" — gating
-  // this on forex hours would just blind the check during every weekend.
+  if (forexMarketOpen) {
   {
     const row = await env.DB.prepare(
       `SELECT symbol, tf, fetched_at FROM candle_cache ORDER BY fetched_at DESC LIMIT 1`
@@ -1187,6 +1181,9 @@ async function handleWatchdogHealthCheck(env) {
         }
       }
     }
+  }
+  } else {
+    checks.candleCache = 'skipped — forex weekend';
   }
 
   // ── Check: EBP Worker cron activity (swing_states updated) ────────────────
