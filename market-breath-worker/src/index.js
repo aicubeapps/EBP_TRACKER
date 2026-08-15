@@ -4,10 +4,13 @@
 // Forked from watchdog-worker; zero dependencies, pure CF runtime.
 //
 // Routes:
-//   GET  /health              — liveness check
-//   POST /cron/breadth-fetch  — Yahoo breadth + DXY synthesis (hourly)
-//   POST /cron/daily-digest   — EOD operations report via Telegram
-//   POST /cron/prune          — Saturday-only DB retention cleanup
+//   GET  /health                 — liveness check
+//   POST /health/watchdog-check  — external watchdog heartbeat (moved from
+//                                  ebp-watchdog 2026-08-15; see
+//                                  handleWatchdogHealthCheck below)
+//   POST /cron/breadth-fetch     — Yahoo breadth + DXY synthesis (hourly)
+//   POST /cron/daily-digest      — EOD operations report via Telegram
+//   POST /cron/prune             — Saturday-only DB retention cleanup
 //
 // All POST routes secured by X-Cron-Secret (cron-job.org triggers).
 // DB retention (dxy_candle_cache, watchdog_log) moved here from the
@@ -1025,6 +1028,379 @@ async function handleBreadthFetchCron(env) {
 }
 
 // ============================================================
+// Watchdog health check — external heartbeat, secured by X-Cron-Secret
+// (cron-job.org, every 15 min). Moved here from watchdog-worker on
+// 2026-08-15 (post-split, ebp-watchdog lost WATCHDOG_BOT_TOKEN/
+// WATCHDOG_ADMIN_CHAT_ID so its Telegram alerts were silently no-op'ing;
+// market-breath already holds those secrets for the daily digest). Still
+// reads the same shared D1 tables (candle_cache, swing_states, etc. —
+// written by watchdog/EBP/Sweep Workers) to check on watchdog's own
+// activity from outside its process, same rationale as before: a
+// CPU-limit kill during watchdog's scheduled() run bypasses every JS
+// catch handler there, so this has to be an externally-triggered,
+// separate-worker check to catch that blind spot.
+// ============================================================
+async function handleWatchdogHealthCheck(env) {
+  const now = Date.now();
+  const nowISO = new Date(now).toISOString();
+
+  // ── DST-aware NY offset — same Intl shortOffset technique used by
+  // compute-worker's market-breadth weekend gate. ─────────────────────────
+  const nowUtc = new Date(now);
+  const nyParts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    timeZoneName: 'shortOffset',
+    hour: 'numeric', minute: 'numeric',
+  }).formatToParts(nowUtc);
+  const nyOffsetStr   = nyParts.find(p => p.type === 'timeZoneName').value;
+  const nyOffsetHours = parseInt(nyOffsetStr.replace('GMT', ''));
+  const nyWallClock   = new Date(now + nyOffsetHours * 3600 * 1000);
+  const nyHour        = nyWallClock.getUTCHours();
+  const nyDayOfWeek   = nyWallClock.getUTCDay(); // 0=Sun, 6=Sat
+
+  // ── NSE market hours: 09:15–15:30 IST (UTC+5:30, no DST) ───────────────
+  const istMs      = now + 5.5 * 3600 * 1000;
+  const istClock   = new Date(istMs);
+  const istHour    = istClock.getUTCHours();
+  const istMin     = istClock.getUTCMinutes();
+  const istMinutes = istHour * 60 + istMin;
+  const nseOpen    = 9 * 60 + 15;   // 09:15
+  const nseClose   = 15 * 60 + 30;  // 15:30
+  const istDow     = istClock.getUTCDay();
+  const nseMarketOpen = istDow >= 1 && istDow <= 5
+    && istMinutes >= nseOpen && istMinutes < nseClose;
+
+  // ── Forex market hours — same weekend gate as compute-worker's market breadth ──
+  const isForexWeekend =
+    (nyDayOfWeek === 5 && nyHour >= 17) ||
+    nyDayOfWeek === 6 ||
+    (nyDayOfWeek === 0 && nyHour < 17);
+  const forexMarketOpen = !isForexWeekend;
+
+  // ── Stale thresholds ─────────────────────────────────────────────────────
+  const STALE_20MIN = 20 * 60 * 1000;
+  const STALE_30MIN = 30 * 60 * 1000;
+  const STALE_35MIN = 35 * 60 * 1000;
+  const STALE_65MIN = 65 * 60 * 1000;
+  const STALE_2HR   = 2  * 60 * 60 * 1000;
+
+  const failures = [];
+  const checks   = {};
+
+  function minsAgo(tsMs) {
+    return Math.round((now - tsMs) / 60000);
+  }
+
+  // ── Check A: Most recent candle_cache row, any symbol/TF ──────────────────
+  // Not market-hours gated — Watchdog's own M15 fetch tick runs on a fixed
+  // */15 schedule year-round for the whole signal-symbol pool (forex,
+  // crypto, commodity alike), and writeCandleCache() stamps fetched_at to
+  // "now" on every successful write regardless of whether the underlying
+  // candle itself is a stale weekend bar. So fetched_at tracks "is
+  // Watchdog's cron alive and writing," not "is the market open" — gating
+  // this on forex hours would just blind the check during every weekend.
+  {
+    const row = await env.DB.prepare(
+      `SELECT symbol, tf, fetched_at FROM candle_cache ORDER BY fetched_at DESC LIMIT 1`
+    ).first();
+    if (!row) {
+      checks.candle_cache_latest = 'no rows found';
+      failures.push('Candle cache: no rows in candle_cache');
+    } else {
+      const age = now - new Date(row.fetched_at).getTime();
+      checks.candle_cache_latest = `${row.symbol} ${row.tf} last fetched ${minsAgo(new Date(row.fetched_at).getTime())} min ago`;
+      if (age > STALE_30MIN) {
+        failures.push(`Candle cache stale — most recent fetch was ${row.symbol} ${row.tf} at ${row.fetched_at} (${minsAgo(new Date(row.fetched_at).getTime())} min ago, expected ≤30 min)`);
+      }
+    }
+  }
+
+  // ── Check A2: recent Watchdog internal errors/warnings ─────────────────
+  // Complements Check A above — that one catches Watchdog going silent
+  // entirely; this one catches Watchdog still running but actively logging
+  // failures (e.g. a Yahoo/Twelve Data fetch failure) that would otherwise
+  // only be visible via a direct D1 query. Ported from the pre-split
+  // ebp-worker.js handleWatchdogHealthCheck (added 2026-08-06).
+  {
+    const thirtyMinsAgo = new Date(now - 30 * 60 * 1000).toISOString();
+    const { results: watchdogErrors } = await env.DB.prepare(`
+      SELECT event_type, message, created_at
+      FROM watchdog_log
+      WHERE event_type IN ('error', 'warning')
+        AND created_at > ?
+      ORDER BY created_at DESC
+      LIMIT 5
+    `).bind(thirtyMinsAgo).all();
+
+    if (watchdogErrors?.length > 0) {
+      checks.watchdog_internal = `${watchdogErrors.length} error/warning(s) in the last 30 min`;
+      failures.push(
+        `Watchdog internal errors:\n` +
+        watchdogErrors.map(r => `  [${r.event_type.toUpperCase()}] ${r.message}`).join('\n')
+      );
+    } else {
+      checks.watchdog_internal = 'no errors/warnings in the last 30 min';
+    }
+  }
+
+  // ── Check B: Dynamic active symbol+TF probe ────────────────────────────
+  // Picks a real currently-configured forex/crypto/commodity symbol+TF
+  // (not a hardcoded one that can go stale itself if that config is ever
+  // removed) and checks its own candle_cache freshness against a
+  // TF-appropriate threshold, rather than only ever checking whatever TF
+  // happens to be freshest overall (Check A above).
+  {
+    const CANDLE_TF_INTERVAL_MS = { M15: 900000, M30: 1800000, '1H': 3600000, '4H': 14400000 };
+    const activeConfig = await env.DB.prepare(`
+      SELECT ua.symbol, ec.timeframe
+      FROM user_assets ua
+      JOIN user_ebp_configs ec ON ec.asset_id = ua.id
+      WHERE ec.enabled = 1
+      AND ua.asset_type != 'nse'
+      AND ua.asset_type != 'system'
+      ORDER BY ec.timeframe ASC
+      LIMIT 1
+    `).first();
+
+    if (!activeConfig) {
+      checks.candle_cache_active_symbol = 'no active forex/crypto/commodity EBP configs found';
+    } else {
+      const { symbol, timeframe } = activeConfig;
+      const intervalMs = CANDLE_TF_INTERVAL_MS[timeframe];
+      const row = await env.DB.prepare(
+        `SELECT fetched_at FROM candle_cache WHERE symbol=? AND tf=?`
+      ).bind(symbol, timeframe).first();
+
+      if (!row) {
+        checks.candle_cache_active_symbol = `no candle_cache row for ${symbol} ${timeframe}`;
+        failures.push(`Candle cache missing — active symbol ${symbol} ${timeframe} has no candle_cache row`);
+      } else if (intervalMs == null) {
+        // Active config's TF isn't one of the intraday TFs this probe
+        // covers (e.g. D/W) — report it, but there's no interval to gate on.
+        checks.candle_cache_active_symbol = `${symbol} ${timeframe} last fetched ${minsAgo(new Date(row.fetched_at).getTime())} min ago (no threshold for this TF)`;
+      } else {
+        const age = now - new Date(row.fetched_at).getTime();
+        const thresholdMin = Math.round((2 * intervalMs) / 60000);
+        checks.candle_cache_active_symbol = `${symbol} ${timeframe} last fetched ${minsAgo(new Date(row.fetched_at).getTime())} min ago`;
+        if (age > 2 * intervalMs) {
+          failures.push(`Candle cache stale — ${symbol} ${timeframe} last fetched ${minsAgo(new Date(row.fetched_at).getTime())} min ago (expected ≤${thresholdMin} min)`);
+        }
+      }
+    }
+  }
+
+  // ── Check: EBP Worker cron activity (swing_states updated) ────────────────
+  if (forexMarketOpen) {
+    const row = await env.DB.prepare(
+      `SELECT symbol, tf, updated_at FROM swing_states
+       ORDER BY updated_at DESC LIMIT 1`
+    ).first();
+    if (!row) {
+      checks.ebp_cron = 'no swing_states rows found';
+      failures.push('EBP Worker: no swing_states rows — cron may never have fired');
+    } else {
+      const age = now - new Date(row.updated_at).getTime();
+      checks.ebp_cron = `swing_states last updated ${minsAgo(new Date(row.updated_at).getTime())} min ago`;
+      if (age > STALE_35MIN) {
+        failures.push(`EBP cron stale — swing_states last updated ${minsAgo(new Date(row.updated_at).getTime())} min ago (expected ≤35 min)`);
+      }
+    }
+  } else {
+    checks.ebp_cron = 'skipped — forex weekend';
+  }
+
+  // ── Check: Sweep Worker cron activity (fvg_zones updated) ──────────────────
+  // Event-driven, not every-tick — informational only, never a hard failure.
+  if (forexMarketOpen) {
+    const row = await env.DB.prepare(
+      `SELECT symbol, tf, created_at FROM fvg_zones
+       ORDER BY created_at DESC LIMIT 1`
+    ).first();
+    if (!row) {
+      checks.sweep_cron = 'no fvg_zones rows — may be expected if no FVGs detected yet';
+    } else {
+      checks.sweep_cron = `fvg_zones last entry ${minsAgo(new Date(row.created_at).getTime())} min ago`;
+    }
+  } else {
+    checks.sweep_cron = 'skipped — forex weekend';
+  }
+
+  // ── Check C: Market breadth freshness ──────────────────────────────────────
+  if (forexMarketOpen) {
+    const row = await env.DB.prepare(
+      `SELECT snapshot_at FROM market_breadth_intraday
+       ORDER BY snapshot_at DESC LIMIT 1`
+    ).first();
+    if (!row) {
+      checks.market_breadth = 'no intraday rows found';
+      failures.push('Market breadth: no intraday rows in market_breadth_intraday');
+    } else {
+      const age = now - row.snapshot_at;
+      checks.market_breadth = `last snapshot ${minsAgo(row.snapshot_at)} min ago`;
+      if (age > STALE_65MIN) {
+        failures.push(`Market breadth stale — last snapshot ${minsAgo(row.snapshot_at)} min ago (expected ≤65 min)`);
+      }
+    }
+  } else {
+    checks.market_breadth = 'skipped — forex weekend';
+  }
+
+  // ── Check D: Forex SMA Cloud state freshness ────────────────────────────────
+  if (forexMarketOpen) {
+    const row = await env.DB.prepare(
+      `SELECT symbol, timeframe, updated_at FROM forex_sma_state
+       ORDER BY updated_at DESC LIMIT 1`
+    ).first();
+    if (!row) {
+      checks.forex_sma = 'no forex_sma_state rows — expected until first SMA config created';
+    } else {
+      const age = now - new Date(row.updated_at).getTime();
+      checks.forex_sma = `${row.symbol} ${row.timeframe} last updated ${minsAgo(new Date(row.updated_at).getTime())} min ago`;
+      if (age > STALE_35MIN) {
+        failures.push(`Forex SMA state stale — last updated ${minsAgo(new Date(row.updated_at).getTime())} min ago (expected ≤35 min)`);
+      }
+    }
+  } else {
+    checks.forex_sma = 'skipped — forex weekend';
+  }
+
+  // ── Check: NSE candle cache freshness ───────────────────────────────────────
+  // nse_candle_cache.updated_at is an INTEGER ms epoch (confirmed via live
+  // PRAGMA table_info) — compare directly, no new Date() wrap needed.
+  if (nseMarketOpen) {
+    const row = await env.DB.prepare(
+      `SELECT symbol, timeframe, updated_at FROM nse_candle_cache
+       ORDER BY updated_at DESC LIMIT 1`
+    ).first();
+    if (!row) {
+      checks.nse_candle_cache = 'no rows found';
+      failures.push('NSE candle cache: no rows in nse_candle_cache during market hours');
+    } else {
+      const age = now - row.updated_at;
+      checks.nse_candle_cache = `${row.symbol} ${row.timeframe} last updated ${minsAgo(row.updated_at)} min ago`;
+      if (age > STALE_20MIN) {
+        failures.push(`NSE candle cache stale — ${row.symbol} ${row.timeframe} last updated ${minsAgo(row.updated_at)} min ago (expected ≤20 min)`);
+      }
+    }
+  } else {
+    checks.nse_candle_cache = 'skipped — NSE market closed';
+  }
+
+  // ── Check: NSE swing state freshness ────────────────────────────────────────
+  if (nseMarketOpen) {
+    const row = await env.DB.prepare(
+      `SELECT symbol, tf, updated_at FROM nse_swing_states
+       ORDER BY updated_at DESC LIMIT 1`
+    ).first();
+    if (!row) {
+      checks.nse_swing = 'no rows — expected until first NSE EBP/Sweep config created';
+    } else {
+      const age = now - new Date(row.updated_at).getTime();
+      checks.nse_swing = `${row.symbol} ${row.tf} last updated ${minsAgo(new Date(row.updated_at).getTime())} min ago`;
+      if (age > STALE_35MIN) {
+        failures.push(`NSE swing state stale — ${row.symbol} ${row.tf} last updated ${minsAgo(new Date(row.updated_at).getTime())} min ago (expected ≤35 min)`);
+      }
+    }
+  } else {
+    checks.nse_swing = 'skipped — NSE market closed';
+  }
+
+  // ── Check: NSE FVG zone freshness ───────────────────────────────────────────
+  // Event-driven, not every-tick, same as forex's fvg_zones check — a row is
+  // only written when detectFVG() actually finds a gap (nse-cron.js's
+  // processFVGZones), not on every cron tick. Informational only, never a
+  // hard failure; a quiet symbol going hours without a fresh FVG is normal.
+  if (nseMarketOpen) {
+    const row = await env.DB.prepare(
+      `SELECT symbol, tf, created_at FROM nse_fvg_zones
+       ORDER BY created_at DESC LIMIT 1`
+    ).first();
+    if (!row) {
+      checks.nse_fvg = 'no nse_fvg_zones rows — may be expected if no FVGs detected yet';
+    } else {
+      checks.nse_fvg = `${row.symbol} ${row.tf} last entry ${minsAgo(new Date(row.created_at).getTime())} min ago`;
+    }
+  } else {
+    checks.nse_fvg = 'skipped — NSE market closed';
+  }
+
+  // ── Check: NSE SMA Cloud state freshness ────────────────────────────────────
+  // nse_sma_state.updated_at is also INTEGER ms epoch (unlike forex_sma_state's
+  // TEXT), but new Date(intMs).getTime() round-trips correctly either way.
+  if (nseMarketOpen) {
+    const row = await env.DB.prepare(
+      `SELECT symbol, timeframe, updated_at FROM nse_sma_state
+       ORDER BY updated_at DESC LIMIT 1`
+    ).first();
+    if (!row) {
+      checks.nse_sma = 'no rows — expected until first NSE SMA config created';
+    } else {
+      const age = now - new Date(row.updated_at).getTime();
+      checks.nse_sma = `${row.symbol} ${row.timeframe} last updated ${minsAgo(new Date(row.updated_at).getTime())} min ago`;
+      if (age > STALE_2HR) {
+        failures.push(`NSE SMA state stale — ${row.symbol} ${row.timeframe} last updated ${minsAgo(new Date(row.updated_at).getTime())} min ago (expected ≤120 min)`);
+      }
+    }
+  } else {
+    checks.nse_sma = 'skipped — NSE market closed';
+  }
+
+  // ── Determine alert type ──────────────────────────────────────────────────
+  const utcHour   = nowUtc.getUTCHours();
+  const utcMinute = nowUtc.getUTCMinutes();
+  // 2-hourly healthy confirmation: first 15-min tick after every even UTC hour.
+  const is2HourlyWindow = utcHour % 2 === 0 && utcMinute < 15;
+
+  // ── Human-readable NY/IST timestamp for Telegram text ───────────────────
+  // nyWallClock/istClock are synthetic Date objects whose UTC-getter fields
+  // already equal the target timezone's wall-clock fields (same trick used
+  // for nyHour/nyMinute/istHour above) — read only via getUTC*, never
+  // toLocaleString/timeZone formatting, or it would double-convert.
+  function fmtWallClock(d) {
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const h24  = d.getUTCHours();
+    const h12  = h24 % 12 === 0 ? 12 : h24 % 12;
+    const ampm = h24 < 12 ? 'AM' : 'PM';
+    const mins = String(d.getUTCMinutes()).padStart(2, '0');
+    return `${months[d.getUTCMonth()]} ${d.getUTCDate()}, ${h12}:${mins} ${ampm}`;
+  }
+  const tsDisplay = `NY ${fmtWallClock(nyWallClock)} · IST ${fmtWallClock(istClock)}`;
+
+  // ── Send Telegram — reuses this file's own sendWatchdogAlert(), same
+  // WATCHDOG_BOT_TOKEN/WATCHDOG_ADMIN_CHAT_ID this worker already sends
+  // daily-digest alerts through. ──────────────────────────────────────────
+  if (failures.length > 0) {
+    const failureLines = failures.map(f => `• ${f}`).join('\n');
+    await sendWatchdogAlert(env,
+      `🚨 <b>EBP Watchdog — Health Alert</b>\n` +
+      `🕐 ${tsDisplay}\n\n` +
+      `<b>Failed checks (${failures.length}):</b>\n` +
+      `${failureLines}\n\n` +
+      `System may be partially or fully offline.`
+    );
+  } else if (is2HourlyWindow) {
+    const marketStatus = forexMarketOpen ? '📈 Forex: open' : '💤 Forex: weekend';
+    const nseStatus     = nseMarketOpen ? '📈 NSE: open' : '💤 NSE: closed';
+    await sendWatchdogAlert(env,
+      `✅ <b>EBP Watchdog — All Systems OK</b>\n` +
+      `🕐 ${tsDisplay}\n\n` +
+      `${marketStatus} · ${nseStatus}\n` +
+      `All ${Object.keys(checks).length} checks passed.`
+    );
+  }
+
+  return {
+    timestamp: nowISO,
+    failures: failures.length,
+    failureList: failures,
+    checks,
+    forexMarketOpen,
+    nseMarketOpen,
+    alertsSent: failures.length > 0 || is2HourlyWindow,
+  };
+}
+
+// ============================================================
 // Export
 // ============================================================
 export default {
@@ -1033,6 +1409,23 @@ export default {
 
     if (url.pathname === '/health') {
       return json({ ok: true, worker: 'market-breath', ts: new Date().toISOString() });
+    }
+
+    // External watchdog heartbeat — public route, secured by X-Cron-Secret
+    // (cron-job.org, every 15 min). Moved here from ebp-watchdog 2026-08-15
+    // — see handleWatchdogHealthCheck's own header comment for why.
+    if (url.pathname === '/health/watchdog-check' && request.method === 'POST') {
+      if (request.headers.get('X-Cron-Secret') !== env.CRON_SECRET) {
+        return json({ error: 'Forbidden' }, 401);
+      }
+      _watchdogAlertEnv = env;
+      try {
+        const result = await handleWatchdogHealthCheck(env);
+        return json(result, 200);
+      } catch (err) {
+        console.error('Watchdog health check error:', err.message);
+        return json({ error: err.message }, 500);
+      }
     }
 
     // Breadth/DXY/daily+weekly synthesis ETL — hourly via cron-job.org.
