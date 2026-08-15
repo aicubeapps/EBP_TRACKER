@@ -193,56 +193,89 @@ function endOfUTCMonthISO() {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0, 23, 59, 59)).toISOString();
 }
 
+/**
+ * Returns ISO string for end of current UTC week (Friday 23:59:59 UTC).
+ * Used for T1, T2, T3, T4 chain expiry.
+ */
+function endOfUTCWeekISO() {
+  const now = new Date();
+  const day = now.getUTCDay(); // 0=Sun, 1=Mon ... 5=Fri, 6=Sat
+  const daysUntilFriday = (5 - day + 7) % 7 || 7; // always next Friday if today is Friday
+  const friday = new Date(now);
+  friday.setUTCDate(now.getUTCDate() + daysUntilFriday);
+  friday.setUTCHours(23, 59, 59, 0);
+  return friday.toISOString();
+}
+
 const TF_INTERVAL_MS = {
   M15: 15 * 60 * 1000, M30: 30 * 60 * 1000, '1H': 60 * 60 * 1000,
   '4H': 4 * 60 * 60 * 1000, D: 24 * 60 * 60 * 1000, W: 7 * 24 * 60 * 60 * 1000,
 };
 
-async function insertChain(db, { templateType, userId, assetId, symbol, htf, ltf, direction, state, step1SignalId, expiresAt, htfCandle }) {
+async function insertChain(db, {
+  templateType, userId, assetId, symbol, htf, ltf, direction, state, step1SignalId, expiresAt, htfCandle,
+  htfHigh, htfLow, htfCandleOpenTime, htfCandleCloseTime, oteTop, oteBottom, zoneType,
+  signalId, step, oteEnabled, sweepRequired, triggerType, s1Sent,
+}) {
   const nowISO = new Date().toISOString();
   await db.prepare(`
     INSERT INTO chain_state
     (template_type,user_id,asset_id,symbol,htf,ltf,direction,state,step1_signal_id,
      htf_candle_open,htf_candle_close,htf_candle_open_time,htf_candle_close_time,
-     expires_at,created_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+     expires_at,created_at,
+     htf_high,htf_low,ote_top,ote_bottom,zone_type,
+     signal_id,step,ote_enabled,sweep_required,trigger_type,s1_sent)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     templateType, userId, assetId, symbol, htf, ltf, direction, state, step1SignalId ?? null,
-    htfCandle?.open ?? null, htfCandle?.close ?? null, htfCandle?.openTime ?? null, htfCandle?.closeTime ?? null,
-    expiresAt, nowISO
+    htfCandle?.open ?? null, htfCandle?.close ?? null,
+    // T2's only current caller passes these nested inside htfCandle; T1
+    // (new spec) passes them flat — flat wins if both are somehow present.
+    htfCandleOpenTime ?? htfCandle?.openTime ?? null,
+    htfCandleCloseTime ?? htfCandle?.closeTime ?? null,
+    expiresAt, nowISO,
+    htfHigh ?? null, htfLow ?? null, oteTop ?? null, oteBottom ?? null, zoneType ?? null,
+    signalId ?? null, step ?? 1, oteEnabled ?? 1, sweepRequired ?? 0, triggerType ?? 'cisd',
+    s1Sent ? 1 : 0
   ).run();
 }
 
-// T3 keeps its existing window_mins-based expiry (the Step-2 sweep must
-// land within that window) rather than the spec's general "end of UTC
-// month" default — that default is for T1/T2/T4, which have no such
-// short-window semantics; changing T3's expiry would break the chain's
-// actual timing gate.
-async function initiateT3Chain(db, userId, assetId, symbol, direction, htfTf, ltf, windowMins, signalId) {
-  const expiresAt = new Date(Date.now() + windowMins * 60 * 1000).toISOString();
-  await insertChain(db, {
-    templateType: 'T3', userId, assetId, symbol, htf: htfTf, ltf, direction,
-    state: 'awaiting_sweep', step1SignalId: signalId, expiresAt,
-  });
+/**
+ * T2 S1 alert — sent at EBP fire only when user has no EBP alert enabled.
+ * Informs user that T2 chain has been armed and is watching for zone entry.
+ */
+function formatT2S1Alert({ symbol, htf, ltf, direction, zoneTop, zoneBottom,
+                           zoneType, triggerType, signalId }) {
+  const emoji = direction === 'bullish' ? '🟢' : '🔴';
+  const label = direction === 'bullish' ? 'Bullish T2' : 'Bearish T2';
+  const zoneLabel = zoneType === 'ote' ? 'OTE Zone' :
+                    zoneType === 'discount' ? 'Discount Zone' : 'Premium Zone';
+  return `${emoji} <b>${label} Armed — ${symbol}</b>
+⏱ HTF: ${htf} → LTF: ${ltf}
+━━━━━━━━━━━━━━
+🔍 Watching: ${zoneLabel}
+📊 Zone: ${zoneBottom.toFixed(5)} – ${zoneTop.toFixed(5)}
+⚡ Trigger: ${triggerType.toUpperCase()}
+━━━━━━━━━━━━━━
+🔗 Signal ID: ${signalId}/S1
+EBP Tracker`;
 }
 
-// Shared alert format across ebp-worker.js and sweep-cron.js; the
-// Signal ID is assigned once at Step 1 (initiateT3Chain) and reused
-// verbatim at Steps 2/3 via chain_state.step1_signal_id.
-function formatT3Alert(symbol, htf, ltf, direction, session, price, signalId, step) {
-  const emoji    = direction === 'bullish' ? '🟢' : '🔴';
-  const dirLabel = direction === 'bullish' ? 'BULL' : 'BEAR';
-  const stepLabel = '/S' + step;
-
-  return [
-    '🎯 T3 Chain — ' + symbol,
-    'Step: S' + step + ' of 3',
-    'HTF: ' + htf + ' EBP → LTF: ' + ltf + ' Sweep → LTF: ' + ltf + ' MSS',
-    'Direction: ' + emoji + ' ' + dirLabel,
-    'Session: ' + session,
-    'Price: ' + price,
-    'Signal ID: ' + signalId + stepLabel
-  ].join('\n');
+function formatT3S1Alert({ symbol, ltf, direction, zoneTop, zoneBottom,
+                           target, triggerType, signalId }) {
+  const emoji = direction === 'bullish' ? '🟢' : '🔴';
+  const label = direction === 'bullish' ? 'Bullish T3' : 'Bearish T3';
+  const targetLabel = direction === 'bullish'
+    ? 'Target (Prev Day High)' : 'Target (Prev Day Low)';
+  return `${emoji} <b>${label} Armed — ${symbol}</b>
+⏱ LTF: ${ltf}
+━━━━━━━━━━━━━━
+📍 Zone (50–75%): ${zoneBottom.toFixed(5)} – ${zoneTop.toFixed(5)}
+🎯 ${targetLabel}: ${target.toFixed(5)}
+⚡ Trigger: ${triggerType.toUpperCase()}
+━━━━━━━━━━━━━━
+🔗 Signal ID: ${signalId}/S1
+EBP Tracker`;
 }
 
 // ============================================================
@@ -1018,14 +1051,23 @@ async function handleEBPCron(tf, env, debugLog = null) {
         const effectiveBias = getEffectiveBias(userBiasTF, { [userBiasTF]: { bias: userHtfBias } }, biasOverrides);
         const trendAligned  = ebp.direction === effectiveBias;
 
-        // tg is needed by both the plain EBP alert below and the T1/T2/T3
-        // template loop (T3's Step 1 message) — fetched once, unconditionally,
+        // tg is needed by both the plain EBP alert below and the T1/T2
+        // template loop (T2's S1 message) — fetched once, unconditionally,
         // so a template with bias_gate=0 can still fire even on a cron cycle
         // where the plain EBP alert itself is skipped for misalignment.
         const tg = await env.DB.prepare(
           'SELECT chat_id FROM user_telegram WHERE user_id = ? AND verified = 1'
         ).bind(row.user_id).first();
         if (!tg?.chat_id) continue;
+
+        // Captures whether the plain EBP alert actually reached this user's
+        // Telegram this cycle — T2's S1 alert (below) fires only when this
+        // is false, so T2 doesn't send a redundant notification for the
+        // same EBP event the user already got via the plain alert. Checking
+        // user_ebp_configs.enabled here would be tautological: handleEBPCron(tf)
+        // itself only ever processes users who already have that config
+        // enabled for this exact tf (see the function's own driving query).
+        let ebpAlertSentThisCycle = false;
 
         if (!(alertMode === 'aligned' && !trendAligned)) {
           const isDup = await isDuplicateAlert(env.DB, row.user_id, symbol, tf, ebp.direction, 'ebp');
@@ -1045,6 +1087,7 @@ async function handleEBPCron(tf, env, debugLog = null) {
             });
 
             await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, msg);
+            ebpAlertSentThisCycle = true;
 
             await env.DB.prepare(`
               INSERT INTO alert_history
@@ -1057,14 +1100,11 @@ async function handleEBPCron(tf, env, debugLog = null) {
           }
         }
 
-        // T1/T2/T3 Step 1, all triggered by this same EBP event. Runs
+        // T1/T2 Step 1, both triggered by this same EBP event. Runs
         // independently of the plain EBP alert's alignment gate above —
         // each template's own bias_gate column decides whether ITS chain
         // requires HTF-bias alignment (default: yes).
-        // T3's Signal ID is assigned here and carried through Steps 2/3 via
-        // chain_state.step1_signal_id. T1/T2 don't get a Signal ID until
-        // their chain actually completes (Step 2, in sweep-cron.js).
-        for (const templateId of ['t1', 't2', 't3']) {
+        for (const templateId of ['t1', 't2']) {
           const tmpl = await env.DB.prepare(
             `SELECT * FROM user_templates WHERE user_id=? AND asset_id=? AND template=? AND enabled=1 AND htf=?`
           ).bind(row.user_id, row.asset_id, templateId, tf).first();
@@ -1073,41 +1113,134 @@ async function handleEBPCron(tf, env, debugLog = null) {
           const biasGateEnabled = tmpl.bias_gate !== 0; // default 1 = enabled
           if (biasGateEnabled && !trendAligned) continue;
 
-          if (templateId === 't3') {
-            const t3SignalId = await generateSignalId(env.DB, 'T3', symbol);
-            await initiateT3Chain(
-              env.DB, row.user_id, row.asset_id, symbol,
-              ebp.direction, tf, tmpl.ltf, tmpl.window_mins, t3SignalId
-            );
+          if (templateId === 't1') {
+            // T1: 4H EBP → FVG in OTE zone → body close beyond FVG (CISD proxy)
+            // Arms silently. Single alert fires at CISD confirmation only.
+            const htfIntervalMsT1 = TF_INTERVAL_MS[tf] ?? 0;
+            const t1Candle = candles[0]; // most recent closed candle = the EBP candle
+            const t1High = t1Candle.high;
+            const t1Low = t1Candle.low;
+            const t1Range = t1High - t1Low;
 
-            const t3FiredAt = new Date().toISOString();
-            const t3Msg = formatT3Alert(
-              symbol, tf, tmpl.ltf, ebp.direction,
-              deriveSession(t3FiredAt), ebp.closedLevel ?? null,
-              t3SignalId, 1
-            );
-            await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, t3Msg);
-          } else if (templateId === 't1') {
+            // OTE zone: 0.5–0.768 retracement of EBP candle high to low (bullish)
+            // Bearish mirror: premium zone above 0.5
+            let t1OteTop, t1OteBottom;
+            if (ebp.direction === 'bullish') {
+              t1OteTop    = t1High - t1Range * 0.5;    // 50% level
+              t1OteBottom = t1High - t1Range * 0.768;  // 76.8% level
+            } else {
+              t1OteBottom = t1Low + t1Range * 0.5;
+              t1OteTop    = t1Low + t1Range * 0.768;
+            }
+
             await insertChain(env.DB, {
-              templateType: 'T1', userId: row.user_id, assetId: row.asset_id, symbol,
-              htf: tf, ltf: tmpl.ltf, direction: ebp.direction, state: 'awaiting_fvg_entry',
-              expiresAt: endOfUTCMonthISO(),
+              templateType: 'T1',
+              userId: row.user_id,
+              assetId: row.asset_id,
+              symbol,
+              htf: tf,
+              ltf: tmpl.ltf,
+              direction: ebp.direction,
+              state: 'awaiting_cisd',
+              expiresAt: endOfUTCWeekISO(),
+              htfHigh: t1High,
+              htfLow: t1Low,
+              htfCandleOpenTime: new Date(t1Candle.time).toISOString(),
+              htfCandleCloseTime: new Date(t1Candle.time + htfIntervalMsT1).toISOString(),
+              oteTop: t1OteTop,
+              oteBottom: t1OteBottom,
+              zoneType: 'ote',
             });
           } else if (templateId === 't2') {
-            const htfIntervalMs = TF_INTERVAL_MS[tf] ?? 0;
+            // T2: 4H EBP → zone entry → optional sweep → CISD or MSS.
+            // Signal ID born at S1 (EBP fire). S1 alert sent only if the
+            // plain EBP alert did NOT reach this user this cycle
+            // (ebpAlertSentThisCycle, captured above). Arms with
+            // state='awaiting_zone_entry'.
+            const htfIntervalMsT2 = TF_INTERVAL_MS[tf] ?? 0;
+            const t2Candle = candles[0];
+            const t2High = t2Candle.high;
+            const t2Low = t2Candle.low;
+            const t2Range = t2High - t2Low;
+
+            // Toggles from the user_templates row (migration 016 columns).
+            const oteEnabled    = tmpl.ote_enabled    ?? 1;
+            const sweepRequired = tmpl.sweep_required ?? 0;
+            const triggerType   = tmpl.trigger_type   ?? 'cisd';
+
+            // Compute zone boundaries
+            let t2ZoneTop, t2ZoneBottom, t2ZoneType;
+            if (oteEnabled) {
+              // OTE zone: 0.5–0.768 retracement
+              if (ebp.direction === 'bullish') {
+                t2ZoneTop    = t2High - t2Range * 0.5;
+                t2ZoneBottom = t2High - t2Range * 0.768;
+              } else {
+                t2ZoneBottom = t2Low + t2Range * 0.5;
+                t2ZoneTop    = t2Low + t2Range * 0.768;
+              }
+              t2ZoneType = 'ote';
+            } else {
+              // Discount (bull) / Premium (bear) — below/above 0.5
+              if (ebp.direction === 'bullish') {
+                t2ZoneTop    = t2High - t2Range * 0.5;
+                t2ZoneBottom = t2Low;
+                t2ZoneType   = 'discount';
+              } else {
+                t2ZoneBottom = t2Low + t2Range * 0.5;
+                t2ZoneTop    = t2High;
+                t2ZoneType   = 'premium';
+              }
+            }
+
+            // Generate signal ID at S1
+            const t2SignalId = await generateSignalId(env.DB, 'T2', symbol);
+
+            // S1 fires only if the plain EBP alert didn't already notify
+            // this user this cycle.
+            const sendS1 = !ebpAlertSentThisCycle;
+
             await insertChain(env.DB, {
-              templateType: 'T2', userId: row.user_id, assetId: row.asset_id, symbol,
-              htf: tf, ltf: tmpl.ltf, direction: ebp.direction, state: 'awaiting_retracement',
-              expiresAt: endOfUTCMonthISO(),
-              htfCandle: {
-                open: candles[0].open, close: candles[0].close,
-                openTime: new Date(candles[0].time).toISOString(),
-                // closeTime approximated as open + one HTF interval — the
-                // cache only stores the candle's open timestamp, but the
-                // Step-2 retracement-window check needs a real close bound.
-                closeTime: new Date(candles[0].time + htfIntervalMs).toISOString(),
-              },
+              templateType: 'T2',
+              userId: row.user_id,
+              assetId: row.asset_id,
+              symbol,
+              htf: tf,
+              ltf: tmpl.ltf,
+              direction: ebp.direction,
+              state: 'awaiting_zone_entry',
+              expiresAt: endOfUTCWeekISO(),
+              signalId: t2SignalId,
+              step: 1,
+              htfHigh: t2High,
+              htfLow: t2Low,
+              htfCandleOpenTime: new Date(t2Candle.time).toISOString(),
+              htfCandleCloseTime: new Date(t2Candle.time + htfIntervalMsT2).toISOString(),
+              oteTop: t2ZoneTop,
+              oteBottom: t2ZoneBottom,
+              zoneType: t2ZoneType,
+              oteEnabled,
+              sweepRequired,
+              triggerType,
+              s1Sent: sendS1,
             });
+
+            // tg was already fetched, unconditionally, earlier in this
+            // per-user loop — no need to re-query user_telegram here.
+            if (sendS1) {
+              const s1Text = formatT2S1Alert({
+                symbol,
+                htf: tf,
+                ltf: tmpl.ltf,
+                direction: ebp.direction,
+                zoneTop: t2ZoneTop,
+                zoneBottom: t2ZoneBottom,
+                zoneType: t2ZoneType,
+                triggerType,
+                signalId: t2SignalId,
+              });
+              await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, s1Text);
+            }
           }
         }
       }
@@ -1117,6 +1250,126 @@ async function handleEBPCron(tf, env, debugLog = null) {
       const msg = `Error ${symbol} ${tf}: ${err.message}`;
       console.error(msg);
       if (debugLog) debugLog.push(`[ERROR] ${msg}`);
+    }
+  }
+
+  // T3: Daily candle → 50–75% zone FVG → CISD or MSS. Independent of
+  // user_ebp_configs/EBP detection entirely — driven directly by
+  // user_templates, same pattern T4 uses in sweep-cron.js, since T3's own
+  // trigger (previous day's TTrades closure bias) has no EBP dependency.
+  if (tf === 'D') {
+    const { results: t3Templates } = await env.DB.prepare(`
+      SELECT ut.*, ua.symbol, ua.asset_type, u.id as user_id
+      FROM user_templates ut
+      JOIN user_assets ua ON ut.asset_id = ua.id
+      JOIN users u ON ut.user_id = u.id
+      WHERE ut.template = 't3'
+      AND ut.enabled = 1
+      AND ut.htf = 'D'
+      AND u.active = 1
+      AND ua.asset_type != 'nse'
+    `).all();
+
+    const dailyCandleCache = new Map();
+
+    for (const tmpl of t3Templates ?? []) {
+      try {
+        if (!dailyCandleCache.has(tmpl.symbol)) {
+          dailyCandleCache.set(tmpl.symbol, await getDailyCandlesFromCache(tmpl.symbol, env));
+        }
+        const dailyCandles = dailyCandleCache.get(tmpl.symbol);
+        if (!dailyCandles || dailyCandles.length < 2) continue;
+
+        // Previous day candle = the daily bar that just closed
+        // (dailyCandles[0], newest-first) — same bar0/bar1 convention
+        // detectEBP() uses for every other timeframe.
+        const prevCandle  = dailyCandles[0];
+        const priorCandle = dailyCandles[1];
+        const prevHigh = prevCandle.high;
+        const prevLow  = prevCandle.low;
+
+        const biasResult = calcTTradesBias({ bar1: prevCandle, bar2: priorCandle });
+        const bias = biasResult.bias;
+        if (bias === 'neutral') continue;
+
+        const range = prevHigh - prevLow;
+        let zoneTop, zoneBottom, target;
+        if (bias === 'bullish') {
+          zoneTop    = prevHigh - range * 0.50;
+          zoneBottom = prevHigh - range * 0.75;
+          target     = prevHigh;
+        } else {
+          zoneBottom = prevLow + range * 0.50;
+          zoneTop    = prevLow + range * 0.75;
+          target     = prevLow;
+        }
+
+        const triggerType = tmpl.trigger_type ?? 'cisd';
+
+        // Idempotent — cheap to run unconditionally. Must run before
+        // generateSignalId(), not after insertChain(): generateSignalId()
+        // throws on a missing counter row (destructures null), so seeding
+        // after the fact is too late for the very first T3 arm.
+        await env.DB.prepare(
+          `INSERT OR IGNORE INTO signal_counters (template, series, count) VALUES ('T3', 'A', 0)`
+        ).run();
+        const t3SignalId = await generateSignalId(env.DB, 'T3', tmpl.symbol);
+
+        await insertChain(env.DB, {
+          templateType: 'T3',
+          userId: tmpl.user_id,
+          assetId: tmpl.asset_id,
+          symbol: tmpl.symbol,
+          htf: 'D',
+          ltf: tmpl.ltf,
+          direction: bias,
+          state: 'awaiting_time_gate',
+          expiresAt: endOfUTCWeekISO(),
+          signalId: t3SignalId,
+          step: 1,
+          htfHigh: prevHigh,
+          htfLow: prevLow,
+          oteTop: zoneTop,
+          oteBottom: zoneBottom,
+          zoneType: 'fifty_seventy_five',
+          triggerType,
+          s1Sent: true,
+        });
+
+        const tg = await env.DB.prepare(
+          'SELECT chat_id FROM user_telegram WHERE user_id = ? AND verified = 1'
+        ).bind(tmpl.user_id).first();
+        if (tg?.chat_id) {
+          const s1Text = formatT3S1Alert({
+            symbol: tmpl.symbol,
+            ltf: tmpl.ltf,
+            direction: bias,
+            zoneTop, zoneBottom,
+            target,
+            triggerType,
+            signalId: t3SignalId,
+          });
+          await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, s1Text);
+        }
+
+        // trend_bias: T3 has no separate live bias comparison at arm
+        // time (unlike T1/T2) — bias itself is both the direction and
+        // the triggering condition, so the same value goes in both columns.
+        await env.DB.prepare(`
+          INSERT INTO alert_history
+          (id, user_id, symbol, timeframe, direction, trend_bias, candle_time, fired_at, alert_type)
+          VALUES (?,?,?,?,?,?,?,?,'t3')
+        `).bind(
+          crypto.randomUUID(), tmpl.user_id, tmpl.symbol, 'D',
+          bias, bias, prevCandle.time, new Date().toISOString()
+        ).run();
+
+        log(`[${tmpl.symbol}] T3 chain armed (${bias})`);
+      } catch (err) {
+        const msg = `T3 init error ${tmpl.symbol}: ${err.message}`;
+        console.error(msg);
+        if (debugLog) debugLog.push(`[ERROR] ${msg}`);
+      }
     }
   }
 
