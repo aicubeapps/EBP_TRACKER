@@ -2,8 +2,9 @@ import { useState, useEffect } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import api from '../lib/api';
 import PriceFeedPanel from '../components/PriceFeedPanel';
+import SmaCloudAdminPanel from '../components/SmaCloudAdminPanel';
 
-const TABS = ['Users', 'API Keys', 'User Limits', 'Price Feed'];
+const TABS = ['SMA Cloud', 'API Keys', 'Users', 'Price Feed'];
 const ALL_TFS      = ['M5', 'M15', 'M30', '1H', '4H', 'D', 'W'];
 const ALL_NSE_TFS  = ['M1', 'M5', 'M15', 'M30', '1H', 'D'];
 
@@ -191,7 +192,9 @@ export default function Admin() {
         ))}
       </div>
 
-      {tab === 0 && (
+      {tab === 0 && <SmaCloudAdminPanel />}
+
+      {tab === 2 && (
         <div>
           {users.length === 0 ? (
             <div className="card" style={{ textAlign: 'center', color: 'var(--muted)', padding: 24 }}>
@@ -263,9 +266,19 @@ export default function Admin() {
                     {/* Section B — slot limit control */}
                     <div className="section-heading">Slot Limit</div>
                     <div className="config-row">
-                      <span className="text-muted" style={{ fontSize: 11 }}>{u.asset_limit ?? 5} slots</span>
-                      <button className="add-link" onClick={() => handleUpdateLimit(u.id, (u.asset_limit ?? 5) + 3)}>
-                        +3 Slots
+                      <span className="text-muted" style={{ fontSize: 11 }}>Asset Limit</span>
+                      <input
+                        className="select-sm"
+                        type="number"
+                        min="1"
+                        max="50"
+                        style={{ width: 60 }}
+                        value={editingLimit[u.id] ?? u.asset_limit ?? 5}
+                        onChange={e => setEditingLimit(p => ({ ...p, [u.id]: e.target.value }))}
+                      />
+                      <button className="add-link"
+                        onClick={() => handleUpdateLimit(u.id, editingLimit[u.id] ?? u.asset_limit ?? 5)}>
+                        Save
                       </button>
                     </div>
 
@@ -411,7 +424,7 @@ export default function Admin() {
 
               <div className="divider" />
               <div className="section-heading">Add New Key</div>
-              <div className="config-row">
+              <div className="config-row" style={{ flexWrap: 'wrap' }}>
                 <select className="select-sm" value={newKey.source}
                   onChange={e => setNewKey(p => ({ ...p, source: e.target.value }))}>
                   <option value="twelvedata">Twelve Data</option>
@@ -473,40 +486,6 @@ export default function Admin() {
               })()}
             </div>
           </div>
-        </div>
-      )}
-
-      {tab === 2 && (
-        <div>
-          <div className="section-heading">User Asset Limits</div>
-          {users.length === 0 ? (
-            <div className="card" style={{ textAlign: 'center', color: 'var(--muted)', padding: 24 }}>No users yet</div>
-          ) : users.map(u => (
-            <div key={u.id} className="card">
-              <div className="card-header">
-                <span className="card-title">{u.name ?? u.email}</span>
-                <span className="text-muted" style={{ fontSize: 11 }}>{u.asset_count ?? 0} assets used</span>
-              </div>
-              <div style={{ fontSize: 12, marginBottom: 'var(--sp-sm)' }}>
-                <span className="text-muted">Email:</span> <span className="text-mono">{u.email}</span>
-              </div>
-              <div className="config-row" style={{ marginBottom: 0 }}>
-                <input
-                  className="select-sm"
-                  type="number"
-                  min="1"
-                  max="50"
-                  style={{ width: 60 }}
-                  value={editingLimit[u.id] ?? u.asset_limit ?? 5}
-                  onChange={e => setEditingLimit(p => ({ ...p, [u.id]: e.target.value }))}
-                />
-                <button className="add-link"
-                  onClick={() => handleUpdateLimit(u.id, editingLimit[u.id] ?? u.asset_limit ?? 5)}>
-                  Save
-                </button>
-              </div>
-            </div>
-          ))}
         </div>
       )}
 
