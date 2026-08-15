@@ -342,7 +342,7 @@ tr:hover td { background: var(--accent-dim); }
 <tr><th>Table</th><th>Key Columns</th><th>Notes</th></tr>
 <tr><td><code>user_ebp_configs</code></td><td><code>id</code>, <code>user_id</code>, <code>asset_id</code> INT, <code>timeframe</code> TEXT, <code>alert_mode</code> TEXT ('aligned'|'all'), <code>enabled</code> INT DEFAULT 1, <code>htf_override</code> TEXT NULL</td><td>One row per user×asset×TF. <code>htf_override</code> added migration 010.</td></tr>
 <tr><td><code>user_sweep_configs</code></td><td>Same shape as <code>user_ebp_configs</code> + <code>htf_override</code></td><td>Sweep-specific; same migration 010 addition.</td></tr>
-<tr><td><code>user_templates</code></td><td><code>id</code>, <code>user_id</code>, <code>asset_id</code>, <code>template</code> TEXT ('T1'|'T2'|'T3'|'T4'), <code>htf</code> TEXT, <code>ltf</code> TEXT, <code>enabled</code> INT, <code>window_mins</code> INT, <code>fvg_rule</code> TEXT ('50_percent'|'any_touch'|'full_fill'), <code>step3_enabled</code> INT DEFAULT 0</td><td><code>step3_enabled</code> gates MSS confirmation for T3. Default POST body: <code>{template, enabled:1, htf:'4H', ltf:'M15', window_mins:60}</code>.</td></tr>
+<tr><td><code>user_templates</code></td><td><code>id</code>, <code>user_id</code>, <code>asset_id</code>, <code>template</code> TEXT ('t1'|'t2'|'t3'|'t4'), <code>htf</code> TEXT, <code>ltf</code> TEXT, <code>enabled</code> INT, <code>window_mins</code> INT, <code>fvg_rule</code> TEXT, <code>step3_enabled</code> INT DEFAULT 0, <code>ote_enabled</code> INT DEFAULT 1, <code>sweep_required</code> INT DEFAULT 0, <code>trigger_type</code> TEXT DEFAULT 'cisd', <code>mss_tf</code> TEXT DEFAULT '1H', <code>bias_mode</code> TEXT DEFAULT 'auto', <code>manual_bias</code> TEXT DEFAULT 'bullish'</td><td>6 columns added migration 019: <code>ote_enabled</code>, <code>sweep_required</code>, <code>trigger_type</code> (T2/T3 toggle), <code>mss_tf</code> (T4: '1H'|'M30'), <code>bias_mode</code> ('auto'|'manual'), <code>manual_bias</code>. Old T3 template rows deleted migration 018.</td></tr>
 <tr><td><code>forex_indicator_configs</code></td><td><code>id</code>, <code>user_id</code>, <code>asset_id</code>, <code>symbol</code>, <code>timeframe</code>, <code>indicator</code> TEXT ('sma'), <code>enabled</code> INT, <code>htf_timeframe</code> TEXT, <code>bias_mode</code> TEXT, <code>alert_mode</code> TEXT</td><td>Created by migration_forex_sma.sql.</td></tr>
 <tr><td><code>nse_indicator_configs</code></td><td><code>id</code>, <code>user_id</code>, <code>asset_id</code>, <code>symbol</code>, <code>timeframe</code>, <code>indicator</code> TEXT ('tdi'|'sma'), <code>enabled</code> INT, <code>confirmation_mode</code> TEXT, <code>bias_mode</code> TEXT, <code>htf_timeframe</code> TEXT, <code>day_filter</code> TEXT NULL</td><td><code>day_filter</code> is unused since SMA Cloud corrective patch (dead column).</td></tr>
 <tr><td><code>user_indicator_settings</code></td><td><code>user_id</code> TEXT PK, <code>sma_forex_hours</code> TEXT</td><td><code>sma_forex_hours</code> is never read by any worker (dead column).</td></tr>
@@ -364,7 +364,21 @@ tr:hover td { background: var(--accent-dim); }
 <div class="table-wrap"><table>
 <tr><th>Table</th><th>Key Columns</th><th>Notes</th></tr>
 <tr><td><code>signals</code></td><td><code>id</code> TEXT PK, <code>symbol</code>, <code>tf</code>, <code>direction</code>, <code>signal_type</code>, <code>candle_time</code> INT, <code>fired_at</code> TEXT, <code>swept_level</code> REAL, <code>closed_level</code> REAL, <code>expires_at</code> TEXT NULL, <code>price_at_signal</code> REAL, <code>htf_bias</code> TEXT, <code>session</code> TEXT, <code>htf_close</code> REAL</td><td>ID format per <code>generateEbpSignalId</code>. Expired EBP signals deleted daily at D-TF cron run.</td></tr>
-<tr><td><code>signal_counters</code></td><td><code>id</code> INT PK, <code>template</code> TEXT, <code>series</code> TEXT ('A'–'Z'), <code>count</code> INT DEFAULT 0</td><td>Seeds: NSE, EBP-4H, EBP-1D, EBP-1W (mig 008); EBP-M15, EBP-1H (mig 011); T1, T2, T3, T4 (migration_phase1_to_3.sql). Format: <code>${template}-${normSymbol}-${series}${count.toString().padStart(3,'0')}</code>.</td></tr>
+<tr><td><code>signal_counters</code></td><td><code>id</code> INT PK, <code>template</code> TEXT, <code>series</code> TEXT ('A'–'Z'), <code>count</code> INT DEFAULT 0</td><td>Seeds (via migration files): NSE, EBP-4H, EBP-1D, EBP-1W (mig 008); EBP-M15, EBP-1H (mig 011); T1, T2, T4 (migration_phase1_to_3.sql). T3 self-seeds inline via <code>INSERT OR IGNORE INTO signal_counters VALUES ('T3','A',0)</code> on first arm. T3 counter row deleted migration 018, re-seeded on first live T3 arm. Format: <code>${template}-${normSymbol}-${series}${count.toString().padStart(3,'0')}</code>.</td></tr>
+<tr>
+  <td><code>sma_cloud_config</code></td>
+  <td><code>id</code> INT PK, <code>fast_period</code> INT DEFAULT 1,
+  <code>slow_period</code> INT DEFAULT 9,
+  <code>separation_threshold</code> REAL DEFAULT 0.15,
+  <code>velocity_threshold</code> REAL DEFAULT 0.03,
+  <code>wick_penetration</code> REAL DEFAULT 0.10,
+  <code>updated_at</code> TEXT</td>
+  <td>Singleton row (id=1). Created migration 016. Read by
+  <code>loadSmaCloudConfig(db)</code> at top of
+  <code>handleForexSmaCron()</code>. Written by
+  <code>PATCH /admin/sma-config</code>. Fallback to hardcoded
+  defaults if row missing.</td>
+</tr>
 <tr><td><code>alert_history</code></td><td><code>id</code> INT PK, <code>user_id</code>, <code>symbol</code>, <code>tf</code>, <code>direction</code>, <code>alert_type</code>, <code>signal_id</code>, <code>fired_at</code> TEXT</td><td>Migration 013 converted <code>fired_at</code> from INTEGER→TEXT using <code>strftime('%Y-%m-%dT%H:%M:%fZ', fired_at/1000, 'unixepoch')</code>. Dedup uses TEXT comparison.</td></tr>
 <tr><td><code>bias_cache</code></td><td><code>id</code>, <code>symbol</code> TEXT, <code>tf</code> TEXT, <code>bias</code> TEXT, <code>updated_at</code> TEXT</td><td>Populated by EBP cron (HTF candle TTradesBias). Stale if not updated within 2× TF interval.</td></tr>
 </table></div>
@@ -376,7 +390,7 @@ tr:hover td { background: var(--accent-dim); }
 <tr><td><code>nse_fvg_zones</code></td><td>Same schema as <code>fvg_zones</code></td><td>NSE-specific FVG store.</td></tr>
 <tr><td><code>swing_states</code></td><td><code>id</code>, <code>symbol</code>, <code>tf</code>, <code>run_dir</code> TEXT, <code>run_candle_count</code> INT, <code>pending_swing_high</code> REAL, <code>pending_swing_low</code> REAL, <code>last_confirmed_swing_high</code> REAL, <code>last_confirmed_swing_low</code> REAL, <code>updated_at</code> TEXT</td><td>INSERT OR REPLACE. MSS detection requires <code>run_candle_count≥3</code>.</td></tr>
 <tr><td><code>nse_swing_states</code></td><td>Same schema as <code>swing_states</code></td><td>NSE-specific swing state.</td></tr>
-<tr><td><code>chain_state</code></td><td><code>id</code> INT PK, <code>user_id</code>, <code>asset_id</code>, <code>symbol</code>, <code>direction</code>, <code>template_type</code> TEXT ('T1'|'T2'|'T3'|'T4'), <code>htf</code> TEXT, <code>ltf</code> TEXT, <code>state</code> TEXT, <code>step1_signal_id</code>, <code>step2_signal_id</code>, <code>fvg_id</code>, <code>htf_candle_open</code> REAL, <code>htf_candle_close</code> REAL, <code>htf_candle_open_time</code> INT, <code>htf_candle_close_time</code> INT, <code>expires_at</code> INT (epoch ms), <code>created_at</code> TEXT</td><td>Cleaned by <code>cleanupExpiredChains</code> in sweep-worker. <code>step2_signal_id</code> never populated for T1/T2/T4 (bug).</td></tr>
+<tr><td><code>chain_state</code></td><td>45 columns total (19 original + 26 added migrations 016–017 — migration 016 alone adds 25, migration 017 adds 1 more; verified directly against migration file <code>ALTER TABLE</code> statement counts). <strong>Original 19:</strong> <code>id</code>, <code>user_id</code>, <code>asset_id</code>, <code>symbol</code>, <code>direction</code>, <code>template_type</code> TEXT ('T1'|'T2'|'T3'|'T4'), <code>htf</code>, <code>ltf</code>, <code>state</code> TEXT, <code>step1_signal_id</code>, <code>step2_signal_id</code>, <code>fvg_id</code>, <code>htf_candle_open</code> REAL, <code>htf_candle_close</code> REAL, <code>htf_candle_open_time</code> TEXT ISO, <code>htf_candle_close_time</code> TEXT ISO, <code>expires_at</code> TEXT ISO, <code>created_at</code> TEXT. <strong>Migration 016 additions (cid 19–43):</strong> <code>signal_id</code>, <code>step</code>, <code>htf_high</code>, <code>htf_low</code>, <code>ote_top</code>, <code>ote_bottom</code>, <code>zone_type</code>, <code>ote_enabled</code>, <code>sweep_required</code>, <code>trigger_type</code>, <code>cisd_level</code>, <code>pullback_run_high</code>, <code>pullback_run_low</code>, <code>sweep_signal_id</code>, <code>zone_entry_price</code>, <code>zone_entry_time</code>, <code>key_level_fvg_id</code>, <code>mss_tf</code>, <code>mss_run_high</code>, <code>mss_run_low</code>, <code>daily_bias</code>, <code>bias_mode</code>, <code>target_1</code>, <code>target_2</code>, <code>hard_kill_level</code>. <strong>Migration 017:</strong> <code>s1_sent</code> INT DEFAULT 0.</td><td>Cleaned by <code>cleanupExpiredChains</code> in sweep-worker. <code>expires_at</code> is TEXT ISO (not epoch ms — prior doc was stale on this). <code>htf_candle_open_time/close_time</code> are TEXT ISO strings (not INT). <code>signal_id</code> born at chain initiation; <code>step</code> increments at each state transition. <code>s1_sent=1</code> when T2 S1 alert was sent (used for suffix computation in sweep-cron).</td></tr>
 </table></div>
 
 <h3>Indicator State Tables</h3>
@@ -458,7 +472,7 @@ expires_at = formed_at + 14 * 24 * 60 * 60 * 1000   (14-day TTL)
 <tr><td><code>'any_touch'</code></td><td><code>bar.close &lt;= fvgRow.top</code></td><td><code>bar.close &gt;= fvgRow.bottom</code></td></tr>
 <tr><td><code>'full_fill'</code></td><td><code>bar.close &lt; fvgRow.bottom</code></td><td><code>bar.close &gt; fvgRow.top</code></td></tr>
 </table></div>
-<p><code>isPriceInFVG(price, fvgRow)</code>: <code>price &gt;= fvgRow.bottom &amp;&amp; price &lt;= fvgRow.top</code></p>
+<p><code>isPriceInFVG(price, fvgRow)</code>: <code>price &gt;= fvgRow.bottom &amp;&amp; price &lt;= fvgRow.top</code>. <span class="pill pill-bear">DEAD CODE 2026-08-15</span> — zero callers in sweep-cron.js after the T1–T4 rewrite; each template now inlines its own wick/zone check (see Section C).</p>
 
 <h4>FVG Zone Processing — <code>processFVGZones(db, table, symbol, tf, candlesOldestFirst, latestBar)</code></h4>
 <ol>
@@ -564,76 +578,88 @@ Format: {template}-{normSymbol}-{series}{countStr}
 ═══════════════════════════════════════════════════════ -->
 <section id="sec-c">
 <h2><span class="sec-badge">C</span>T1–T4 Chain State Machines</h2>
-<p>Chain state lives in the <code>chain_state</code> table. Initiation happens in <code>ebp-worker.js</code>; advancement happens in <code>sweep-cron.js</code> (<code>processTemplateChains</code>).</p>
+<p>Chain state lives in the <code>chain_state</code> table. All templates are forex only — NSE excluded. Old T3 (EBP→Sweep→MSS) retired 2026-08-15. New template lineup below.</p>
 
-<div class="grid-2">
-<div class="card">
-<h5>T1 — HTF EBP → LTF FVG Entry</h5>
-<ul>
-<li>Initiated by HTF EBP signal</li>
-<li>Initial state: <code>'awaiting_fvg_entry'</code></li>
-<li>Expiry: <code>endOfUTCMonthISO()</code></li>
-<li>HTF candle body <em>not</em> stored</li>
-<li>Completes when LTF FVG is active AND close is inside FVG</li>
-</ul>
-</div>
-<div class="card">
-<h5>T2 — HTF EBP → LTF Retracement FVG</h5>
-<ul>
-<li>Initiated by HTF EBP signal</li>
-<li>Initial state: <code>'awaiting_retracement'</code></li>
-<li>Stores <code>htf_candle_open</code>, <code>htf_candle_close</code>, <code>htf_candle_open_time</code>, <code>htf_candle_close_time</code></li>
-<li>Expiry: <code>endOfUTCMonthISO()</code></li>
-<li>FVG must form <em>within</em> HTF EBP candle time window AND <code>fvg.top &lt;= bodyTop &amp;&amp; fvg.bottom &gt;= bodyBottom</code></li>
-</ul>
-</div>
-<div class="card">
-<h5>T3 — HTF EBP → LTF Sweep → LTF MSS</h5>
-<ul>
-<li>Initiated by HTF EBP signal → <code>initiateT3Chain</code></li>
-<li>Initial state: <code>'awaiting_sweep'</code></li>
-<li>Expiry: <code>Date.now() + windowMins * 60 * 1000</code></li>
-<li>Step 2 (sweep): state→<code>'awaiting_mss'</code> via <code>advanceT3Chain</code></li>
-<li>Step 3 (MSS, if <code>step3_enabled=1</code>): state→<code>'complete'</code> via <code>completeT3Chain</code></li>
-<li>If <code>step3_enabled=0</code>: chain completes at Step 2 (sweep alone)</li>
-</ul>
-</div>
-<div class="card">
-<h5>T4 — LTF Sweep → LTF FVG Entry</h5>
-<ul>
-<li>Initiated by sweep detection in <code>processTemplateChains</code> (no HTF EBP required)</li>
-<li>Initial state: <code>'awaiting_fvg_entry'</code></li>
-<li>Stored with <code>htf=''</code></li>
-<li>Expiry: <code>endOfUTCMonthISO()</code></li>
-<li>Completes same as T1 via <code>checkFvgEntryChain</code></li>
-</ul>
-</div>
-</div>
-
-<h3>Chain Advancement Logic</h3>
-<h4><code>checkFvgEntryChain(env, chain, latestClose)</code></h4>
-<p>Applies to T1, T2, T4 (state <code>'awaiting_fvg_entry'</code> or <code>'awaiting_retracement'</code>):</p>
+<h3>Global CISD Definition (locked 2026-08-15)</h3>
+<p><strong>Bullish setup (bearish pullback):</strong></p>
 <ol>
-<li>Fetches all active FVGs for <code>chain.symbol</code>, <code>chain.ltf</code>, <code>chain.direction</code></li>
-<li>For T2: filters to FVGs where <code>formed_at ∈ [htf_candle_open_time, htf_candle_close_time]</code> AND <code>fvg.top &lt;= bodyTop &amp;&amp; fvg.bottom &gt;= bodyBottom</code></li>
-<li>Reads per-template <code>fvg_rule</code> from <code>user_templates</code></li>
-<li>Calls <code>checkFVGMitigation(latestBar, fvg, rule)</code> — if mitigated, skip</li>
-<li>Calls <code>isPriceInFVG(latestClose, fvg)</code> — returns matching FVG row or null</li>
+<li>Identify the most recent consecutive series of bearish candles (close &lt; open) in the pullback</li>
+<li>Within that series, find the candle with the <strong>highest high</strong></li>
+<li>CISD level = <strong>open of that candle</strong></li>
+<li>Confirmed when: bullish candle body closes above that level</li>
+<li>Run continues until CISD fires — single candles, SL hunts, bounces that fail to close above a bearish body do not end the run</li>
 </ol>
-<h4><code>completeFvgEntryChain(db, chainId, signalId, fvgId)</code></h4>
-<p>Sets <code>step2_signal_id</code> and <code>fvg_id</code> on the chain record.</p>
+<p><strong>Bearish setup:</strong> exact mirror — bullish series, lowest-low candle, its open, body closes below.</p>
+<p>Replaces: <code>run_start_time</code> candle open logic (old CISD) across all templates and SMA Cloud.</p>
 
-<h3>Alert Formatting</h3>
-<pre>
-T1 alert flow label: "HTF: {htf} EBP → LTF: {ltf} FVG Entry"
-T2 alert flow label: "HTF: {htf} EBP → LTF: {ltf} Retracement FVG"
-T4 alert flow label: "LTF: {ltf} Sweep → FVG Entry"
-T3 step2 complete (step3_enabled=0): uses formatT3Step2CompleteAlert
-T3 step3 complete: uses formatT3Step3CompleteAlert
-</pre>
+<h3>Global MSS Definition (locked 2026-08-15)</h3>
+<p><strong>Bullish setup:</strong></p>
+<ol>
+<li>MSS level = <strong>high of the entire pullback run</strong> (where bearish delivery originally began — macro run origin, not most recent internal swing)</li>
+<li>Confirmed when: bullish candle body closes above that level</li>
+</ol>
+<p><strong>Bearish setup:</strong> exact mirror — low of entire pullback run, body closes below.</p>
+<p>Replaces: <code>last_confirmed_swing_high/low</code> comparison (old MSS). Sequence is always CISD first, then MSS — never reversed.</p>
 
-<h3>Chain Cleanup</h3>
-<p><code>cleanupExpiredChains(db)</code> in sweep-worker deletes from <code>chain_state WHERE expires_at &lt; now</code>. <code>cleanupExpiredFVGs(db)</code> deletes from both <code>fvg_zones</code> and <code>nse_fvg_zones WHERE expires_at &lt; now</code>. Both run every sweep cron cycle.</p>
+<h3>T1 — 4H EBP → OTE FVG → CISD Entry</h3>
+<ul>
+<li>Arms silently on 4H EBP. Stores HTF candle high/low/open_time/close_time.</li>
+<li>OTE zone: 0.5–0.768 retracement of EBP candle high-to-low (bull). Bearish: mirrored.</li>
+<li>Qualifying FVG: <code>formed_at ∈ [htf_candle_open_time, htf_candle_close_time]</code> AND FVG sits within OTE zone.</li>
+<li>CISD proxy: <code>bar.close &gt; fvg.top</code> (bull) / <code>bar.close &lt; fvg.bottom</code> (bear) — body close beyond FVG.</li>
+<li>Single alert at CISD. Target = 4H EBP high (bull) / low (bear).</li>
+<li>Signal ID: <code>T1-{symbol}-{series}{count}</code> — generated at completion only.</li>
+<li>Expiry: end of UTC week (Friday 23:59 UTC).</li>
+<li>State: <code>awaiting_cisd</code> → <code>complete</code></li>
+</ul>
+
+<h3>T2 — 4H EBP → Zone → Optional Sweep → CISD or MSS</h3>
+<p>Replaces old T2 and old T3 entirely. Three user-configurable toggles.</p>
+<ul>
+<li>Arms on 4H EBP. Signal ID born at S1 (EBP fire).</li>
+<li>S1 alert: sent only if user does NOT have 4H EBP alert enabled (<code>s1_sent=1</code> when sent). Silent otherwise.</li>
+<li><strong>Toggle 1 — ote_enabled:</strong> ON = OTE zone (0.5–0.768); OFF = discount (bull, below 0.5) or premium (bear, above 0.5).</li>
+<li><strong>Toggle 2 — sweep_required:</strong> ON = sweep must occur after zone entry before trigger. OFF = go straight to trigger.</li>
+<li><strong>Toggle 3 — trigger_type:</strong> 'cisd' or 'mss' (mutually exclusive — not sequential).</li>
+<li>Zone entry: wick sufficient (low ≤ zone_top for bull).</li>
+<li>Hard kill: price exits zone before trigger fires → chain deleted immediately.</li>
+<li>Target: 4H EBP high (bull) / low (bear).</li>
+<li>Expiry: end of UTC week.</li>
+<li>States: <code>awaiting_zone_entry</code> → <code>awaiting_sweep</code> (if sweep ON) → <code>awaiting_trigger</code> → <code>complete</code></li>
+<li>Signal ID suffix progression: zone entry = base or /S2, sweep = /S2 or /S3, trigger = /S2–/S4 depending on s1_sent and sweep_required.</li>
+</ul>
+
+<h3>T3 — Daily Candle → 50–75% Zone FVG → CISD or MSS (Phase 1)</h3>
+<ul>
+<li>Arms on NY 17:00 daily close. Standalone block in <code>handleEBPCron(tf==='D')</code> — independent of EBP detection loop.</li>
+<li>Uses TTrades closure bias on previous day candle to determine direction. Neutral bias → skips.</li>
+<li>Zone: 50–75% retracement of previous day candle high-to-low.</li>
+<li>Key level: unmitigated 4H FVG in zone → fallback to unmitigated 1H FVG.</li>
+<li>Time gate: NY 23:00 must pass before trigger is valid.</li>
+<li>S1: silent (ID generated at arm). S2: price wicks FVG. S3: CISD or MSS fires.</li>
+<li>Target: previous day untapped high (bull) / low (bear).</li>
+<li>Expiry: end of UTC week.</li>
+<li>Phase 2 (Order Block support): deferred.</li>
+<li>States: <code>awaiting_time_gate</code> → <code>awaiting_key_level</code> → <code>awaiting_trigger</code> → <code>complete</code></li>
+</ul>
+
+<h3>T4 — Daily Bias → Intraday MSS → FVG → M15 CISD</h3>
+<ul>
+<li>Arms when intraday MSS fires on user-configured TF (1H or M30, stored in <code>mss_tf</code> column of <code>user_templates</code>).</li>
+<li>Daily bias gate (4 scenarios): see architecture report Section 17.</li>
+<li>MSS detected via <code>updateSwingState()</code> called directly — not a passive swing_states read.</li>
+<li>Premium/discount zone: above 50% of MSS run (bear) / below 50% (bull).</li>
+<li>FVG priority: 1H → M30 → M15 (first unmitigated found).</li>
+<li>Entry: M15 body close beyond FVG top/bottom (CISD proxy — same as T1).</li>
+<li>S1: MSS arm alert. S2: FVG entry + CISD alert with dual targets.</li>
+<li>Target 1: current day low (bear) / high (bull). Target 2: previous day low (bear) / high (bull).</li>
+<li>Hard kill: previous day low/high swept before S2 fires → chain deleted.</li>
+<li>Expiry: NY 17:00 same day.</li>
+<li>States: <code>awaiting_fvg_entry</code> → <code>complete</code></li>
+</ul>
+
+<h3>Chain Expiry</h3>
+<p><code>cleanupExpiredChains(db)</code> in sweep-worker deletes from <code>chain_state WHERE expires_at &lt; now</code> (TEXT ISO comparison). T1/T2/T3: end of UTC week. T4: NY 17:00 same day.</p>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════
@@ -644,18 +670,22 @@ T3 step3 complete: uses formatT3Step3CompleteAlert
 <p>Implemented in <code>compute-worker/src/index.js</code>. State stored in <code>forex_sma_state</code>. Only worker with native CF cron: <code>crons=["5 * * * *"]</code> (every hour at :05).</p>
 
 <h3>Thresholds</h3>
+<p><span class="pill pill-accent">DB-driven since 2026-08-15</span> Separation/velocity/wick-penetration thresholds and the SMA periods moved from hardcoded constants to the <code>sma_cloud_config</code> D1 table (migration 016, singleton row id=1). <code>loadSmaCloudConfig(db)</code> reads this row at the top of <code>handleForexSmaCron()</code>, falling back to the defaults below only on read error. <code>PATCH /admin/sma-config</code> (admin-worker) writes it; effective on the next compute-worker cron tick, no deploy needed.</p>
 <pre>
-FOREX_SMA_VALID_TFS           = ['M15','M30','1H','4H']
-FOREX_SMA_SEPARATION_THRESHOLD = 0.15  (× atr14)
-FOREX_SMA_VELOCITY_THRESHOLD   = 0.03  (× atr14)
-FOREX_SMA_WICK_PENETRATION     = 0.10  (× atr14, not used in current phase logic)
+FOREX_SMA_VALID_TFS           = ['M15','M30','1H','4H']   (still hardcoded)
 
-FOREX_SMA_WATCH_EXPIRY_MS = {
+sma_cloud_config.fast_period          = 1     (was hardcoded FOREX_SMA fast period)
+sma_cloud_config.slow_period          = 9     (was hardcoded FOREX_SMA slow period)
+sma_cloud_config.separation_threshold = 0.15  (× atr14) — was FOREX_SMA_SEPARATION_THRESHOLD
+sma_cloud_config.velocity_threshold   = 0.03  (× atr14) — was FOREX_SMA_VELOCITY_THRESHOLD
+sma_cloud_config.wick_penetration     = 0.10  (× atr14) — was FOREX_SMA_WICK_PENETRATION; now actively used in the CISD-watch arm branch (not dead, contrary to the pre-2026-08-15 doc)
+
+FOREX_SMA_WATCH_EXPIRY_MS = {           (kept hardcoded — not user-configurable)
   M15: 4h, M30: 4h,
   '1H': { '4H': 4h, D: 24h },
   '4H': 24h
 }
-FOREX_SMA_TYPE2_COOLDOWN_MS = (same shape)
+FOREX_SMA_TYPE2_COOLDOWN_MS = (same shape, kept hardcoded)
 </pre>
 
 <h3>Indicator Calculations</h3>
@@ -917,7 +947,7 @@ synthesiseDXYWeekly(db):
 ═══════════════════════════════════════════════════════ -->
 <section id="sec-h">
 <h2><span class="sec-badge">H</span>Watchdog Health Check</h2>
-<p>Implemented in <code>watchdog-worker/src/index.js</code> (948 lines). Health check triggered via POST <code>/health/watchdog-check</code> (X-Cron-Secret). Heartbeat at GET <code>/health</code>. As of 2026-08-14 split, <strong>breadth-fetch, daily-digest, and prune routes moved to <code>market-breath-worker</code></strong> (see Section P). Watchdog is now pure Twelve Data candle-fetch + health-check.</p>
+<p><span class="pill pill-accent">MOVED 2026-08-15</span> Health check logic now lives in <code>market-breath-worker/src/index.js</code> (1508 lines), not <code>watchdog-worker</code> (528 lines post-split, down from 948 — Telegram/health-check code stripped 2026-08-15). Health check triggered via POST <code>/health/watchdog-check</code> (X-Cron-Secret) on market-breath-worker. Watchdog's GET <code>/health</code> heartbeat and <code>watchdog-worker</code> itself are unaffected. As of the 2026-08-14 split, breadth-fetch/daily-digest/prune routes had already moved to <code>market-breath-worker</code> (see Section P); the health-check route joined them 2026-08-15 once <code>WATCHDOG_BOT_TOKEN</code> had already relocated there, leaving <code>watchdog-worker</code> pure Twelve Data candle-fetch only.</p>
 
 <h3>Stale Thresholds</h3>
 <pre>
@@ -928,7 +958,8 @@ STALE_65MIN = 65 × 60 × 1000
 STALE_2HR   = 2  × 60 × 60 × 1000
 </pre>
 
-<h3>Nine Health Checks — <code>handleWatchdogHealthCheck(env)</code></h3>
+<h3>11 Health Checks — <code>handleWatchdogHealthCheck(env)</code></h3>
+<p>Now defined in <code>market-breath-worker/src/index.js</code>, not <code>watchdog-worker</code> (moved 2026-08-15). Corrected from "Nine" — the table below has always had 11 rows (A, A2, B, EBP cron, Sweep cron, Breadth, SMA, NSE candle, NSE swing, NSE FVG, NSE SMA); the old heading undercounted even pre-2026-08-15.</p>
 <div class="table-wrap"><table>
 <tr><th>#</th><th>Check</th><th>Query</th><th>Threshold</th><th>Gated</th></tr>
 <tr><td>A</td><td>Candle cache freshness</td><td><code>candle_cache ORDER BY fetched_at DESC LIMIT 1</code></td><td>STALE_30MIN</td><td>Always</td></tr>
@@ -958,16 +989,16 @@ TF_STALE_MIN = { M15:30, M30:35, '1H':65, '4H':245 }
 <p>Digest fires at NY 17:00 if <code>nyHour===17 &amp;&amp; nyMinute&lt;15</code>, gated directly inside the <code>POST /cron/daily-digest</code> handler (cron-job.org's actual trigger), with a module-level <code>lastDigestNYDate</code> dedup guard against double-firing within the same NY calendar date. Outside the window the route returns 200 with <code>{skipped:true}</code>.</p>
 
 <h3>Logging — <code>logWatchdog(db, eventType, message)</code></h3>
-<p>INSERT INTO <code>watchdog_log</code>. For <code>eventType='error'</code> or <code>'warning'</code>: also calls <code>sendWatchdogAlert</code> via module-level <code>_watchdogAlertEnv</code> reference (set at start of <code>scheduled()</code> handler tick).</p>
+<p>INSERT <code>watchdog_log</code> only. Telegram send removed 2026-08-15 — <code>logWatchdog()</code> is now DB-only. <code>sendWatchdogAlert()</code> and <code>_watchdogAlertEnv</code> removed from watchdog-worker entirely.</p>
 
 <h3>Routes (post-2026-08-14 split)</h3>
 <pre>
 GET  /health                   — heartbeat (no auth)
-POST /health/watchdog-check    — X-Cron-Secret, runs 9 health checks
+POST /health/watchdog-check    — MOVED to market-breath-worker 2026-08-15.
 POST /cron/candle-fetch        — X-Cron-Secret, runs Twelve Data fetch for all 4 TFs
 </pre>
-<p><strong>Removed from watchdog (now in market-breath-worker):</strong> <code>POST /cron/breadth-fetch</code>, <code>POST /cron/daily-digest</code>, <code>POST /cron/prune</code>.</p>
-<p><strong>Secrets:</strong> ebp-watchdog has only <code>CRON_SECRET</code>. <code>WATCHDOG_BOT_TOKEN</code> and <code>WATCHDOG_ADMIN_CHAT_ID</code> are absent — see Section M design gap.</p>
+<p><strong>Removed from watchdog (now in market-breath-worker):</strong> <code>POST /cron/breadth-fetch</code>, <code>POST /cron/daily-digest</code>, <code>POST /cron/prune</code>, <code>POST /health/watchdog-check</code>.</p>
+<p><strong>Secrets:</strong> ebp-watchdog has only <code>CRON_SECRET</code>. <code>WATCHDOG_BOT_TOKEN</code> and <code>WATCHDOG_ADMIN_CHAT_ID</code> live in market-breath-worker only. Watchdog is Telegram-free by design (resolved 2026-08-15 — see Change 8).</p>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════
@@ -1181,12 +1212,18 @@ NSE_BASE   = VITE_NSE_WORKER_URL   || 'https://nse-tracker.aicube-apps.workers.d
 <tr><td><code>Assets.jsx</code></td><td>Asset list + add/delete</td><td>Imports <code>FOREX_SECTIONS</code>, <code>CRYPTO_PAIRS</code> from <code>../data/assetLists.js</code>. DXY has <code>asset_type='system'</code>. Limit banner: "Pay $30.00 to unlock more assets."</td></tr>
 <tr><td><code>AssetCard.jsx</code></td><td>Per-asset config card</td><td>9 parallel API fetches via <code>Promise.allSettled</code>. DXY (<code>asset_type='system'</code>) uses <code>showAiForexFeatures = !isNse</code>. NSE gets TDI+SMA panels. Forex gets Forex SMA Cloud panel.</td></tr>
 <tr><td><code>TemplateCard.jsx</code></td><td>T1/T2/T3/T4 template config</td><td>Default POST: <code>{template, enabled:1, htf:'4H', ltf:'M15', window_mins:60}</code>. HTF change resets LTF to highest valid option below new HTF.</td></tr>
-<tr><td><code>ChainProgressBar.jsx</code></td><td>Visualizes chain step progress</td><td><code>STATE_STEPS</code> maps chain.state to step count. <code>step2_signal_id</code> never populated for T1/T2/T4.</td></tr>
+<tr><td><code>ChainProgressBar.jsx</code></td><td>Visualizes chain step progress</td><td><code>STATE_STEPS</code> maps chain.state to step count. Rewritten 2026-08-15 for the new T2/T3 state machines — see Section N10 for current map. The old "<code>step2_signal_id</code> never populated for T1/T2/T4" note no longer applies — that referred to the retired chain implementation's completion function.</td></tr>
 <tr><td><code>PriceFeedPanel.jsx</code></td><td>Live WebSocket price feed</td><td>WebSocket: <code>wss://ws.twelvedata.com/v1/quotes/price</code>. Raw log cap 20 messages. No auto-reconnect. JPY=3dp, others=5dp.</td></tr>
 <tr><td><code>ExpiryBanner.jsx</code></td><td>Shows account expiry warning</td><td>Shown if <code>daysLeft &lt;= 7</code>. "Renew" navigates to <code>/upgrade</code> — route NOT defined in App.jsx (dead link).</td></tr>
 <tr><td><code>Alerts.jsx</code></td><td>Alert history browser</td><td>TYPE_TABS=['ALL','EBP','SWEEP','MSS','T3']. Direction filter: client-side only. XLSX export via <code>xlsx</code> library.</td></tr>
 <tr><td><code>Settings.jsx</code></td><td>Telegram setup, bias overrides</td><td>Bot name "@EbP_Tracker_bot". Verify polling every 3000ms.</td></tr>
-<tr><td><code>Admin.jsx</code></td><td>Admin panel</td><td>Upstox token: assumes 365-day expiry from added_at. DAILY_LIMIT=800. New key source options: 'twelvedata' or 'yahoo' (no 'upstox' option).</td></tr>
+<tr><td><code>Admin.jsx</code></td><td>Admin panel</td><td>Tabs (2026-08-15 reorder): <code>['SMA Cloud', 'API Keys', 'Users', 'Price Feed']</code> — was <code>['Users', 'API Keys', 'User Limits', 'Price Feed']</code>. 'User Limits' tab removed; asset-limit control merged inline into each user card in the Users tab (exact-value number input + Save, replacing the old +3 Slots button). Upstox token: assumes 365-day expiry from added_at. DAILY_LIMIT=800. New key source options: 'twelvedata' or 'yahoo' (no 'upstox' option).</td></tr>
+<tr><td><code>SmaCloudAdminPanel.jsx</code></td>
+<td>Admin SMA Cloud config panel</td>
+<td>Reads <code>GET /admin/sma-config</code> on mount.
+5 editable fields (fast_period, slow_period,
+separation_threshold, velocity_threshold, wick_penetration).
+PATCH on Save. Shows <code>updated_at</code> timestamp.</td></tr>
 <tr><td><code>MarketBreadthPage.jsx</code></td><td>8-currency breadth charts</td><td>recharts. CURRENCIES=['EUR','GBP','USD','JPY','CHF','CAD','AUD','NZD']. 60s poll intraday, 4h poll weekly. Three chart modes.</td></tr>
 </table></div>
 
@@ -1208,14 +1245,14 @@ NSE_BASE   = VITE_NSE_WORKER_URL   || 'https://nse-tracker.aicube-apps.workers.d
 <section id="sec-l">
 <h2><span class="sec-badge">L</span>Constants &amp; Configuration Reference</h2>
 
-<h3>Worker Architecture (7 workers as of 2026-08-14)</h3>
+<h3>Worker Architecture (7 workers, line counts as of 2026-08-15)</h3>
 <div class="table-wrap"><table>
 <tr><th>Worker Name</th><th>CF Worker Name</th><th>Main File</th><th>Lines</th><th>Cron Trigger</th></tr>
-<tr><td>worker</td><td>ebp-tracker-worker</td><td>src/ebp-worker.js</td><td>2351</td><td>cron-job.org HTTP</td></tr>
-<tr><td>sweep-worker</td><td>sweep-detector</td><td>src/sweep-cron.js</td><td>1156</td><td>cron-job.org HTTP (native commented out)</td></tr>
-<tr><td>watchdog-worker</td><td>ebp-watchdog</td><td>src/index.js</td><td>948</td><td>cron-job.org HTTP: candle-fetch every 15min, health-check every 2h. Secrets: CRON_SECRET only.</td></tr>
-<tr><td>market-breath-worker</td><td>market-breath</td><td>src/index.js</td><td>1118</td><td>cron-job.org HTTP only — no native CF scheduled() handler. Routes: /cron/breadth-fetch, /cron/daily-digest, /cron/prune. Secrets: CRON_SECRET + WATCHDOG_BOT_TOKEN + WATCHDOG_ADMIN_CHAT_ID.</td></tr>
-<tr><td>compute-worker</td><td>compute-worker</td><td>src/index.js</td><td>1167</td><td><strong>Native CF: <code>["5 * * * *"]</code></strong>. Secrets: CRON_SECRET + SHARED_BOT_TOKEN.</td></tr>
+<tr><td>worker</td><td>ebp-tracker-worker</td><td>src/ebp-worker.js</td><td>2648</td><td>cron-job.org HTTP</td></tr>
+<tr><td>sweep-worker</td><td>sweep-detector</td><td>src/sweep-cron.js</td><td>1924</td><td>cron-job.org HTTP (native commented out)</td></tr>
+<tr><td>watchdog-worker</td><td>ebp-watchdog</td><td>src/index.js</td><td>528</td><td>cron-job.org HTTP: candle-fetch every 15min only. health-check MOVED to market-breath-worker 2026-08-15. Secrets: CRON_SECRET only.</td></tr>
+<tr><td>market-breath-worker</td><td>market-breath</td><td>src/index.js</td><td>1508</td><td>cron-job.org HTTP only — no native CF scheduled() handler. Routes: /cron/breadth-fetch, /cron/daily-digest, /cron/prune, /health/watchdog-check (gained 2026-08-15). Secrets: CRON_SECRET + WATCHDOG_BOT_TOKEN + WATCHDOG_ADMIN_CHAT_ID.</td></tr>
+<tr><td>compute-worker</td><td>compute-worker</td><td>src/index.js</td><td>1206</td><td><strong>Native CF: <code>["5 * * * *"]</code></strong>. Secrets: CRON_SECRET + SHARED_BOT_TOKEN.</td></tr>
 <tr><td>nse-worker</td><td>nse-tracker</td><td>src/index.js</td><td>1757</td><td>cron-job.org HTTP</td></tr>
 <tr><td>admin-worker</td><td>admin-worker</td><td>src/index.js</td><td>377</td><td>None (HTTP only)</td></tr>
 </table></div>
@@ -1282,12 +1319,22 @@ CHUNK_SIZE = 7
 NY_4H_BOUNDARIES = [17, 21, 1, 5, 9, 13]
 </pre>
 
-<h3>SMA Cloud Thresholds</h3>
-<pre>
-Separation threshold: atr14 × 0.15
-Velocity threshold:   atr14 × 0.03
-Wick penetration:     atr14 × 0.10  (defined but unused in current logic)
-</pre>
+<h3>SMA Cloud Configuration</h3>
+<p>Parameters previously hardcoded are now stored in <code>sma_cloud_config</code> D1 table (singleton row id=1, created migration 016). <code>loadSmaCloudConfig(db)</code> reads this row at the top of <code>handleForexSmaCron()</code> with fallback to hardcoded defaults on error.</p>
+<div class="table-wrap"><table>
+<tr><th>Parameter</th><th>DB column</th><th>Default</th><th>Notes</th></tr>
+<tr><td>Fast SMA period</td><td><code>fast_period</code></td><td>1</td><td>Period-1 SMA = raw close</td></tr>
+<tr><td>Slow SMA period</td><td><code>slow_period</code></td><td>9</td>
+<td>Used in <code>computeSMA(values, smaConfig.slowPeriod)</code></td></tr>
+<tr><td>Separation threshold</td><td><code>separation_threshold</code></td>
+<td>0.15</td><td>Multiplied against ATR14</td></tr>
+<tr><td>Velocity threshold</td><td><code>velocity_threshold</code></td>
+<td>0.03</td><td>Multiplied against ATR14</td></tr>
+<tr><td>Wick penetration</td><td><code>wick_penetration</code></td>
+<td>0.10</td><td>Used in CISD-watch arm branch</td></tr>
+</table></div>
+<p><strong>Kept hardcoded:</strong> <code>FOREX_SMA_WATCH_EXPIRY_MS</code> and <code>FOREX_SMA_TYPE2_COOLDOWN_MS</code> (TF-keyed nested objects — not user-configurable).</p>
+<p><strong>Admin routes:</strong> <code>GET /admin/sma-config</code> and <code>PATCH /admin/sma-config</code> in admin-worker. PATCH validates periods as positive integers, thresholds within [0.01, 1.0]. Changes take effect on next compute-worker cron tick.</p>
 
 <h3>Chain Window Defaults (Frontend)</h3>
 <pre>
@@ -1314,6 +1361,10 @@ T3 window_mins range: 15–240
 <tr><td>sma_revamp</td><td>RENAME stack_mode→confirmation_mode; ADD CISD/MSS columns; DELETE all nse_sma_state rows</td></tr>
 <tr><td>014</td><td>DROP TABLE invite_tokens — invite token feature removed entirely 2026-08-14</td></tr>
 <tr><td>015</td><td>DROP TABLE sma_cloud_states — orphaned table never read or written post-SMA migration, dropped 2026-08-14</td></tr>
+<tr><td>016</td><td>ADD 25 columns to <code>chain_state</code> (signal_id, step, htf_high/low, ote_top/bottom, zone_type, ote_enabled, sweep_required, trigger_type, cisd_level, pullback_run_high/low, sweep_signal_id, zone_entry_price/time, key_level_fvg_id, mss_tf, mss_run_high/low, daily_bias, bias_mode, target_1/2, hard_kill_level); CREATE <code>sma_cloud_config</code> with seed row</td></tr>
+<tr><td>017</td><td>ADD <code>s1_sent INT DEFAULT 0</code> to <code>chain_state</code></td></tr>
+<tr><td>018</td><td>DELETE old T3 rows from <code>chain_state</code>, <code>user_templates</code> (template='t3'), <code>signal_counters</code> (template='T3')</td></tr>
+<tr><td>019</td><td>ADD 6 columns to <code>user_templates</code>: <code>ote_enabled</code>, <code>sweep_required</code>, <code>trigger_type</code>, <code>mss_tf</code>, <code>bias_mode</code>, <code>manual_bias</code></td></tr>
 </table></div>
 </section>
 
@@ -1327,10 +1378,9 @@ T3 window_mins range: 15–240
 <div class="callout dead"><strong>Dead Column: user_indicator_settings.sma_forex_hours</strong><br>Column exists and is written by admin-worker but is never read by any worker. No effect on behavior.</div>
 <div class="callout dead"><strong>Dead Column: nse_indicator_configs.day_filter</strong><br>Previously used to filter NSE SMA alerts by day of week. Functionality removed in "SMA Cloud corrective patch". Column retained in schema, always NULL.</div>
 <div class="callout dead"><strong>Retired Column: forex_sma_state.consecutive_widening</strong><br>Always written as 0. Never read for logic. Same applies to nse_sma_state.consecutive_widening.</div>
-<div class="callout dead"><strong>Unused constant: FOREX_SMA_WICK_PENETRATION = 0.10</strong><br>Defined in compute-worker constants but not referenced in any current phase logic or condition check.</div>
+<div class="callout dead"><strong>RESOLVED 2026-08-15 — was: Unused constant FOREX_SMA_WICK_PENETRATION = 0.10</strong><br>Moved from a hardcoded compute-worker constant to <code>sma_cloud_config.wick_penetration</code> (D1, migration 016, default 0.10). Per the 2026-08-15 architecture report it is now actively used in the CISD-watch arm branch — the original "not referenced" claim in this callout no longer applies (and its accuracy pre-2026-08-15 was not independently re-verified). See Section D.</div>
 
 <h3>Bugs &amp; Inconsistencies</h3>
-<div class="callout"><strong>step2_signal_id never populated for T1/T2/T4</strong><br><code>chain_state.step2_signal_id</code> column exists and is set by <code>completeFvgEntryChain</code>, but <code>ChainProgressBar.jsx</code> notes this is never actually populated in practice for T1, T2, or T4 chains. T3 sets it correctly.</div>
 <div class="callout"><strong>nse_sma_state.updated_at type mismatch</strong><br>Column declared with INTEGER affinity in schema (legacy declaration), but workers write it via <code>toISOString()</code> producing a TEXT value. SQLite stores the text correctly due to flexible typing, but the declared affinity is incorrect.</div>
 <div class="callout"><strong>nse_candle_cache.updated_at vs forex timestamps</strong><br>NSE candle cache stores <code>updated_at</code> as INTEGER epoch (seconds). All forex cache tables use TEXT ISO strings. Watchdog health check handles this: it reads NSE field as epoch seconds, not as ISO text.</div>
 <div class="callout"><strong>sweep-worker BIAS_SOURCE.sweep missing M30</strong><br>In <code>BIAS_SOURCE_FRONTEND.sweep</code>, M30→'4H' is present, but the backend <code>BIAS_SOURCE.sweep</code> in ebp-worker.js shows M5:'1H', M15:'1H', M30:'4H', 1H:'D', 4H:'W'. Frontend mirrors this correctly — no mismatch. (Not a bug, but worth verifying if sweep configs are added for M5.)</div>
@@ -1341,12 +1391,11 @@ T3 window_mins range: 15–240
 
 <h3>Design Gaps</h3>
 <div class="callout class="info"><strong>No WebSocket reconnect</strong><br>PriceFeedPanel opens one WebSocket; if it closes (network hiccup, CF timeout), there is no reconnect loop. Log cap is 20 messages.</div>
-<div class="callout class="info"><strong>T3 step2_signal_id not stored</strong><br>When T3 advances from sweep to MSS, no intermediate signal ID is stored in <code>chain_state.step2_signal_id</code>. Only the final completion sets the chain record.</div>
 <div class="callout class="info"><strong>Upstox source not selectable in Admin key form</strong><br>Admin.jsx only offers 'twelvedata' or 'yahoo' as source options when creating API keys. Upstox credentials are managed separately and cannot be added via the same key management UI.</div>
 <div class="callout class="info"><strong>market_breadth_cache weekly rows have empty heatmap</strong><br>Weekly breadth rows are computed by averaging intraday strength scores. There is no pair-level breakdown available; <code>heatmap_json</code> is always stored as <code>'{}'</code> for <code>tf='1W'</code> and <code>tf='1W_current'</code>.</div>
 
 <h3>Design Gaps — 2026-08-14 Split</h3>
-<div class="callout"><strong>ebp-watchdog missing WATCHDOG_BOT_TOKEN</strong><br>After the 2026-08-14 split, <code>ebp-watchdog</code> holds only <code>CRON_SECRET</code>. The <code>POST /health/watchdog-check</code> route calls <code>handleWatchdogHealthCheck(env)</code> which attempts Telegram alerts via <code>WATCHDOG_BOT_TOKEN</code> — but that secret is not set in ebp-watchdog. Alert calls will silently fail (empty string token). Fix: either add the secret to ebp-watchdog or accept that health-check alerts are disabled.</div>
+<div class="callout info"><strong>ebp-watchdog Telegram gap — RESOLVED 2026-08-15</strong><br><code>POST /health/watchdog-check</code> moved to <code>market-breath-worker</code> where <code>WATCHDOG_BOT_TOKEN</code> and <code>WATCHDOG_ADMIN_CHAT_ID</code> secrets live. <code>sendWatchdogAlert()</code>, <code>_watchdogAlertEnv</code>, and all Telegram sends stripped from <code>watchdog-worker</code>. <code>logWatchdog()</code> is DB-only. <code>market-breath-worker</code> is now the sole Watchdog Telegram sender.</div>
 <div class="callout"><strong>/cron/prune uses UTC Saturday gate, not NY Saturday</strong><br><code>POST /cron/prune</code> in market-breath-worker gates execution via <code>new Date().getUTCDay() === 6</code> (UTC Saturday). The rest of the system uses <code>isForexClosedWindow()</code> which derives NY Saturday. These can differ by one calendar day around midnight UTC on Saturday/Sunday transitions. The prune logic may fire on NY Friday (UTC Saturday evening) or miss NY Saturday (UTC Sunday). This is a minor discrepancy with no data-integrity impact.</div>
 </section>
 
@@ -1356,7 +1405,9 @@ T3 window_mins range: 15–240
 <section id="sec-n1">
 <h2><span class="sec-badge">N1</span>processTemplateChains() — Full Orchestration</h2>
 
-<p>Defined in <code>sweep-worker/src/sweep-cron.js</code> lines 716–831. Called once per (symbol, LTF) pair during the sweep cron run. Processes all four template chain types in a fixed order against already-detected sweep/MSS results.</p>
+<div class="callout dead"><strong>RETIRED 2026-08-15 — describes the pre-rewrite chain implementation</strong><br>Every function this section documents (<code>checkFvgEntryChain</code>, <code>completeFvgEntryChain</code>, <code>formatFvgEntryAlert</code>, T3's <code>advanceT3Chain</code>/<code>completeT3Chain</code>) is listed as dead code with zero callers in the 2026-08-15 architecture report. The T1–T4 chain logic was fully rewritten that day (locked global CISD/MSS definitions, new T2/T3 flows, old T3 dropped entirely). Kept below for historical reference only — for current behavior see <a href="#sec-c">Section C</a>.</div>
+
+<p>Defined in <code>sweep-worker/src/sweep-cron.js</code> lines 716–831 <em>(pre-2026-08-15 line numbers — file has since grown from 1156 to 1924 lines; not re-verified).</em> Called once per (symbol, LTF) pair during the sweep cron run. Processes all four template chain types in a fixed order against already-detected sweep/MSS results.</p>
 
 <h3>Processing Order (per symbol+LTF)</h3>
 <ol>
@@ -1390,6 +1441,8 @@ LIMIT 1</pre>
 ═══════════════════════════════════════════════════════ -->
 <section id="sec-n2">
 <h2><span class="sec-badge">N2</span>Chain Initiation: T1 / T2 / T3</h2>
+
+<div class="callout dead"><strong>RETIRED 2026-08-15 — describes the pre-rewrite chain implementation</strong><br><code>initiateT3Chain</code> is confirmed dead code (old T3 retired 2026-08-15, migration 018 deleted its rows). T1/T2 initiation shown below (states <code>awaiting_fvg_entry</code>/<code>awaiting_retracement</code>, <code>endOfUTCMonthISO()</code> expiry) no longer matches the current arm logic — see <a href="#sec-c">Section C</a> for T1's OTE-FVG-CISD flow and T2's zone/sweep/trigger flow with locked end-of-UTC-week expiry. Kept below for historical reference only.</div>
 
 <p>All three chains are armed inside <code>handleEBPCron()</code> in <code>worker/src/ebp-worker.js</code> when an EBP fires on the configured HTF. The bias-gate guard (<code>biasGateEnabled &amp;&amp; !trendAligned → skip</code>) runs first.</p>
 
@@ -1446,7 +1499,9 @@ await insertChain(env.DB, {
 <section id="sec-n3">
 <h2><span class="sec-badge">N3</span>T3 Advancement &amp; Completion Functions</h2>
 
-<p>All logic in <code>sweep-worker/src/sweep-cron.js</code>, orchestrated from <code>processTemplateChains()</code>.</p>
+<div class="callout dead"><strong>RETIRED 2026-08-15 — old T3 (EBP→Sweep→MSS) dropped entirely</strong><br><code>advanceT3Chain</code>, <code>completeT3Chain</code>, <code>formatT3Alert</code>, and <code>formatT3Step2CompleteAlert</code> are all confirmed dead code — migration 018 deleted every old-T3 <code>chain_state</code>/<code>user_templates</code>/<code>signal_counters</code> row. New T3 (Phase 1) is Daily-candle → 50–75%-zone-FVG → CISD/MSS, an unrelated flow — see <a href="#sec-c">Section C</a>. Kept below for historical reference only.</div>
+
+<p>All logic in <code>sweep-worker/src/sweep-cron.js</code>, orchestrated from <code>processTemplateChains()</code> <em>(both retired — see N1).</em></p>
 
 <h3>T3 Step 2 — Sweep Confirmation (awaiting_sweep → awaiting_mss or complete)</h3>
 <p>Triggered when <code>detectSweep()</code> returns a result matching the chain's direction:</p>
@@ -1846,7 +1901,9 @@ EBP Tracker</pre>
 <section id="sec-n9">
 <h2><span class="sec-badge">N9</span>endOfUTCMonthISO() — Both Files</h2>
 
-<p>Computes the expiry timestamp for T1 and T2 chains. Defined in two files; implementations are <strong>byte-for-byte identical</strong>.</p>
+<div class="callout dead"><strong>RETIRED 2026-08-15 — the two copies have diverged</strong><br>In <code>sweep-cron.js</code> the function is fully deleted (verified via direct grep — no definition remains). In <code>ebp-worker.js</code> the function definition at line 191 still exists but has zero callers (verified via grep — no invocation anywhere in the file), so "Both Files" below is now only true of the function's origin, not its current usage. Current chain expiry: T1/T2/T3 use end of UTC week (Friday 23:59 UTC); T4 uses NY 17:00 same day. See <a href="#sec-c">Section C, "Chain Expiry."</a> Kept below for historical reference only.</div>
+
+<p>Computes the expiry timestamp for T1 and T2 chains <em>(pre-2026-08-15 — see callout above).</em> Defined in two files; implementations are <strong>byte-for-byte identical</strong>.</p>
 
 <h3>sweep-worker/src/sweep-cron.js (lines 248–251)</h3>
 <pre><span class="kw">function</span> <span class="fn">endOfUTCMonthISO</span>() {
@@ -1878,24 +1935,26 @@ EBP Tracker</pre>
 <section id="sec-n10">
 <h2><span class="sec-badge">N10</span>ChainProgressBar — STATE_STEPS Map &amp; Rendering</h2>
 
-<p>Defined in <code>frontend/src/components/ChainProgressBar.jsx</code>.</p>
+<p>Defined in <code>frontend/src/components/ChainProgressBar.jsx</code>. <strong>Rewritten 2026-08-15</strong> to match the new T2/T3 state machines — the map below is the current, verified content, not the pre-rewrite version.</p>
 
 <h3>STEPS — Visual Step Definitions</h3>
 <pre><span class="kw">const</span> STEPS = {
-  T1: [{ key: <span class="st">'step1'</span>, label: <span class="st">'EBP'</span>    }, { key: <span class="st">'step2'</span>, label: <span class="st">'FVG Entry'</span>   }],
-  T2: [{ key: <span class="st">'step1'</span>, label: <span class="st">'EBP'</span>    }, { key: <span class="st">'step2'</span>, label: <span class="st">'Retracement'</span> }],
-  T3: [{ key: <span class="st">'step1'</span>, label: <span class="st">'EBP'</span>    }, { key: <span class="st">'step2'</span>, label: <span class="st">'Sweep'</span>       },
-       { key: <span class="st">'step3'</span>, label: <span class="st">'MSS'</span>    }],
-  T4: [{ key: <span class="st">'step1'</span>, label: <span class="st">'Sweep'</span>  }, { key: <span class="st">'step2'</span>, label: <span class="st">'FVG Entry'</span>   }],
+  T1: [{ key: <span class="st">'step1'</span>, label: <span class="st">'EBP'</span> }, { key: <span class="st">'step2'</span>, label: <span class="st">'FVG Entry'</span> }],
+  T2: [{ key: <span class="st">'step1'</span>, label: <span class="st">'EBP'</span> }, { key: <span class="st">'step2'</span>, label: <span class="st">'Zone Entry'</span> },
+       { key: <span class="st">'step3'</span>, label: <span class="st">'Sweep'</span> }, { key: <span class="st">'step4'</span>, label: <span class="st">'Trigger'</span> }],
+  T3: [{ key: <span class="st">'step1'</span>, label: <span class="st">'Daily FVG'</span> }, { key: <span class="st">'step2'</span>, label: <span class="st">'Time Gate'</span> },
+       { key: <span class="st">'step3'</span>, label: <span class="st">'Key Level'</span> }, { key: <span class="st">'step4'</span>, label: <span class="st">'Trigger'</span> }],
+  T4: [{ key: <span class="st">'step1'</span>, label: <span class="st">'MSS'</span> }, { key: <span class="st">'step2'</span>, label: <span class="st">'FVG Entry'</span> }],
 };</pre>
 
 <h3>STATE_STEPS — chain.state → completedStepCount</h3>
 <pre><span class="kw">const</span> STATE_STEPS = {
-  T1: { awaiting_fvg_entry:   <span class="nu">1</span>,                       complete: <span class="nu">2</span> },
-  T2: { awaiting_retracement: <span class="nu">1</span>,                       complete: <span class="nu">2</span> },
-  T3: { awaiting_sweep: <span class="nu">1</span>, awaiting_mss: <span class="nu">2</span>,           complete: <span class="nu">3</span> },
-  T4: { awaiting_fvg_entry:   <span class="nu">1</span>,                       complete: <span class="nu">2</span> },
+  T1: { awaiting_fvg_entry: <span class="nu">1</span>, complete: <span class="nu">2</span> },
+  T2: { awaiting_zone_entry: <span class="nu">1</span>, awaiting_sweep: <span class="nu">2</span>, awaiting_trigger: <span class="nu">3</span>, complete: <span class="nu">4</span> },
+  T3: { awaiting_time_gate: <span class="nu">1</span>, awaiting_key_level: <span class="nu">2</span>, awaiting_trigger: <span class="nu">3</span>, complete: <span class="nu">4</span> },
+  T4: { awaiting_fvg_entry: <span class="nu">1</span>, complete: <span class="nu">2</span> },
 };</pre>
+<p>T2's <code>sweep_required</code> is a user toggle — when sweep is skipped the chain jumps directly from <code>awaiting_zone_entry</code> to <code>awaiting_trigger</code>. <code>STATE_STEPS</code> still maps <code>awaiting_sweep</code> to position 2 regardless; if a chain never passes through it, the progress bar simply skips from step 1 to step 3.</p>
 
 <h3>Rendering Logic</h3>
 <pre><span class="kw">function</span> <span class="fn">getCompletedSteps</span>(chain, templateType) {
@@ -1903,7 +1962,7 @@ EBP Tracker</pre>
   <span class="kw">return</span> STATE_STEPS[templateType]?.[chain.state] ?? <span class="nu">0</span>;
 }
 <span class="cm">// Step at index i gets class 'chain-step--done' if i &lt; completed, else 'chain-step--pending'</span></pre>
-<p>Example: T3 with <code>state='awaiting_mss'</code> (completed=2) renders EBP + Sweep as done dots, MSS as pending dot.</p>
+<p>Example: T2 with <code>state='awaiting_trigger'</code> (completed=3) renders EBP + Zone Entry + Sweep as done dots, Trigger as pending dot.</p>
 
 <h3>Key Design Note</h3>
 <p>Completion is derived from <code>chain.state</code>, <em>not</em> from <code>step*_signal_id</code> column population. This is intentional: T1/T2/T4's completion step never receives its own signal ID in the current implementation — a signal-ID-based check would incorrectly show those steps as incomplete even after the chain has fired.</p>
@@ -1912,7 +1971,7 @@ EBP Tracker</pre>
 <pre><span class="kw">function</span> <span class="fn">humaniseState</span>(state) {
   <span class="kw">return</span> state?.replace(/_/g, <span class="st">' '</span>).replace(/\b\w/g, c =&gt; c.toUpperCase()) ?? <span class="st">'—'</span>;
 }
-<span class="cm">// 'awaiting_mss' → 'Awaiting Mss'</span>
+<span class="cm">// 'awaiting_key_level' → 'Awaiting Key Level'  (example updated 2026-08-15 — 'awaiting_mss' no longer exists)</span>
 <span class="cm">// chain.state === 'complete' → displays 'Complete ✓' directly</span></pre>
 <p>Below the step dots: state label · <code>step1_signal_id</code> (if set) · direction emoji + text.</p>
 </section>
@@ -1923,29 +1982,31 @@ EBP Tracker</pre>
 <section id="sec-n11">
 <h2><span class="sec-badge">N11</span>Function Location Index</h2>
 
-<h3>sweep-worker/src/sweep-cron.js — 1157 lines</h3>
+<h3>sweep-worker/src/sweep-cron.js — 1924 lines</h3>
+<p>File grew from 1157→1924 lines in the 2026-08-15 rewrite. All line numbers below are pre-rewrite and unverified against the current file — treat as approximate/historical only.</p>
 <div class="table-wrap"><table>
 <tr><th>Function</th><th>Lines</th><th>Notes</th></tr>
-<tr><td>formatT3Alert</td><td>173–187</td><td>Used for T3 step 2 and step 3 alerts; step param controls label</td></tr>
-<tr><td>formatT3Step2CompleteAlert</td><td>191–202</td><td>Fired when step3_enabled=0</td></tr>
-<tr><td>endOfUTCMonthISO</td><td>248–251</td><td>T1/T2/T4 chain expiry; identical copy in ebp-worker</td></tr>
-<tr><td>isDuplicateAlert</td><td>320–336</td><td>Lookback-window dedup; returns boolean</td></tr>
-<tr><td>formatSweepAlert</td><td>373–387</td><td>Standalone sweep alert; HTML parse_mode</td></tr>
-<tr><td>formatMSSAlert</td><td>549–562</td><td>Standalone MSS alert; level to 5 d.p.</td></tr>
-<tr><td>formatFvgEntryAlert</td><td>666–682</td><td>T1/T2/T4 completion alert; flow string varies by template</td></tr>
-<tr><td>processTemplateChains</td><td>716–831</td><td>Main chain orchestration; 4-step order</td></tr>
+<tr><td>formatT3Alert</td><td>173–187</td><td><span class="pill pill-bear">DEAD 2026-08-15</span> old T3 retired — see Section C for new T3 (Phase 1)</td></tr>
+<tr><td>formatT3Step2CompleteAlert</td><td>191–202</td><td><span class="pill pill-bear">DEAD 2026-08-15</span> old T3 retired</td></tr>
+<tr><td>endOfUTCMonthISO</td><td>248–251</td><td><span class="pill pill-bear">DEAD 2026-08-15</span> zero callers after T4 rewrite; T1/T2/T3 now expire end-of-UTC-week, T4 expires NY 17:00 same day</td></tr>
+<tr><td>isDuplicateAlert</td><td>320–336</td><td>Lookback-window dedup; returns boolean. Still in use — line number not re-verified post-rewrite.</td></tr>
+<tr><td>formatSweepAlert</td><td>373–387</td><td>Standalone sweep alert; HTML parse_mode. Still in use — line number not re-verified post-rewrite.</td></tr>
+<tr><td>formatMSSAlert</td><td>549–562</td><td>Standalone MSS alert; level to 5 d.p. Still in use — line number not re-verified post-rewrite.</td></tr>
+<tr><td>formatFvgEntryAlert</td><td>666–682</td><td><span class="pill pill-bear">DEAD 2026-08-15</span> zero callers after T4 rewrite</td></tr>
+<tr><td>processTemplateChains</td><td>884 (verified 2026-08-15, was 716–831)</td><td>Function name and role unchanged — still the per-(symbol,LTF) orchestrator, called from the main cron handler. Internals fully rewritten 2026-08-15 to the new T1/T2/T3/T4 blocks (T4 arm+complete, T1 CISD check, T2 processing, T3 processing) — see Section C. Old 4-step shared order (T4 arm → T1/T2/T4 FVG-entry → T2 retracement → T3 sweep/MSS) no longer applies.</td></tr>
 </table></div>
 
-<h3>worker/src/ebp-worker.js — 2351 lines</h3>
+<h3>worker/src/ebp-worker.js — 2648 lines</h3>
+<p>File grew from 2351→2648 lines in the 2026-08-15 rewrite. Line numbers below (except <code>endOfUTCMonthISO</code>, re-verified) are pre-rewrite and unverified against the current file.</p>
 <div class="table-wrap"><table>
 <tr><th>Function / Block</th><th>Lines</th><th>Notes</th></tr>
-<tr><td>endOfUTCMonthISO</td><td>191–194</td><td>Identical to sweep-cron.js version</td></tr>
-<tr><td>initiateT3Chain</td><td>221–227</td><td>Inserts T3 with awaiting_sweep; stores step1SignalId</td></tr>
-<tr><td>formatEBPAlert</td><td>490–505</td><td>Forex/crypto EBP; Signal ID conditional</td></tr>
-<tr><td>T1 chain initiation block</td><td>1091–1095</td><td>Inside handleEBPCron(); no step1SignalId stored</td></tr>
-<tr><td>T2 chain initiation block</td><td>1096–1111</td><td>Stores htfCandle JSON with open/close/times</td></tr>
-<tr><td>DELETE /user/assets/:id cascade</td><td>1337–1349</td><td>5-table explicit application-code cascade</td></tr>
-<tr><td>DELETE /user/forex-indicator-configs/:id</td><td>1804–1834</td><td>Includes forex_sma_state shared-state cleanup</td></tr>
+<tr><td>endOfUTCMonthISO</td><td>191 (verified 2026-08-15)</td><td><span class="pill pill-bear">DEAD 2026-08-15</span> definition still present, but zero callers anywhere in the file (verified via grep) — not deleted here, just orphaned. Fully deleted in sweep-cron.js's copy.</td></tr>
+<tr><td>initiateT3Chain</td><td>221–227</td><td><span class="pill pill-bear">DEAD 2026-08-15</span> — no <code>function initiateT3Chain</code> definition remains at all (verified via grep); old T3 retired</td></tr>
+<tr><td>formatEBPAlert</td><td>490–505</td><td>Forex/crypto EBP; Signal ID conditional. Still in use — line number not re-verified post-rewrite.</td></tr>
+<tr><td>T1 chain initiation block</td><td>1091–1095</td><td><span class="pill pill-bear">RETIRED 2026-08-15</span> replaced by the new 4H EBP → OTE-zone-FVG → CISD arm logic — see Section C</td></tr>
+<tr><td>T2 chain initiation block</td><td>1096–1111</td><td><span class="pill pill-bear">RETIRED 2026-08-15</span> replaced by the new 4H EBP → zone/sweep/trigger arm logic, including the three T2 toggles — see Section C</td></tr>
+<tr><td>DELETE /user/assets/:id cascade</td><td>1337–1349</td><td>5-table explicit application-code cascade. Line number not re-verified post-rewrite.</td></tr>
+<tr><td>DELETE /user/forex-indicator-configs/:id</td><td>1804–1834</td><td>Includes forex_sma_state shared-state cleanup. Line number not re-verified post-rewrite.</td></tr>
 </table></div>
 
 <h3>nse-worker/src/nse-cron.js — 1758 lines</h3>
@@ -1967,18 +2028,21 @@ EBP Tracker</pre>
 <tr><td>handleNseCron</td><td>1507–1757</td><td>Main NSE cron entry; market-hours gated; symbol-parallel fetch</td></tr>
 </table></div>
 
-<h3>watchdog-worker/src/index.js — 948 lines</h3>
+<h3>watchdog-worker/src/index.js — 528 lines</h3>
+<p>File shrank from 948→528 lines 2026-08-15 — health-check + Telegram-alerting code (~420 lines) stripped out and moved to market-breath-worker.</p>
 <div class="table-wrap"><table>
 <tr><th>Function / Block</th><th>Notes</th></tr>
-<tr><td><code>handleCandleFetchCron(env)</code></td><td>Twelve Data fetch for M15/M30/1H/4H; round-robin key assignment. Only route left in watchdog post-split.</td></tr>
-<tr><td><code>handleWatchdogHealthCheck(env)</code></td><td>9 health checks against D1; Telegram alert via WATCHDOG_BOT_TOKEN — but token absent from secrets (see Section M gap).</td></tr>
-<tr><td><code>runWatchdog(env)</code></td><td>Native CF scheduled() handler — heartbeat only: sets <code>_watchdogAlertEnv=env</code> and logs one info tick. No business logic.</td></tr>
-<tr><td><code>logWatchdog(db, eventType, message)</code></td><td>INSERT watchdog_log; triggers sendWatchdogAlert on error/warning via <code>_watchdogAlertEnv</code>.</td></tr>
+<tr><td><code>handleCandleFetchCron(env)</code></td><td>Twelve Data fetch for M15/M30/1H/4H; round-robin key assignment. Only cron route left in watchdog post-split.</td></tr>
+<tr><td><code>runWatchdog(env)</code></td><td>Native CF scheduled() handler — heartbeat only: logs one info tick via <code>logWatchdog</code>. <code>_watchdogAlertEnv</code> reference removed 2026-08-15 (verified via grep — no longer present in this file).</td></tr>
+<tr><td><code>logWatchdog(db, eventType, message)</code></td><td>INSERT <code>watchdog_log</code> only. Telegram send removed 2026-08-15 — DB-only now.</td></tr>
 </table></div>
+<p><span class="pill pill-bear">REMOVED 2026-08-15</span> <code>handleWatchdogHealthCheck(env)</code> — moved to market-breath-worker, see below.</p>
 
-<h3>market-breath-worker/src/index.js — 1118 lines</h3>
+<h3>market-breath-worker/src/index.js — 1508 lines</h3>
+<p>File grew from 1118→1508 lines 2026-08-15 — gained <code>handleWatchdogHealthCheck(env)</code> from watchdog-worker.</p>
 <div class="table-wrap"><table>
 <tr><th>Function / Block</th><th>Notes</th></tr>
+<tr><td><code>handleWatchdogHealthCheck(env)</code></td><td><span class="pill pill-accent">MOVED HERE 2026-08-15</span> 11 health checks against D1 (corrected from "9" — see Section H). Telegram alert via <code>WATCHDOG_BOT_TOKEN</code>, which already lives in this worker's secrets (no longer the gap described in the old Section M callout — see Section M, now resolved).</td></tr>
 <tr><td><code>fetchBreadthFromYahoo(symbols, env)</code></td><td>29 BREADTH_SYMBOLS in parallel; writes yahoo_candle_cache via db.batch(). Each symbol fetch isolated by .catch.</td></tr>
 <tr><td><code>computeSyntheticDXY(env)</code></td><td>Reads yahoo_candle_cache per constituent; INSERT OR IGNORE dxy_candle_cache tf='1H'.</td></tr>
 <tr><td><code>seedDXYHistory(env)</code></td><td>Runs only when dxy_candle_cache empty; seeds all common 1H timestamps + derives 4H/Daily/Weekly.</td></tr>
@@ -1992,18 +2056,20 @@ EBP Tracker</pre>
 <tr><td><code>_watchdogAlertEnv = env</code></td><td>Set at entry of each POST route handler body (no scheduled() handler in market-breath).</td></tr>
 </table></div>
 
-<h3>compute-worker/src/index.js — 1167 lines</h3>
+<h3>compute-worker/src/index.js — 1206 lines</h3>
+<p>File grew from 1167→1206 lines 2026-08-15 — gained <code>loadSmaCloudConfig(db)</code> and its D1-read integration.</p>
 <div class="table-wrap"><table>
 <tr><th>Constant / Block</th><th>Lines</th><th>Notes</th></tr>
-<tr><td>FOREX_SMA_VALID_TFS</td><td>484</td><td>['M15','M30','1H','4H']</td></tr>
-<tr><td>FOREX_SMA_WATCH_EXPIRY_MS</td><td>486–491</td><td>Object; 1H key is sub-object keyed by HTF</td></tr>
-<tr><td>FOREX_SMA_TYPE2_COOLDOWN_MS</td><td>493–498</td><td>Same nested structure as EXPIRY_MS</td></tr>
-<tr><td>FOREX_SMA_SEPARATION_THRESHOLD</td><td>500</td><td>0.15</td></tr>
-<tr><td>FOREX_SMA_VELOCITY_THRESHOLD</td><td>501</td><td>0.03</td></tr>
-<tr><td>FOREX_SMA_WICK_PENETRATION</td><td>502</td><td>0.10 (defined but currently unused in phase logic — see section M)</td></tr>
-<tr><td>Exhaustion alert build</td><td>769–777</td><td>Part of Forex SMA cron handler</td></tr>
-<tr><td>Type 1 alert build</td><td>822–833</td><td>Part of Forex SMA cron handler</td></tr>
-<tr><td>Type 2 alert build</td><td>944–955</td><td>Part of Forex SMA cron handler</td></tr>
+<tr><td><code>loadSmaCloudConfig(db)</code></td><td>2026-08-15, line not re-verified</td><td><span class="pill pill-accent">NEW 2026-08-15</span> reads <code>sma_cloud_config</code> singleton row at the top of <code>handleForexSmaCron()</code>; falls back to hardcoded defaults on read error</td></tr>
+<tr><td>FOREX_SMA_VALID_TFS</td><td>484</td><td>['M15','M30','1H','4H'] — still hardcoded. Line not re-verified post-2026-08-15.</td></tr>
+<tr><td>FOREX_SMA_WATCH_EXPIRY_MS</td><td>486–491</td><td>Object; 1H key is sub-object keyed by HTF — still hardcoded (not user-configurable). Line not re-verified post-2026-08-15.</td></tr>
+<tr><td>FOREX_SMA_TYPE2_COOLDOWN_MS</td><td>493–498</td><td>Same nested structure as EXPIRY_MS — still hardcoded. Line not re-verified post-2026-08-15.</td></tr>
+<tr><td>FOREX_SMA_SEPARATION_THRESHOLD</td><td>500 (pre-2026-08-15)</td><td><span class="pill pill-bear">MOVED TO DB 2026-08-15</span> now <code>sma_cloud_config.separation_threshold</code>, default 0.15 — see Section D</td></tr>
+<tr><td>FOREX_SMA_VELOCITY_THRESHOLD</td><td>501 (pre-2026-08-15)</td><td><span class="pill pill-bear">MOVED TO DB 2026-08-15</span> now <code>sma_cloud_config.velocity_threshold</code>, default 0.03 — see Section D</td></tr>
+<tr><td>FOREX_SMA_WICK_PENETRATION</td><td>502 (pre-2026-08-15)</td><td><span class="pill pill-bear">MOVED TO DB 2026-08-15</span> now <code>sma_cloud_config.wick_penetration</code>, default 0.10, actively used in the CISD-watch arm branch (corrected — the pre-2026-08-15 doc called it unused)</td></tr>
+<tr><td>Exhaustion alert build</td><td>769–777</td><td>Part of Forex SMA cron handler. Line not re-verified post-2026-08-15.</td></tr>
+<tr><td>Type 1 alert build</td><td>822–833</td><td>Part of Forex SMA cron handler. Line not re-verified post-2026-08-15.</td></tr>
+<tr><td>Type 2 alert build</td><td>944–955</td><td>Part of Forex SMA cron handler. Line not re-verified post-2026-08-15.</td></tr>
 </table></div>
 </section>
 
@@ -2069,7 +2135,7 @@ EBP Tracker</pre>
 ═══════════════════════════════════════════════════════ -->
 <section id="sec-p">
 <h2><span class="sec-badge">P</span>market-breath-worker</h2>
-<p>New Cloudflare Worker split from <code>watchdog-worker</code> on 2026-08-14. Handles the Yahoo Finance breadth pipeline, DXY synthesis, daily digest, and weekly prune. Worker name: <code>market-breath</code>. URL: <code>https://market-breath.aicube-apps.workers.dev</code>. Source: <code>market-breath-worker/src/index.js</code> (1118 lines).</p>
+<p>New Cloudflare Worker split from <code>watchdog-worker</code> on 2026-08-14. Handles the Yahoo Finance breadth pipeline, DXY synthesis, daily digest, weekly prune, and (since 2026-08-15) the watchdog health check. Worker name: <code>market-breath</code>. URL: <code>https://market-breath.aicube-apps.workers.dev</code>. Source: <code>market-breath-worker/src/index.js</code> (1508 lines, was 1118 — gained <code>handleWatchdogHealthCheck</code> 2026-08-15).</p>
 
 <h3>Rationale for Split</h3>
 <p>Isolates Twelve Data candle-fetch (pure latency-sensitive) from Yahoo/breadth concerns (slower, broader, digest-heavy). After the split, <code>ebp-watchdog</code> is dedicated to Twelve Data polling; <code>market-breath</code> owns the full Yahoo/DXY/synthesis/digest/prune pipeline.</p>
