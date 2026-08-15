@@ -1428,13 +1428,26 @@ async function processTemplateChains(tf, env, log) {
             triggered = true;
             triggerLevel = cisd.cisdLevel;
           }
-        } else {
+        } else if (chain.trigger_type === 'mss') {
           // MSS — runHigh/runLow are this tick's already-updated running
           // pullback-run extremes (see the incremental tracker above).
           const mss = detectMSSNew(oldestFirst, chain.direction, runHigh, runLow);
           if (mss.confirmed) {
             triggered = true;
             triggerLevel = mss.mssLevel;
+          }
+        } else {
+          // trigger_type === 'either' — MSS wins if both fire on same candle
+          const mss = detectMSSNew(oldestFirst, chain.direction, runHigh, runLow);
+          if (mss.confirmed) {
+            triggered = true;
+            triggerLevel = mss.mssLevel;
+          } else {
+            const cisd = detectCISD(oldestFirst, chain.direction);
+            if (cisd.confirmed) {
+              triggered = true;
+              triggerLevel = cisd.cisdLevel;
+            }
           }
         }
 
