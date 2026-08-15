@@ -323,6 +323,57 @@ router.patch('/admin/users/:id/nse-tf-access', async (req, env) => {
   return json({ ok: true }, 200, origin);
 });
 
+// ── Forex SMA Cloud config (compute-worker reads this via loadSmaCloudConfig) ──
+
+router.get('/admin/sma-config', async (req, env) => {
+  const { user: clerkUser, origin, error } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
+  const row = await env.DB.prepare('SELECT * FROM sma_cloud_config WHERE id=1').first();
+  if (!row) return json({ error: 'sma_cloud_config row missing' }, 404, origin);
+  return json(row, 200, origin);
+});
+
+router.patch('/admin/sma-config', async (req, env) => {
+  const { user: clerkUser, origin, error } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
+
+  const body = await req.json();
+  const sets = [];
+  const vals = [];
+
+  if (body.fast_period !== undefined) {
+    if (!Number.isInteger(body.fast_period) || body.fast_period < 1) {
+      return json({ error: 'fast_period must be a positive integer' }, 400, origin);
+    }
+    sets.push('fast_period=?'); vals.push(body.fast_period);
+  }
+  if (body.slow_period !== undefined) {
+    if (!Number.isInteger(body.slow_period) || body.slow_period < 1) {
+      return json({ error: 'slow_period must be a positive integer' }, 400, origin);
+    }
+    sets.push('slow_period=?'); vals.push(body.slow_period);
+  }
+  for (const field of ['separation_threshold', 'velocity_threshold', 'wick_penetration']) {
+    if (body[field] !== undefined) {
+      if (typeof body[field] !== 'number' || body[field] < 0.01 || body[field] > 1.0) {
+        return json({ error: `${field} must be a number between 0.01 and 1.0` }, 400, origin);
+      }
+      sets.push(`${field}=?`); vals.push(body[field]);
+    }
+  }
+
+  if (!sets.length) return json({ error: 'No valid fields provided' }, 400, origin);
+
+  sets.push('updated_at=?');
+  vals.push(new Date().toISOString());
+
+  await env.DB.prepare(`UPDATE sma_cloud_config SET ${sets.join(', ')} WHERE id=1`).bind(...vals).run();
+  const row = await env.DB.prepare('SELECT * FROM sma_cloud_config WHERE id=1').first();
+  return json(row, 200, origin);
+});
+
 // ============================================================
 // Main fetch handler
 // ============================================================
