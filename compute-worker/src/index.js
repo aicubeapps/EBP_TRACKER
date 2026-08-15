@@ -497,10 +497,6 @@ const FOREX_SMA_TYPE2_COOLDOWN_MS = {
   '4H':  24 * 60 * 60 * 1000,
 };
 
-const FOREX_SMA_SEPARATION_THRESHOLD = 0.15;  // atr14 * 0.15
-const FOREX_SMA_VELOCITY_THRESHOLD   = 0.03;  // atr14 * 0.03
-const FOREX_SMA_WICK_PENETRATION     = 0.10;  // atr14 * 0.10
-
 // '1H' maps to an object keyed by htf_timeframe (two valid HTF options);
 // every other TF maps to a single duration.
 function forexSmaWatchExpiryMs(tf, htfTimeframe) {
@@ -510,6 +506,40 @@ function forexSmaWatchExpiryMs(tf, htfTimeframe) {
 function forexSmaCooldownMs(tf, htfTimeframe) {
   const v = FOREX_SMA_TYPE2_COOLDOWN_MS[tf];
   return typeof v === 'object' ? (v[htfTimeframe] ?? Object.values(v)[0]) : v;
+}
+
+/**
+ * Loads SMA Cloud configuration from D1 sma_cloud_config table.
+ * Falls back to hardcoded defaults if row missing or DB error.
+ * Called once per cron run — cached in caller scope for duration.
+ */
+async function loadSmaCloudConfig(db) {
+  const defaults = {
+    fastPeriod:           1,
+    slowPeriod:           9,
+    separationThreshold:  0.15,
+    velocityThreshold:    0.03,
+    wickPenetration:      0.10,
+  };
+  try {
+    const row = await db.prepare(
+      'SELECT * FROM sma_cloud_config WHERE id=1 LIMIT 1'
+    ).first();
+    if (!row) {
+      console.warn('[SMA] sma_cloud_config row missing — using defaults');
+      return defaults;
+    }
+    return {
+      fastPeriod:          row.fast_period          ?? defaults.fastPeriod,
+      slowPeriod:          row.slow_period          ?? defaults.slowPeriod,
+      separationThreshold: row.separation_threshold ?? defaults.separationThreshold,
+      velocityThreshold:   row.velocity_threshold   ?? defaults.velocityThreshold,
+      wickPenetration:     row.wick_penetration     ?? defaults.wickPenetration,
+    };
+  } catch (e) {
+    console.error('[SMA] loadSmaCloudConfig error — using defaults:', e.message);
+    return defaults;
+  }
 }
 
 // values: oldest-first. Simple moving average, null-padded until `period`
@@ -580,11 +610,11 @@ function advanceSmaPhase(prev, m) {
   const trendDirection = m.sma1Now > m.sma9Now ? 'bullish'
     : m.sma1Now < m.sma9Now ? 'bearish' : null;
   const isDistributing = trendDirection !== null
-    && m.separationNow > (m.atr14 * FOREX_SMA_SEPARATION_THRESHOLD)
+    && m.separationNow > (m.atr14 * m.separationThreshold)
     && m.crossover3 === 0;
 
   const isExhausting = prevPhase === 'distribution'
-    && (m.separationNow < (m.atr14 * FOREX_SMA_SEPARATION_THRESHOLD) || m.crossover3 >= 1);
+    && (m.separationNow < (m.atr14 * m.separationThreshold) || m.crossover3 >= 1);
 
   const freshCross = m.freshCrossBull || m.freshCrossBear;
 
@@ -683,6 +713,9 @@ async function handleForexSmaCron(tf, env, debugLog = null) {
     return;
   }
 
+  // Load SMA Cloud config from D1 — single read, cached for this run
+  const smaConfig = await loadSmaCloudConfig(env.DB);
+
   const { results: configs } = await env.DB.prepare(`
     SELECT fic.id as config_id, fic.bias_mode, fic.htf_timeframe, fic.confirmation_mode,
            ua.id as asset_id, ua.symbol,
@@ -718,8 +751,13 @@ async function handleForexSmaCron(tf, env, debugLog = null) {
         continue;
       }
 
-      const sma1 = candles.map(c => c.close); // newest-first, aligned with candles[i]
-      const sma9OldestFirst = computeSMA([...candles].reverse().map(c => c.close), 9);
+      // computeSMA(values, 1) is provably identical to the raw close (sums
+      // exactly one value, divides by 1) — using it here (rather than the
+      // former candles.map(c => c.close) shortcut) costs nothing at the
+      // default fastPeriod=1 and correctly supports a configured non-1 value.
+      const sma1OldestFirst = computeSMA([...candles].reverse().map(c => c.close), smaConfig.fastPeriod);
+      const sma1 = [...sma1OldestFirst].reverse();
+      const sma9OldestFirst = computeSMA([...candles].reverse().map(c => c.close), smaConfig.slowPeriod);
       const sma9 = [...sma9OldestFirst].reverse();
 
       const atr14 = computeATR(candles, 14);
@@ -741,7 +779,7 @@ async function handleForexSmaCron(tf, env, debugLog = null) {
       const separationNow  = Math.abs(sma1Now - sma9Now);
       const separation5Ago = (sma1[5] != null && sma9[5] != null) ? Math.abs(sma1[5] - sma9[5]) : separationNow;
       const velocityRaw    = (separationNow - separation5Ago) / 5;
-      const velocityLabel  = velocityRaw > (atr14 * FOREX_SMA_VELOCITY_THRESHOLD) ? 'Sharp⚡' : 'Gradual📉';
+      const velocityLabel  = velocityRaw > (atr14 * smaConfig.velocityThreshold) ? 'Sharp⚡' : 'Gradual📉';
 
       const cloudTop    = Math.max(sma1Now, sma9Now);
       const cloudBottom = Math.min(sma1Now, sma9Now);
@@ -758,6 +796,7 @@ async function handleForexSmaCron(tf, env, debugLog = null) {
 
       const advance = advanceSmaPhase(priorState, {
         crossover3, crossover5, separationNow, atr14, sma1Now, sma9Now, freshCrossBull, freshCrossBear,
+        separationThreshold: smaConfig.separationThreshold,
       });
 
       const bar0 = candles[0];
@@ -795,7 +834,7 @@ async function handleForexSmaCron(tf, env, debugLog = null) {
 
       } else if (advance.justEnteredDistribution) {
         // ── Type 1 — trend initiation ──
-        if (separationNow > atr14 * FOREX_SMA_SEPARATION_THRESHOLD) {
+        if (separationNow > atr14 * smaConfig.separationThreshold) {
           const fvg = await env.DB.prepare(`
             SELECT id, top, bottom FROM fvg_zones
             WHERE symbol=? AND tf=? AND direction=?
@@ -979,8 +1018,8 @@ async function handleForexSmaCron(tf, env, debugLog = null) {
 
         } else {
           // ── Arm — shared price-action gates computed once, bias per-user ──
-          const wickedIntoBull = bar0.low < cloudTop && bar0.low > cloudBottom && (cloudTop - bar0.low) >= (atr14 * FOREX_SMA_WICK_PENETRATION);
-          const wickedIntoBear = bar0.high > cloudBottom && bar0.high < cloudTop && (bar0.high - cloudBottom) >= (atr14 * FOREX_SMA_WICK_PENETRATION);
+          const wickedIntoBull = bar0.low < cloudTop && bar0.low > cloudBottom && (cloudTop - bar0.low) >= (atr14 * smaConfig.wickPenetration);
+          const wickedIntoBear = bar0.high > cloudBottom && bar0.high < cloudTop && (bar0.high - cloudBottom) >= (atr14 * smaConfig.wickPenetration);
           const wickedInto = advance.direction === 'bullish' ? wickedIntoBull : wickedIntoBear;
 
           const rejectedBull = bar0.close > cloudTop;
