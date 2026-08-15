@@ -92,48 +92,36 @@ async function writeBiasCache(db, symbol, biasTF, biasResult) {
 // asset_id-keyed), direction always 'bullish'/'bearish' (never 'bull'/
 // 'bear' — matches every detector in this codebase).
 
-async function insertChain(db, { templateType, userId, assetId, symbol, htf, ltf, direction, state, step1SignalId, expiresAt, htfCandle }) {
+async function insertChain(db, {
+  templateType, userId, assetId, symbol, htf, ltf, direction, state, step1SignalId, expiresAt, htfCandle,
+  htfHigh, htfLow, htfCandleOpenTime, htfCandleCloseTime, oteTop, oteBottom, zoneType,
+  signalId, step, oteEnabled, sweepRequired, triggerType, s1Sent,
+  mssRunHigh, mssRunLow, mssTf, target1, target2, hardKillLevel, dailyBias,
+}) {
   const nowISO = new Date().toISOString();
   await db.prepare(`
     INSERT INTO chain_state
     (template_type,user_id,asset_id,symbol,htf,ltf,direction,state,step1_signal_id,
      htf_candle_open,htf_candle_close,htf_candle_open_time,htf_candle_close_time,
-     expires_at,created_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+     expires_at,created_at,
+     htf_high,htf_low,ote_top,ote_bottom,zone_type,
+     signal_id,step,ote_enabled,sweep_required,trigger_type,s1_sent,
+     mss_run_high,mss_run_low,mss_tf,target_1,target_2,hard_kill_level,daily_bias)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).bind(
     templateType, userId, assetId, symbol, htf, ltf, direction, state, step1SignalId ?? null,
-    htfCandle?.open ?? null, htfCandle?.close ?? null, htfCandle?.openTime ?? null, htfCandle?.closeTime ?? null,
-    expiresAt, nowISO
+    htfCandle?.open ?? null, htfCandle?.close ?? null,
+    // T2's only current caller passes these nested inside htfCandle; T1/T3
+    // pass them flat — flat wins if both are somehow present.
+    htfCandleOpenTime ?? htfCandle?.openTime ?? null,
+    htfCandleCloseTime ?? htfCandle?.closeTime ?? null,
+    expiresAt, nowISO,
+    htfHigh ?? null, htfLow ?? null, oteTop ?? null, oteBottom ?? null, zoneType ?? null,
+    signalId ?? null, step ?? 1, oteEnabled ?? 1, sweepRequired ?? 0, triggerType ?? 'cisd',
+    s1Sent ? 1 : 0,
+    mssRunHigh ?? null, mssRunLow ?? null, mssTf ?? null,
+    target1 ?? null, target2 ?? null, hardKillLevel ?? null, dailyBias ?? null
   ).run();
-}
-
-// templateTypes: single string or array. direction/userId: omit to match any.
-async function getChains(db, { templateTypes, state, symbol, direction, userId }) {
-  const nowISO = new Date().toISOString();
-  const types  = Array.isArray(templateTypes) ? templateTypes : [templateTypes];
-  const placeholders = types.map(() => '?').join(',');
-  let query = `SELECT * FROM chain_state WHERE template_type IN (${placeholders}) AND state=? AND symbol=? AND expires_at > ?`;
-  const args = [...types, state, symbol, nowISO];
-  if (direction) { query += ' AND direction=?'; args.push(direction); }
-  if (userId)    { query += ' AND user_id=?';    args.push(userId); }
-  const { results } = await db.prepare(query).bind(...args).all();
-  return results ?? [];
-}
-
-async function advanceT3Chain(db, chainId) {
-  await db.prepare(`UPDATE chain_state SET state='awaiting_mss' WHERE id=?`).bind(chainId).run();
-}
-
-async function completeT3Chain(db, chainId) {
-  await db.prepare(`UPDATE chain_state SET state='complete' WHERE id=?`).bind(chainId).run();
-}
-
-// Shared by T1/T2/T4 — the only three templates whose completion is gated
-// on a live FVG entry.
-async function completeFvgEntryChain(db, chainId, signalId, fvgId) {
-  await db.prepare(
-    `UPDATE chain_state SET state='complete', step2_signal_id=?, fvg_id=? WHERE id=?`
-  ).bind(signalId, fvgId, chainId).run();
 }
 
 async function cleanupExpiredChains(db) {
@@ -163,42 +151,6 @@ async function generateSignalId(db, template, symbol) {
   const normSymbol = symbol.replace('/', '').toUpperCase();
   const countStr   = count.toString().padStart(3, '0');
   return `${template}-${normSymbol}-${series}${countStr}`;
-}
-
-// Shared format across ebp-worker.js and sweep-cron.js. The
-// Signal ID is assigned once at Step 1 (initiateT3Chain, in ebp-worker.js)
-// and reused verbatim at Steps 2/3 via chain_state.step1_signal_id.
-// direction is always 'bullish'/'bearish' throughout this codebase, never
-// 'bull'/'bear'.
-function formatT3Alert(symbol, htf, ltf, direction, session, price, signalId, step) {
-  const emoji    = direction === 'bullish' ? '🟢' : '🔴';
-  const dirLabel = direction === 'bullish' ? 'BULL' : 'BEAR';
-  const stepLabel = '/S' + step;
-
-  return [
-    '🎯 T3 Chain — ' + symbol,
-    'Step: S' + step + ' of 3',
-    'HTF: ' + htf + ' EBP → LTF: ' + ltf + ' Sweep → LTF: ' + ltf + ' MSS',
-    'Direction: ' + emoji + ' ' + dirLabel,
-    'Session: ' + session,
-    'Price: ' + price,
-    'Signal ID: ' + signalId + stepLabel
-  ].join('\n');
-}
-
-// T3 completing at Step 2 because the template's step3_enabled=0 — MSS is
-// skipped entirely, chain completes on the sweep alone.
-function formatT3Step2CompleteAlert(symbol, htf, ltf, direction, session, signalId) {
-  const emoji    = direction === 'bullish' ? '🟢' : '🔴';
-  const dirLabel = direction === 'bullish' ? 'BULL' : 'BEAR';
-  return [
-    '🎯 T3 Signal — ' + symbol,
-    'HTF: ' + htf + ' EBP → LTF: ' + ltf + ' Sweep',
-    'Direction: ' + emoji + ' ' + dirLabel,
-    'Session: ' + session,
-    'Signal ID: ' + signalId,
-    'Note: Step 3 (MSS) disabled',
-  ].join('\n');
 }
 
 // ── Candle Cache reads (inlined — no cross-package imports) ──
@@ -243,11 +195,6 @@ function nyDateAtHourToUTCms(dateStr, hour) {
   const offsetStr   = parts.find(p => p.type === 'timeZoneName').value;
   const offsetHours = parseInt(offsetStr.replace('GMT', ''));
   return naiveMs - offsetHours * 3600 * 1000;
-}
-
-function endOfUTCMonthISO() {
-  const now = new Date();
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0, 23, 59, 59)).toISOString();
 }
 
 function addDaysToDateStr(dateStr, days) {
@@ -439,6 +386,96 @@ function detectMSS(bar, swingState) {
   return null;
 }
 
+/**
+ * Detects CISD (Change In State of Delivery) using locked TTrades definition.
+ *
+ * Bullish setup (bearish pullback):
+ * - Find most recent consecutive series of bearish candles (close < open)
+ *   working backwards from candles[candles.length-2]
+ * - Within that series find candle with HIGHEST high
+ * - cisdLevel = that candle's open
+ * - Confirmed when candles[candles.length-1].close > cisdLevel
+ *
+ * Bearish setup (bullish pullback): exact mirror
+ * - Most recent consecutive series of bullish candles (close > open)
+ * - Candle with LOWEST low in that series
+ * - cisdLevel = that candle's open
+ * - Confirmed when candles[candles.length-1].close < cisdLevel
+ *
+ * @param {Array} candles - oldest-first candle array, minimum 2 candles
+ * @param {string} direction - 'bullish' | 'bearish'
+ * @returns {{ confirmed: boolean, cisdLevel: number | null }}
+ */
+function detectCISD(candles, direction) {
+  if (!candles || candles.length < 2) return { confirmed: false, cisdLevel: null };
+
+  const confirmCandle = candles[candles.length - 1];
+  const lookback = candles.slice(0, candles.length - 1); // exclude confirm candle
+
+  if (direction === 'bullish') {
+    // Find most recent consecutive bearish series working backwards
+    let seriesEnd = lookback.length - 1;
+    // Find where series starts (walk back while candle is bearish)
+    let seriesStart = seriesEnd;
+    while (seriesStart > 0 && lookback[seriesStart - 1].close < lookback[seriesStart - 1].open) {
+      seriesStart--;
+    }
+    // Must have at least one bearish candle
+    if (lookback[seriesEnd].close >= lookback[seriesEnd].open) {
+      return { confirmed: false, cisdLevel: null }; // last lookback candle not bearish
+    }
+    const series = lookback.slice(seriesStart, seriesEnd + 1);
+    // Find highest high candle in series
+    const highestHighCandle = series.reduce((best, c) => c.high > best.high ? c : best, series[0]);
+    const cisdLevel = highestHighCandle.open;
+    return { confirmed: confirmCandle.close > cisdLevel, cisdLevel };
+
+  } else { // bearish
+    // Find most recent consecutive bullish series working backwards
+    let seriesEnd = lookback.length - 1;
+    let seriesStart = seriesEnd;
+    while (seriesStart > 0 && lookback[seriesStart - 1].close > lookback[seriesStart - 1].open) {
+      seriesStart--;
+    }
+    if (lookback[seriesEnd].close <= lookback[seriesEnd].open) {
+      return { confirmed: false, cisdLevel: null };
+    }
+    const series = lookback.slice(seriesStart, seriesEnd + 1);
+    // Find lowest low candle in series
+    const lowestLowCandle = series.reduce((best, c) => c.low < best.low ? c : best, series[0]);
+    const cisdLevel = lowestLowCandle.open;
+    return { confirmed: confirmCandle.close < cisdLevel, cisdLevel };
+  }
+}
+
+/**
+ * Detects MSS (Market Structure Shift) using locked TTrades definition.
+ *
+ * MSS level = high/low of the ENTIRE pullback run (stored at chain initiation).
+ * NOT the most recent swing high — the macro run origin.
+ *
+ * Bullish: body closes above pullbackRunHigh (entire bearish run's starting high)
+ * Bearish: body closes below pullbackRunLow (entire bullish run's starting low)
+ *
+ * @param {Array} candles - oldest-first candle array
+ * @param {string} direction - 'bullish' | 'bearish'
+ * @param {number|null} pullbackRunHigh - stored at chain arm time (bull setup)
+ * @param {number|null} pullbackRunLow - stored at chain arm time (bear setup)
+ * @returns {{ confirmed: boolean, mssLevel: number | null }}
+ */
+function detectMSSNew(candles, direction, pullbackRunHigh, pullbackRunLow) {
+  if (!candles || candles.length < 1) return { confirmed: false, mssLevel: null };
+  const confirmCandle = candles[candles.length - 1];
+
+  if (direction === 'bullish') {
+    if (pullbackRunHigh == null) return { confirmed: false, mssLevel: null };
+    return { confirmed: confirmCandle.close > pullbackRunHigh, mssLevel: pullbackRunHigh };
+  } else {
+    if (pullbackRunLow == null) return { confirmed: false, mssLevel: null };
+    return { confirmed: confirmCandle.close < pullbackRunLow, mssLevel: pullbackRunLow };
+  }
+}
+
 // table: 'swing_states' | 'nse_swing_states'. Only the newest bar
 // (candlesOldestFirst's last element) is a genuinely new close each cron
 // cycle — the array's second-to-last element is used only as the
@@ -583,9 +620,8 @@ function detectFVG(candles) {
 // 50% fill + body close beyond midpoint.
 // rule: '50_percent' (default, body close beyond midpoint) | 'any_touch'
 // (close anywhere inside/beyond the zone) | 'full_fill' (close fully beyond
-// the far edge). Only checkFvgEntryChain's per-template check below ever
-// passes a non-default rule — processFVGZones' own mitigation sweep (which
-// sets fvg_zones.mitigated_at) always uses the default.
+// the far edge). processFVGZones' own mitigation sweep (which sets
+// fvg_zones.mitigated_at) always uses the default.
 function checkFVGMitigation(bar, fvgRow, rule = '50_percent') {
   if (rule === 'any_touch') {
     if (fvgRow.direction === 'bullish') return bar.close <= fvgRow.top;
@@ -597,10 +633,6 @@ function checkFVGMitigation(bar, fvgRow, rule = '50_percent') {
   }
   if (fvgRow.direction === 'bullish') return bar.close < fvgRow.midpoint;
   return bar.close > fvgRow.midpoint;
-}
-
-function isPriceInFVG(price, fvgRow) {
-  return price >= fvgRow.bottom && price <= fvgRow.top;
 }
 
 // table: 'fvg_zones' | 'nse_fvg_zones'. candlesOldestFirst is the existing
@@ -650,11 +682,11 @@ async function cleanupExpiredFVGs(db) {
   await db.prepare(`DELETE FROM nse_fvg_zones WHERE expires_at < ?`).bind(nowISO).run();
 }
 
-// ── Template chains T1/T2/T4 (FVG-entry gated) ─────
-// Runs independently of user_sweep_configs — a user can enable a T1/T2/T4
-// template on an LTF without separately subscribing to plain Sweep alerts
-// on that same TF, so this pass is driven entirely by user_templates /
-// chain_state, not the sweep-config symbolMap the main loop below builds.
+// ── Template chains T1/T2/T3/T4 ─────
+// Runs independently of user_sweep_configs — a user can enable a template
+// on an LTF without separately subscribing to plain Sweep alerts on that
+// same TF, so this pass is driven entirely by user_templates / chain_state,
+// not the sweep-config symbolMap the main loop below builds.
 
 async function getTelegramChat(db, userId) {
   const tg = await db.prepare(
@@ -663,153 +695,561 @@ async function getTelegramChat(db, userId) {
   return tg?.chat_id ?? null;
 }
 
-function formatFvgEntryAlert(templateType, symbol, htf, ltf, direction, fvg, price, signalId) {
-  const emoji    = direction === 'bullish' ? '🟢' : '🔴';
-  const dirLabel = direction === 'bullish' ? 'BULL' : 'BEAR';
-  const flow = templateType === 'T4'
-    ? `LTF: ${ltf} Sweep → FVG Entry`
-    : templateType === 'T2'
-      ? `HTF: ${htf} EBP → LTF: ${ltf} Retracement FVG`
-      : `HTF: ${htf} EBP → LTF: ${ltf} FVG Entry`;
-  return [
-    `🎯 ${templateType} Signal — ${symbol}`,
-    flow,
-    `Direction: ${emoji} ${dirLabel}`,
-    `FVG Zone: ${fvg.bottom} – ${fvg.top}`,
-    `Price: ${price}`,
-    `Signal ID: ${signalId}`,
-  ].join('\n');
+/**
+ * T1 alert — fires once at CISD confirmation (body close beyond FVG in OTE zone).
+ * Single alert per chain. No initiation alert.
+ */
+function formatT1Alert({ symbol, htf, ltf, direction, fvg, entryPrice, target, signalId }) {
+  const emoji = direction === 'bullish' ? '🟢' : '🔴';
+  const label = direction === 'bullish' ? 'Bullish T1' : 'Bearish T1';
+  const targetLabel = direction === 'bullish' ? 'Target (EBP High)' : 'Target (EBP Low)';
+  return `${emoji} <b>${label} — ${symbol}</b>
+⏱ HTF: ${htf} → LTF: ${ltf}
+━━━━━━━━━━━━━━
+📍 OTE FVG Zone: ${fvg.bottom.toFixed(5)} – ${fvg.top.toFixed(5)}
+✅ CISD Confirmed
+💰 Entry: ${entryPrice.toFixed(5)}
+🎯 ${targetLabel}: ${target.toFixed(5)}
+━━━━━━━━━━━━━━
+🔗 Signal ID: ${signalId}
+EBP Tracker`;
 }
 
-// Returns the matching active FVG row, or null. T2 additionally requires
-// the FVG to have formed inside the originating HTF EBP candle's body/window.
-async function checkFvgEntryChain(env, chain, latestClose) {
-  const { results: fvgs } = await env.DB.prepare(
-    `SELECT * FROM fvg_zones WHERE symbol=? AND tf=? AND direction=? AND mitigated_at IS NULL AND expires_at > ?`
-  ).bind(chain.symbol, chain.ltf, chain.direction, new Date().toISOString()).all();
+/**
+ * T2 S2 — zone entry alert. Sent when price first wicks into OTE/discount/premium zone.
+ */
+function formatT2S2Alert({ symbol, htf, ltf, direction, zoneType,
+                           zoneTop, zoneBottom, entryPrice, signalId, hasEbpAlert }) {
+  const emoji = direction === 'bullish' ? '🟢' : '🔴';
+  const label = direction === 'bullish' ? 'Bullish T2' : 'Bearish T2';
+  const zoneLabel = zoneType === 'ote' ? 'OTE Zone' :
+                    zoneType === 'discount' ? 'Discount Zone' : 'Premium Zone';
+  const suffix = hasEbpAlert ? '' : '/S2';
+  return `${emoji} <b>${label} — Zone Entry — ${symbol}</b>
+⏱ HTF: ${htf} → LTF: ${ltf}
+━━━━━━━━━━━━━━
+📍 ${zoneLabel}: ${zoneBottom.toFixed(5)} – ${zoneTop.toFixed(5)}
+💰 Entry Price: ${entryPrice.toFixed(5)}
+⏳ Watching for trigger...
+━━━━━━━━━━━━━━
+🔗 Signal ID: ${signalId}${suffix}
+EBP Tracker`;
+}
 
-  // fvg_rule lives on user_templates, not chain_state — look up by
-  // user_id+asset_id+template (not htf+ltf: T4's chain_state.htf is always
-  // '', which never matches the real htf value on its user_templates row).
-  const tmplRow = await env.DB.prepare(
-    `SELECT fvg_rule FROM user_templates WHERE user_id=? AND asset_id=? AND template=?`
-  ).bind(chain.user_id, chain.asset_id, chain.template_type.toLowerCase()).first();
-  const fvgRule = tmplRow?.fvg_rule || '50_percent';
+/**
+ * T2 sweep step alert (only when sweep_required=1).
+ */
+function formatT2SweepAlert({ symbol, htf, ltf, direction, sweepPrice,
+                              signalId, stepSuffix }) {
+  const emoji = direction === 'bullish' ? '🟢' : '🔴';
+  const label = direction === 'bullish' ? 'Bullish T2' : 'Bearish T2';
+  return `${emoji} <b>${label} — Sweep Confirmed — ${symbol}</b>
+⏱ HTF: ${htf} → LTF: ${ltf}
+━━━━━━━━━━━━━━
+🌊 Sweep at: ${sweepPrice.toFixed(5)}
+⏳ Watching for CISD / MSS...
+━━━━━━━━━━━━━━
+🔗 Signal ID: ${signalId}${stepSuffix}
+EBP Tracker`;
+}
 
-  for (const fvg of fvgs ?? []) {
-    if (chain.template_type === 'T2') {
-      if (!(fvg.formed_at >= chain.htf_candle_open_time && fvg.formed_at <= chain.htf_candle_close_time)) continue;
-      const bodyTop    = Math.max(chain.htf_candle_open, chain.htf_candle_close);
-      const bodyBottom = Math.min(chain.htf_candle_open, chain.htf_candle_close);
-      if (!(fvg.top <= bodyTop && fvg.bottom >= bodyBottom)) continue;
-    }
-    // Per-template mitigation check (independent of fvg_zones.mitigated_at,
-    // which is always 50_percent-based) — an FVG this template's own rule
-    // considers already mitigated is no longer a valid entry.
-    const isMitigated = checkFVGMitigation({ close: latestClose }, fvg, fvgRule);
-    if (isMitigated) continue;
-    if (isPriceInFVG(latestClose, fvg)) return fvg;
-  }
-  return null;
+/**
+ * T2 final trigger alert — CISD or MSS confirmed. Entry signal.
+ */
+function formatT2TriggerAlert({ symbol, htf, ltf, direction, triggerType,
+                                triggerLevel, entryPrice, target,
+                                signalId, stepSuffix }) {
+  const emoji = direction === 'bullish' ? '🟢' : '🔴';
+  const label = direction === 'bullish' ? 'Bullish T2' : 'Bearish T2';
+  const trigLabel = triggerType === 'cisd' ? 'CISD Confirmed' : 'MSS Confirmed';
+  const targetLabel = direction === 'bullish' ? 'Target (EBP High)' : 'Target (EBP Low)';
+  return `${emoji} <b>${label} — ${trigLabel} — ${symbol}</b>
+⏱ HTF: ${htf} → LTF: ${ltf}
+━━━━━━━━━━━━━━
+✅ ${trigLabel}: ${triggerLevel.toFixed(5)}
+💰 Entry: ${entryPrice.toFixed(5)}
+🎯 ${targetLabel}: ${target.toFixed(5)}
+━━━━━━━━━━━━━━
+🔗 Signal ID: ${signalId}${stepSuffix}
+EBP Tracker`;
+}
+
+// DST-aware NY hour for "now" — same technique deriveSession() uses for a
+// given timestamp, adapted to read the current moment. Needed for T3's
+// NY 23:00 time gate; avoids a toLocaleString→Date round-trip, which isn't
+// standard/guaranteed-parseable behavior this codebase otherwise relies on.
+function getCurrentNYHour() {
+  const date  = new Date();
+  const year  = date.getUTCFullYear();
+  const march = new Date(Date.UTC(year, 2, 1));
+  const dstStart = new Date(Date.UTC(year, 2, 8 + (7 - march.getUTCDay()) % 7));
+  const nov   = new Date(Date.UTC(year, 10, 1));
+  const dstEnd = new Date(Date.UTC(year, 10, (7 - nov.getUTCDay()) % 7 + 1));
+  dstStart.setUTCHours(7);
+  dstEnd.setUTCHours(6);
+  const isDST  = date >= dstStart && date < dstEnd;
+  const offset = isDST ? 4 : 5;
+  return (date.getUTCHours() - offset + 24) % 24;
+}
+
+// Today's NY 17:00 expressed as a UTC ISO string — T4's same-day expiry.
+// Reuses nyDateAtHourToUTCms() (Intl/ICU-backed, more robust than
+// getCurrentNYHour()'s hardcoded DST-rule reimplementation) rather than
+// duplicating that technique a third time in this file. Callers must
+// already have confirmed current NY time is before 17:00 (via
+// getCurrentNYHour()) — this always computes forward from "today."
+function getNY1700ExpiryISO() {
+  const todayNYDateStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+  return new Date(nyDateAtHourToUTCms(todayNYDateStr, 17)).toISOString();
+}
+
+// T3 S2 — FVG zone entry alert
+function formatT3S2Alert({ symbol, ltf, direction, fvgTop, fvgBottom,
+                           target, signalId }) {
+  const emoji = direction === 'bullish' ? '🟢' : '🔴';
+  const label = direction === 'bullish' ? 'Bullish T3' : 'Bearish T3';
+  const targetLabel = direction === 'bullish'
+    ? 'Target (Prev Day High)' : 'Target (Prev Day Low)';
+  return `${emoji} <b>${label} — At Key Level — ${symbol}</b>
+⏱ LTF: ${ltf}
+━━━━━━━━━━━━━━
+📍 FVG Zone: ${fvgBottom.toFixed(5)} – ${fvgTop.toFixed(5)}
+🎯 ${targetLabel}: ${target.toFixed(5)}
+⏳ Watching for trigger...
+━━━━━━━━━━━━━━
+🔗 Signal ID: ${signalId}/S2
+EBP Tracker`;
+}
+
+// T3 S3 — CISD or MSS trigger alert (entry signal)
+function formatT3S3Alert({ symbol, ltf, direction, triggerType,
+                           triggerLevel, entryPrice, target, signalId }) {
+  const emoji = direction === 'bullish' ? '🟢' : '🔴';
+  const label = direction === 'bullish' ? 'Bullish T3' : 'Bearish T3';
+  const trigLabel = triggerType === 'cisd' ? 'CISD Confirmed' : 'MSS Confirmed';
+  const targetLabel = direction === 'bullish'
+    ? 'Target (Prev Day High)' : 'Target (Prev Day Low)';
+  return `${emoji} <b>${label} — ${trigLabel} — ${symbol}</b>
+⏱ LTF: ${ltf}
+━━━━━━━━━━━━━━
+✅ ${trigLabel}: ${triggerLevel.toFixed(5)}
+💰 Entry: ${entryPrice.toFixed(5)}
+🎯 ${targetLabel}: ${target.toFixed(5)}
+━━━━━━━━━━━━━━
+🔗 Signal ID: ${signalId}/S3
+EBP Tracker`;
+}
+
+// T4 S1 — MSS confirmed, chain armed
+function formatT4S1Alert({ symbol, ltf, direction, mssLevel,
+                           mssRunHigh, mssRunLow, signalId }) {
+  const emoji = direction === 'bullish' ? '🟢' : '🔴';
+  const label = direction === 'bullish' ? 'Bullish T4' : 'Bearish T4';
+  const zoneLabel = direction === 'bullish' ? 'Discount Zone' : 'Premium Zone';
+  const runRange = direction === 'bullish'
+    ? `${mssRunLow?.toFixed(5)} – ${mssRunHigh?.toFixed(5)}`
+    : `${mssRunHigh?.toFixed(5)} – ${mssRunLow?.toFixed(5)}`;
+  return `${emoji} <b>${label} Armed — ${symbol}</b>
+⏱ LTF: ${ltf}
+━━━━━━━━━━━━━━
+📊 MSS Confirmed: ${mssLevel?.toFixed(5)}
+📍 Watching: ${zoneLabel} of MSS run (${runRange})
+━━━━━━━━━━━━━━
+🔗 Signal ID: ${signalId}/S1
+EBP Tracker`;
+}
+
+// T4 S2 — FVG entry + CISD confirmed, entry signal
+function formatT4S2Alert({ symbol, ltf, direction, fvgTop, fvgBottom,
+                           entryPrice, target1, target2, signalId }) {
+  const emoji = direction === 'bullish' ? '🟢' : '🔴';
+  const label = direction === 'bullish' ? 'Bullish T4' : 'Bearish T4';
+  const t1Label = direction === 'bullish'
+    ? 'T1 — Current Day High' : 'T1 — Current Day Low';
+  const t2Label = direction === 'bullish'
+    ? 'T2 — Prev Day High' : 'T2 — Prev Day Low';
+  return `${emoji} <b>${label} — CISD Confirmed — ${symbol}</b>
+⏱ LTF: ${ltf}
+━━━━━━━━━━━━━━
+📍 FVG Zone: ${fvgBottom.toFixed(5)} – ${fvgTop.toFixed(5)}
+✅ CISD Confirmed
+💰 Entry: ${entryPrice.toFixed(5)}
+🎯 ${t1Label}: ${target1?.toFixed(5) ?? 'n/a'}
+🎯 ${t2Label}: ${target2?.toFixed(5) ?? 'n/a'}
+━━━━━━━━━━━━━━
+🔗 Signal ID: ${signalId}/S2
+EBP Tracker`;
 }
 
 async function processTemplateChains(tf, env, log) {
-  // T4 Step 1 — sweep on this LTF creates a new chain when a user has an
-  // active T4 template for this symbol+ltf. T4 has no HTF EBP trigger, so
-  // this is driven by user_templates directly rather than the EBP flow
-  // T1/T2/T3 use.
-  const { results: t4Templates } = await env.DB.prepare(
-    `SELECT ut.user_id, ut.asset_id, ut.bias_gate, ut.window_mins, ua.symbol FROM user_templates ut
-     JOIN user_assets ua ON ut.asset_id = ua.id
-     JOIN users u ON ut.user_id = u.id
-     WHERE ut.template='t4' AND ut.enabled=1 AND ut.ltf=? AND u.active=1 AND ua.asset_type != 'nse'`
-  ).bind(tf).all();
+  const candleCache = new Map();
 
-  for (const t of t4Templates ?? []) {
+  // ── T4 CHAIN PROCESSING ──────────────────────────────────────────
+  // Daily bias gate → intraday MSS (1H or M30) → premium/discount FVG
+  // → M15 body close beyond FVG (CISD proxy) → entry alert
+  // Two alerts: S1 (MSS arm), S2 (FVG CISD entry)
+  try {
+
+  // ── PHASE A: ARM — detect MSS and create new T4 chains ──
+  const { results: t4TemplateRows } = await env.DB.prepare(`
+    SELECT ut.*, ua.symbol, ua.asset_type, u.id as user_id
+    FROM user_templates ut
+    JOIN user_assets ua ON ut.asset_id = ua.id
+    JOIN users u ON ut.user_id = u.id
+    WHERE ut.template = 't4'
+    AND ut.enabled = 1
+    AND ut.ltf = ?
+    AND u.active = 1
+    AND ua.asset_type != 'nse'
+  `).bind(tf).all();
+
+  for (const tmpl of t4TemplateRows ?? []) {
     try {
-      const candles = await getCandlesFromCache(t.symbol, tf, env);
-      if (!candles || candles.length < 2) continue;
-      const sweep = detectSweep(candles);
-      if (!sweep) continue;
+      const mssTf = tmpl.mss_tf ?? '1H';
 
-      const biasGateEnabled = t.bias_gate !== 0; // default 1 = enabled
-      if (biasGateEnabled) {
-        const htf = BIAS_SOURCE.sweep[tf] ?? null;
-        let bias = 'neutral';
-        if (htf) {
-          let htfCandles;
-          if (htf === 'D') htfCandles = await getDailyCandlesFromCache(t.symbol, env);
-          else if (htf === 'W') htfCandles = await getWeeklyCandlesFromCache(t.symbol, env);
-          else htfCandles = await getCandlesFromCache(t.symbol, htf, env);
-          if (htfCandles?.length >= 2) {
-            const biasResult = calcTTradesBias({ bar1: htfCandles[0], bar2: htfCandles[1] });
-            bias = biasResult.bias;
-          }
+      if (!candleCache.has(`${tmpl.symbol}:${mssTf}`)) {
+        candleCache.set(`${tmpl.symbol}:${mssTf}`, await getCandlesFromCache(tmpl.symbol, mssTf, env));
+      }
+      const mssCandles = candleCache.get(`${tmpl.symbol}:${mssTf}`);
+      if (!mssCandles?.length) continue;
+
+      // ── DAILY BIAS GATE ──
+      const biasModeT4 = tmpl.bias_mode ?? 'auto';
+      let t4Bias = 'neutral';
+
+      if (biasModeT4 === 'manual') {
+        t4Bias = tmpl.manual_bias ?? 'neutral';
+      } else {
+        if (!candleCache.has(`${tmpl.symbol}:D`)) {
+          candleCache.set(`${tmpl.symbol}:D`, await getDailyCandlesFromCache(tmpl.symbol, env));
         }
-        if (bias !== sweep.direction) continue;
+        const dailyCandles = candleCache.get(`${tmpl.symbol}:D`);
+        if (dailyCandles?.length >= 2) {
+          // Four-scenario bias computation (locked spec)
+          const today    = dailyCandles[0]; // most recent closed candle
+          const prevDay  = dailyCandles[1];
+          const todayBody = Math.abs(today.close - today.open);
+          const prevBody  = Math.abs(prevDay.close - prevDay.open);
+          const isSmallBody = todayBody < prevBody * 0.5;
+          const sweptHigh  = today.high > prevDay.high;
+          const sweptLow   = today.low  < prevDay.low;
+          const closedInside = today.close < prevDay.high && today.close > prevDay.low;
+
+          if (today.close > prevDay.high)                    t4Bias = 'bullish';
+          else if (today.close < prevDay.low)                 t4Bias = 'bearish';
+          else if (closedInside && sweptHigh && isSmallBody)  t4Bias = 'bearish';
+          else if (closedInside && sweptLow  && isSmallBody)  t4Bias = 'bullish';
+          else                                                  t4Bias = 'neutral';
+        }
       }
 
-      // Time-window dedup, matching isDuplicateAlert's intent — not just "is
-      // one still pending" but "did one fire recently" (any state, including
-      // complete). window_mins is T3's own field, reused here as the dedup
-      // window since T4 has no other per-template timing config.
-      const recentChain = await env.DB.prepare(`
+      if (t4Bias === 'neutral') continue;
+
+      // ── MSS DETECTION ──
+      // Calls updateSwingState() directly (same function the main sweep
+      // loop calls, further below in handleSweepCron) rather than passively
+      // reading swing_states + detectMSSNew(): a passive read can't tell
+      // "MSS just fired this tick" from "fired hours ago, nothing's moved
+      // since" (the broken level isn't cleared — only run_dir flips, which
+      // detectMSS()'s own internal gate relies on), and swing_states for
+      // this mssTf might never get touched at all if no other user has a
+      // plain Sweep config on this exact symbol+mssTf. Accepted trade-off:
+      // if a plain Sweep subscriber also exists on this symbol+mssTf,
+      // their tick later in handleSweepCron() re-processes the same bar —
+      // a minor, self-correcting run_candle_count blip, not persistent
+      // corruption.
+      const mssOldestFirst = [...mssCandles].reverse();
+      const mssResult = await updateSwingState(env.DB, 'swing_states', tmpl.symbol, mssTf, mssOldestFirst);
+      if (!mssResult || mssResult.direction !== t4Bias) continue;
+
+      // Read back the now-current swing state for both run extremes —
+      // mssResult only carries the single level that broke (.level), not
+      // the opposite side needed for the premium/discount zone.
+      const swingState = await env.DB.prepare(
+        'SELECT last_confirmed_swing_high, last_confirmed_swing_low FROM swing_states WHERE symbol=? AND tf=?'
+      ).bind(tmpl.symbol, mssTf).first();
+      if (!swingState) continue;
+
+      // Dedup: skip if a T4 chain for this user+symbol+direction was
+      // already created within the last window_mins (default 60).
+      const windowMins = tmpl.window_mins ?? 60;
+      const dedupCutoff = new Date(Date.now() - windowMins * 60 * 1000).toISOString();
+      const existingChain = await env.DB.prepare(`
         SELECT id FROM chain_state
-        WHERE template_type = 'T4'
-          AND user_id = ?
-          AND symbol = ?
-          AND direction = ?
-          AND created_at > ?
-        LIMIT 1
-      `).bind(
-        t.user_id,
-        t.symbol,
-        sweep.direction,
-        new Date(Date.now() - (t.window_mins || 60) * 60 * 1000).toISOString()
-      ).first();
+        WHERE template_type='T4' AND user_id=? AND symbol=?
+        AND direction=? AND created_at > ? LIMIT 1
+      `).bind(tmpl.user_id, tmpl.symbol, t4Bias, dedupCutoff).first();
+      if (existingChain) continue;
 
-      if (!recentChain) {
-        await insertChain(env.DB, {
-          templateType: 'T4', userId: t.user_id, assetId: t.asset_id, symbol: t.symbol,
-          htf: '', ltf: tf, direction: sweep.direction, state: 'awaiting_fvg_entry',
-          expiresAt: endOfUTCMonthISO(),
-        });
-        log(`[${t.symbol}] T4 chain created (${sweep.direction})`);
+      // MSS run range for premium/discount zone
+      const mssRunHigh = swingState.last_confirmed_swing_high;
+      const mssRunLow  = swingState.last_confirmed_swing_low;
+      const mssRange   = (mssRunHigh ?? 0) - (mssRunLow ?? 0);
+
+      let t4ZoneTop, t4ZoneBottom;
+      if (t4Bias === 'bullish') {
+        // Discount = below 50% of MSS run
+        t4ZoneTop    = mssRunLow + mssRange * 0.5;
+        t4ZoneBottom = mssRunLow;
+      } else {
+        // Premium = above 50% of MSS run
+        t4ZoneBottom = mssRunHigh - mssRange * 0.5;
+        t4ZoneTop    = mssRunHigh;
       }
-    } catch (err) {
-      console.error(`T4 step1 error ${t.symbol} ${tf}:`, err.message);
+
+      // Daily candles for targets and hard-kill level
+      if (!candleCache.has(`${tmpl.symbol}:D`)) {
+        candleCache.set(`${tmpl.symbol}:D`, await getDailyCandlesFromCache(tmpl.symbol, env));
+      }
+      const dc = candleCache.get(`${tmpl.symbol}:D`);
+      const currentDay = dc?.[0];
+      const prevDay    = dc?.[1];
+
+      // Targets — Bull: T1=current day high, T2=prev day high.
+      // Bear: T1=current day low, T2=prev day low.
+      const target1 = t4Bias === 'bullish' ? currentDay?.high : currentDay?.low;
+      const target2 = t4Bias === 'bullish' ? prevDay?.high    : prevDay?.low;
+
+      // Hard kill level = previous day low (bull) / high (bear) — if
+      // already swept before S2 fires, the chain is invalidated.
+      const hardKillLevel = t4Bias === 'bullish' ? prevDay?.low : prevDay?.high;
+
+      // Seed signal counter (idempotent) — must run before
+      // generateSignalId(), which throws on a missing counter row.
+      await env.DB.prepare(
+        `INSERT OR IGNORE INTO signal_counters (template,series,count) VALUES ('T4','A',0)`
+      ).run();
+      const t4SignalId = await generateSignalId(env.DB, 'T4', tmpl.symbol);
+
+      // Expiry: today's NY 17:00. If already past, don't arm at all —
+      // getNY1700ExpiryISO() always computes forward from "now."
+      if (getCurrentNYHour() >= 17) continue;
+      const t4ExpiresAt = getNY1700ExpiryISO();
+
+      await insertChain(env.DB, {
+        templateType: 'T4',
+        userId: tmpl.user_id,
+        assetId: tmpl.asset_id,
+        symbol: tmpl.symbol,
+        htf: 'D',
+        ltf: tf,
+        direction: t4Bias,
+        state: 'awaiting_fvg_entry',
+        expiresAt: t4ExpiresAt,
+        signalId: t4SignalId,
+        step: 1,
+        mssRunHigh, mssRunLow, mssTf,
+        oteTop: t4ZoneTop,
+        oteBottom: t4ZoneBottom,
+        zoneType: t4Bias === 'bullish' ? 'discount' : 'premium',
+        target1, target2,
+        hardKillLevel,
+        dailyBias: t4Bias,
+      });
+
+      const t4Tg = await env.DB.prepare(
+        'SELECT chat_id FROM user_telegram WHERE user_id=? AND verified=1 LIMIT 1'
+      ).bind(tmpl.user_id).first();
+      if (t4Tg?.chat_id) {
+        await sendTelegramMessage(env.SHARED_BOT_TOKEN, t4Tg.chat_id,
+          formatT4S1Alert({
+            symbol: tmpl.symbol, ltf: tf, direction: t4Bias,
+            mssLevel: mssResult.level,
+            mssRunHigh, mssRunLow,
+            signalId: t4SignalId,
+          })
+        );
+      }
+
+      log(`[${tmpl.symbol}] T4 chain armed (${t4Bias})`);
+    } catch (e) {
+      log(`T4 arm error ${tmpl.symbol}: ${e.message}`);
     }
   }
 
-  // Step 2 (T1/T2) + Step 1-same-cycle-check (T4) — FVG-entry check, every
-  // LTF cron cycle, for every active chain regardless of which
-  // user_sweep_configs rows exist for that user.
-  const { results: chains } = await env.DB.prepare(
-    `SELECT * FROM chain_state WHERE template_type IN ('T1','T2','T4')
-     AND state IN ('awaiting_fvg_entry','awaiting_retracement') AND ltf=? AND expires_at > ?`
+  // ── PHASE B: COMPLETE — check active T4 chains for FVG+CISD entry ──
+  const { results: t4ActiveChains } = await env.DB.prepare(`
+    SELECT * FROM chain_state
+    WHERE template_type='T4'
+    AND state='awaiting_fvg_entry'
+    AND ltf=?
+    AND expires_at > ?
+  `).bind(tf, new Date().toISOString()).all();
+
+  for (const chain of t4ActiveChains ?? []) {
+    try {
+      // ── HARD KILL CHECK ──
+      if (!candleCache.has(chain.symbol)) {
+        candleCache.set(chain.symbol, await getCandlesFromCache(chain.symbol, tf, env));
+      }
+      const t4Candles = candleCache.get(chain.symbol);
+      if (!t4Candles?.length) continue;
+      const latestCandle = t4Candles[0];
+
+      const hardKillLevel = chain.hard_kill_level;
+      if (hardKillLevel != null) {
+        const hardKillTriggered = chain.direction === 'bullish'
+          ? latestCandle.low  < hardKillLevel  // prev day low swept
+          : latestCandle.high > hardKillLevel; // prev day high swept
+        if (hardKillTriggered) {
+          await env.DB.prepare('DELETE FROM chain_state WHERE id=?').bind(chain.id).run();
+          log(`[${chain.symbol}] T4 chain killed — prev day extreme swept`);
+          continue;
+        }
+      }
+
+      // ── FVG LOOKUP ── Priority: 1H → M30 → M15 (first unmitigated FVG
+      // in the premium/discount zone)
+      let entryFvg = null;
+      for (const fvgTf of ['1H', 'M30', 'M15']) {
+        const fvgRow = await env.DB.prepare(`
+          SELECT * FROM fvg_zones
+          WHERE symbol=? AND tf=? AND direction=?
+          AND mitigated_at IS NULL AND expires_at > ?
+          AND bottom >= ? AND top <= ?
+          ORDER BY formed_at DESC LIMIT 1
+        `).bind(
+          chain.symbol, fvgTf, chain.direction,
+          new Date().toISOString(),
+          chain.ote_bottom, chain.ote_top
+        ).first();
+        if (fvgRow) { entryFvg = fvgRow; break; }
+      }
+      if (!entryFvg) continue;
+
+      // ── CISD CHECK (body close beyond FVG) ──
+      const cisdConfirmed = chain.direction === 'bullish'
+        ? latestCandle.close > entryFvg.top
+        : latestCandle.close < entryFvg.bottom;
+      if (!cisdConfirmed) continue;
+
+      // ── SEND S2 ALERT ──
+      const t4Tg2 = await env.DB.prepare(
+        'SELECT chat_id FROM user_telegram WHERE user_id=? AND verified=1 LIMIT 1'
+      ).bind(chain.user_id).first();
+
+      if (t4Tg2?.chat_id) {
+        await sendTelegramMessage(env.SHARED_BOT_TOKEN, t4Tg2.chat_id,
+          formatT4S2Alert({
+            symbol: chain.symbol, ltf: chain.ltf, direction: chain.direction,
+            fvgTop: entryFvg.top, fvgBottom: entryFvg.bottom,
+            entryPrice: latestCandle.close,
+            target1: chain.target_1, target2: chain.target_2,
+            signalId: chain.signal_id,
+          })
+        );
+      }
+
+      const firedAt = new Date().toISOString();
+
+      // signals row — matches T1/T2/T3's completion convention (the given
+      // spec only wrote alert_history; adding this for consistency with
+      // every other template's completion, so T4 shows up in the signals
+      // table like the rest).
+      await env.DB.prepare(`
+        INSERT INTO signals (
+          signal_id, template_type, symbol, htf_tf, ltf_tf, direction, fired_at,
+          price_at_signal, session
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        chain.signal_id, 'T4', chain.symbol, chain.htf, chain.ltf,
+        chain.direction, firedAt, latestCandle.close, deriveSession(firedAt)
+      ).run();
+
+      await env.DB.prepare(`
+        INSERT INTO alert_history
+        (id, user_id, symbol, timeframe, direction, trend_bias,
+         candle_time, fired_at, alert_type)
+        VALUES (?,?,?,?,?,?,?,?,'t4')
+      `).bind(
+        crypto.randomUUID(), chain.user_id, chain.symbol, chain.ltf,
+        chain.direction, chain.direction,
+        latestCandle.time, firedAt
+      ).run();
+
+      await env.DB.prepare(
+        `UPDATE chain_state SET state='complete', step=step+1 WHERE id=?`
+      ).bind(chain.id).run();
+
+      log(`[${chain.symbol}] T4 chain complete → ${chain.signal_id}`);
+    } catch (e) {
+      log(`T4 complete error ${chain.symbol}: ${e.message}`);
+    }
+  }
+
+  } catch (e) {
+    log(`T4 block error: ${e.message}`);
+  }
+  // ── END T4 PROCESSING ────────────────────────────────────────────
+
+  // T1 Step 2 — CISD confirmation. T1 chains arm silently (ebp-worker.js)
+  // with state='awaiting_cisd' and no signal ID; this is the only place
+  // that alerts and completes them. T1 needs an FVG inside its own OTE
+  // zone (not the EBP candle body) plus a CISD close-beyond-FVG trigger.
+  const { results: t1Chains } = await env.DB.prepare(
+    `SELECT * FROM chain_state WHERE template_type='T1' AND state='awaiting_cisd' AND ltf=? AND expires_at > ?`
   ).bind(tf, new Date().toISOString()).all();
 
-  const candleCache = new Map();
-  for (const chain of chains ?? []) {
+  for (const chain of t1Chains ?? []) {
     try {
       if (!candleCache.has(chain.symbol)) {
         candleCache.set(chain.symbol, await getCandlesFromCache(chain.symbol, tf, env));
       }
       const candles = candleCache.get(chain.symbol);
       if (!candles || candles.length < 1) continue;
-      const latestClose = candles[0].close;
+      const latestCandle = candles[0];
 
-      const fvg = await checkFvgEntryChain(env, chain, latestClose);
+      // STEP A — most recent qualifying FVG: same symbol/tf/direction as
+      // the chain, still live (fvg_zones has no `active` column — live is
+      // mitigated_at IS NULL AND expires_at > now, same as everywhere else
+      // in this file), formed inside the T1 HTF EBP candle's window
+      // (formed_at/htf_candle_open_time/close_time are all TEXT ISO —
+      // direct string comparison, no epoch conversion), and fully
+      // contained within the chain's OTE zone.
+      const nowISO = new Date().toISOString();
+      const { results: t1Fvgs } = await env.DB.prepare(`
+        SELECT * FROM fvg_zones
+        WHERE symbol=? AND tf=? AND direction=?
+          AND mitigated_at IS NULL AND expires_at > ?
+          AND formed_at >= ? AND formed_at <= ?
+          AND bottom >= ? AND top <= ?
+        ORDER BY formed_at DESC
+        LIMIT 1
+      `).bind(
+        chain.symbol, chain.ltf, chain.direction,
+        nowISO,
+        chain.htf_candle_open_time, chain.htf_candle_close_time,
+        chain.ote_bottom, chain.ote_top
+      ).all();
+      const fvg = t1Fvgs?.[0];
+
+      // STEP B
       if (!fvg) continue;
 
-      const signalId = await generateSignalId(env.DB, chain.template_type, chain.symbol);
-      await completeFvgEntryChain(env.DB, chain.id, signalId, fvg.id);
+      // STEP C — CISD trigger: body close beyond the FVG.
+      const cisdConfirmed = chain.direction === 'bullish'
+        ? latestCandle.close > fvg.top
+        : latestCandle.close < fvg.bottom;
+      if (!cisdConfirmed) continue;
+
+      // STEP D — CISD confirmed: signal ID assigned here (T1 gets no ID
+      // at arm time), alert, complete the chain, record signals + alert_history.
+      const signalId = await generateSignalId(env.DB, 'T1', chain.symbol);
 
       const chatId = await getTelegramChat(env.DB, chain.user_id);
       if (chatId) {
-        const msg = formatFvgEntryAlert(chain.template_type, chain.symbol, chain.htf, chain.ltf, chain.direction, fvg, latestClose, signalId);
+        const target = chain.direction === 'bullish' ? chain.htf_high : chain.htf_low;
+        const msg = formatT1Alert({
+          symbol: chain.symbol, htf: chain.htf, ltf: chain.ltf, direction: chain.direction,
+          fvg, entryPrice: latestCandle.close, target, signalId,
+        });
         await sendTelegramMessage(env.SHARED_BOT_TOKEN, chatId, msg);
       }
+
+      await env.DB.prepare(
+        `UPDATE chain_state SET state='complete', signal_id=?, fvg_id=?, step=1 WHERE id=?`
+      ).bind(signalId, fvg.id, chain.id).run();
 
       const firedAt = new Date().toISOString();
       await env.DB.prepare(`
@@ -819,15 +1259,445 @@ async function processTemplateChains(tf, env, log) {
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).bind(
-        signalId, chain.template_type, chain.symbol, chain.htf || null, chain.ltf,
-        chain.direction, firedAt, latestClose, deriveSession(firedAt)
+        signalId, 'T1', chain.symbol, chain.htf, chain.ltf,
+        chain.direction, firedAt, latestCandle.close, deriveSession(firedAt)
       ).run();
 
-      log(`[${chain.symbol}] ${chain.template_type} chain complete → ${signalId}`);
+      // trend_bias is NOT NULL on alert_history — T1's own bias_gate check
+      // already happened at arm time in ebp-worker.js, so there's no
+      // separate live bias value here; chain.direction (the armed,
+      // already-aligned direction) is the correct value.
+      await env.DB.prepare(`
+        INSERT INTO alert_history
+        (id,user_id,symbol,timeframe,direction,trend_bias,candle_time,fired_at,alert_type)
+        VALUES (?,?,?,?,?,?,?,?,'t1')
+      `).bind(
+        crypto.randomUUID(), chain.user_id, chain.symbol, chain.ltf,
+        chain.direction, chain.direction, latestCandle.time, firedAt
+      ).run();
+
+      log(`[${chain.symbol}] T1 chain complete → ${signalId}`);
     } catch (err) {
-      console.error(`Template chain error ${chain.symbol} ${tf}:`, err.message);
+      console.error(`T1 CISD check error ${chain.symbol} ${tf}:`, err.message);
     }
   }
+
+  // ── T2 CHAIN PROCESSING ──────────────────────────────────────────
+  // New locked spec: 4H EBP → zone entry → optional sweep → CISD or MSS.
+  // Signal ID + s1_sent are decided at arm time in ebp-worker.js; this is
+  // the only place that advances/completes T2 chains from here on.
+  // Filtered to ltf=tf (same as the T4/T1 blocks above) so the shared
+  // candleCache — populated via getCandlesFromCache(symbol, tf, env) — is
+  // guaranteed to hold candles for this chain's own ltf, not some other one.
+  const { results: t2Chains } = await env.DB.prepare(`
+    SELECT * FROM chain_state
+    WHERE template_type='T2' AND state != 'complete' AND ltf=? AND expires_at > ?
+  `).bind(tf, new Date().toISOString()).all();
+
+  for (const chain of t2Chains ?? []) {
+    try {
+      if (!candleCache.has(chain.symbol)) {
+        candleCache.set(chain.symbol, await getCandlesFromCache(chain.symbol, tf, env));
+      }
+      const t2Candles = candleCache.get(chain.symbol);
+      if (!t2Candles || t2Candles.length < 1) continue;
+      const latestCandle = t2Candles[0];
+
+      const chatId = await getTelegramChat(env.DB, chain.user_id);
+
+      // Signal ID suffix: s1_sent=1 → S1 occupied the "/S1" slot, so
+      // zone-entry is /S2, sweep (if any) is /S3, trigger is /S3 or /S4.
+      // s1_sent=0 → S1 was silent, so zone-entry is /S1, sweep is /S2,
+      // trigger is /S2 or /S3.
+      const stepOffset = chain.s1_sent ? 1 : 0;
+
+      // Incremental pullback-run high/low — updated on every tick once the
+      // chain has entered a sweep/trigger-watching state, before any
+      // trigger/hard-kill check. candle_cache only holds a rolling
+      // few-candle window (UNIQUE(symbol,tf), one row), not history back to
+      // zone entry, so this can't be reconstructed after the fact — it has
+      // to accrue tick by tick from the moment price enters the zone.
+      let runHigh = chain.pullback_run_high;
+      let runLow  = chain.pullback_run_low;
+      if (chain.state === 'awaiting_sweep' || chain.state === 'awaiting_trigger') {
+        runHigh = Math.max(runHigh ?? latestCandle.high, latestCandle.high);
+        runLow  = Math.min(runLow  ?? latestCandle.low,  latestCandle.low);
+        if (runHigh !== chain.pullback_run_high || runLow !== chain.pullback_run_low) {
+          await env.DB.prepare(
+            'UPDATE chain_state SET pullback_run_high=?, pullback_run_low=? WHERE id=?'
+          ).bind(runHigh, runLow, chain.id).run();
+        }
+      }
+
+      // ── HARD KILL: zone exit check (awaiting_sweep / awaiting_trigger) ──
+      if (chain.state === 'awaiting_sweep' || chain.state === 'awaiting_trigger') {
+        const exitedZone = chain.direction === 'bullish'
+          ? latestCandle.low < chain.ote_bottom   // bull: price broke below zone floor
+          : latestCandle.high > chain.ote_top;    // bear: price broke above zone ceiling
+        if (exitedZone) {
+          await env.DB.prepare('DELETE FROM chain_state WHERE id=?').bind(chain.id).run();
+          log(`[${chain.symbol}] T2 chain killed — zone exit`);
+          continue;
+        }
+      }
+
+      // ── STATE: awaiting_zone_entry ──
+      if (chain.state === 'awaiting_zone_entry') {
+        // Bull: candle low <= zone_top (wick entered zone from above)
+        // Bear: candle high >= zone_bottom (wick entered zone from below)
+        const wickedZone = chain.direction === 'bullish'
+          ? latestCandle.low <= chain.ote_top
+          : latestCandle.high >= chain.ote_bottom;
+        if (!wickedZone) continue;
+
+        const nextState = chain.sweep_required ? 'awaiting_sweep' : 'awaiting_trigger';
+        // The wick that actually entered the zone is the low (bull) or
+        // high (bear) — not always the low regardless of direction.
+        const zoneEntryPrice = chain.direction === 'bullish' ? latestCandle.low : latestCandle.high;
+
+        await env.DB.prepare(`
+          UPDATE chain_state SET state=?, step=step+1,
+          zone_entry_price=?, zone_entry_time=?,
+          pullback_run_high=?, pullback_run_low=?
+          WHERE id=?
+        `).bind(
+          nextState, zoneEntryPrice, new Date().toISOString(),
+          latestCandle.high, latestCandle.low, chain.id
+        ).run();
+
+        if (chatId) {
+          const s2Suffix = `/S${2 + stepOffset}`;
+          const s2Text = formatT2S2Alert({
+            symbol: chain.symbol, htf: chain.htf, ltf: chain.ltf,
+            direction: chain.direction,
+            zoneType: chain.zone_type,
+            zoneTop: chain.ote_top, zoneBottom: chain.ote_bottom,
+            entryPrice: zoneEntryPrice,
+            // formatT2S2Alert's own hasEbpAlert flag only supports '' or a
+            // hardcoded '/S2' — doesn't fit the dynamic /S2../S4 numbering
+            // the other two T2 formatters take via stepSuffix. The correct
+            // suffix is precomputed and embedded in signalId above;
+            // hasEbpAlert:true suppresses the formatter's own suffix so it
+            // isn't appended twice.
+            signalId: chain.signal_id + s2Suffix,
+            hasEbpAlert: true,
+          });
+          await sendTelegramMessage(env.SHARED_BOT_TOKEN, chatId, s2Text);
+        }
+        continue;
+      }
+
+      // ── STATE: awaiting_sweep ──
+      if (chain.state === 'awaiting_sweep') {
+        // Self-contained sweep check on this chain's own ltf candles — the
+        // outer cron loop's sweep result isn't reachable from here
+        // (processTemplateChains runs before that loop even queries data),
+        // so this mirrors the T4 Step-1 block above, which has the same
+        // dependency and already calls detectSweep() locally.
+        const sweep = detectSweep(t2Candles);
+        if (!sweep || sweep.direction !== chain.direction) continue;
+
+        await env.DB.prepare(
+          `UPDATE chain_state SET state='awaiting_trigger', step=step+1 WHERE id=?`
+        ).bind(chain.id).run();
+
+        if (chatId) {
+          const sweepSuffix = `/S${3 + stepOffset}`;
+          const sweepText = formatT2SweepAlert({
+            symbol: chain.symbol, htf: chain.htf, ltf: chain.ltf,
+            direction: chain.direction,
+            sweepPrice: sweep.closedInsideLevel ?? latestCandle.close,
+            signalId: chain.signal_id,
+            stepSuffix: sweepSuffix,
+          });
+          await sendTelegramMessage(env.SHARED_BOT_TOKEN, chatId, sweepText);
+        }
+        continue;
+      }
+
+      // ── STATE: awaiting_trigger ──
+      if (chain.state === 'awaiting_trigger') {
+        const oldestFirst = [...t2Candles].reverse();
+
+        let triggered = false;
+        let triggerLevel = null;
+
+        if (chain.trigger_type === 'cisd') {
+          const cisd = detectCISD(oldestFirst, chain.direction);
+          if (cisd.confirmed) {
+            triggered = true;
+            triggerLevel = cisd.cisdLevel;
+          }
+        } else {
+          // MSS — runHigh/runLow are this tick's already-updated running
+          // pullback-run extremes (see the incremental tracker above).
+          const mss = detectMSSNew(oldestFirst, chain.direction, runHigh, runLow);
+          if (mss.confirmed) {
+            triggered = true;
+            triggerLevel = mss.mssLevel;
+          }
+        }
+
+        if (!triggered) continue;
+
+        const finalSuffix = `/S${(chain.sweep_required ? 4 : 3) + stepOffset}`;
+        const target      = chain.direction === 'bullish' ? chain.htf_high : chain.htf_low;
+        const entryPrice  = latestCandle.close;
+        const firedAt     = new Date().toISOString();
+
+        if (chatId) {
+          const trigText = formatT2TriggerAlert({
+            symbol: chain.symbol, htf: chain.htf, ltf: chain.ltf,
+            direction: chain.direction,
+            triggerType: chain.trigger_type,
+            triggerLevel,
+            entryPrice,
+            target,
+            signalId: chain.signal_id,
+            stepSuffix: finalSuffix,
+          });
+          await sendTelegramMessage(env.SHARED_BOT_TOKEN, chatId, trigText);
+        }
+
+        await env.DB.prepare(`
+          INSERT INTO signals (
+            signal_id, template_type, symbol, htf_tf, ltf_tf, direction, fired_at,
+            price_at_signal, session
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+          chain.signal_id, 'T2', chain.symbol, chain.htf, chain.ltf,
+          chain.direction, firedAt, entryPrice, deriveSession(firedAt)
+        ).run();
+
+        await env.DB.prepare(`
+          INSERT INTO alert_history
+          (id,user_id,symbol,timeframe,direction,trend_bias,candle_time,fired_at,alert_type)
+          VALUES (?,?,?,?,?,?,?,?,'t2')
+        `).bind(
+          crypto.randomUUID(), chain.user_id, chain.symbol, chain.ltf,
+          chain.direction, chain.direction, latestCandle.time, firedAt
+        ).run();
+
+        await env.DB.prepare(
+          `UPDATE chain_state SET state='complete', step=step+1 WHERE id=?`
+        ).bind(chain.id).run();
+
+        log(`[${chain.symbol}] T2 chain complete → ${chain.signal_id}`);
+      }
+    } catch (err) {
+      console.error(`T2 chain processing error ${chain.symbol} ${tf}:`, err.message);
+    }
+  }
+  // ── END T2 PROCESSING ────────────────────────────────────────────
+
+  // ── T3 CHAIN PROCESSING ──────────────────────────────────────────
+  // Daily candle → 50–75% zone FVG → CISD or MSS
+  // State flow: awaiting_time_gate → awaiting_key_level → awaiting_trigger → complete
+  // Two alerts: S2 (FVG entry), S3 (CISD/MSS trigger)
+
+  const { results: t3ChainRows } = await env.DB.prepare(`
+    SELECT * FROM chain_state
+    WHERE template_type='T3'
+    AND state NOT IN ('complete')
+    AND ltf=?
+    AND expires_at > ?
+  `).bind(tf, new Date().toISOString()).all();
+
+  for (const chain of t3ChainRows ?? []) {
+    try {
+
+    // ── TIME GATE: NY 23:00 ──
+    // T3 only activates after NY 23:00 on the day it was armed.
+    if (chain.state === 'awaiting_time_gate') {
+      if (getCurrentNYHour() < 23) continue; // before NY 23:00 — wait
+      // Time gate passed — advance to awaiting_key_level
+      await env.DB.prepare(
+        'UPDATE chain_state SET state=\'awaiting_key_level\', step=step+1 WHERE id=?'
+      ).bind(chain.id).run();
+      chain.state = 'awaiting_key_level'; // update local copy to continue processing
+    }
+
+    // ── STATE: awaiting_key_level ──
+    // Look for unmitigated FVG in 50–75% zone
+    // Priority: 4H FVG first, fallback to 1H FVG
+    if (chain.state === 'awaiting_key_level') {
+      let fvg = null;
+
+      // Try 4H FVG first
+      const fvg4h = await env.DB.prepare(`
+        SELECT * FROM fvg_zones
+        WHERE symbol=? AND tf='4H' AND direction=?
+        AND mitigated_at IS NULL AND expires_at > ?
+        AND bottom >= ? AND top <= ?
+        ORDER BY formed_at DESC LIMIT 1
+      `).bind(
+        chain.symbol, chain.direction, new Date().toISOString(),
+        chain.ote_bottom, chain.ote_top
+      ).first();
+
+      if (fvg4h) {
+        fvg = fvg4h;
+      } else {
+        // Fallback to 1H FVG
+        const fvg1h = await env.DB.prepare(`
+          SELECT * FROM fvg_zones
+          WHERE symbol=? AND tf='1H' AND direction=?
+          AND mitigated_at IS NULL AND expires_at > ?
+          AND bottom >= ? AND top <= ?
+          ORDER BY formed_at DESC LIMIT 1
+        `).bind(
+          chain.symbol, chain.direction, new Date().toISOString(),
+          chain.ote_bottom, chain.ote_top
+        ).first();
+        if (fvg1h) fvg = fvg1h;
+      }
+
+      if (!fvg) continue; // no qualifying FVG found yet — wait
+
+      // FVG found — store and advance state (wait for price to wick it)
+      await env.DB.prepare(`
+        UPDATE chain_state SET state='awaiting_trigger',
+        key_level_fvg_id=?, step=step+1 WHERE id=?
+      `).bind(fvg.id, chain.id).run();
+      chain.state = 'awaiting_trigger';
+      chain.key_level_fvg_id = fvg.id;
+    }
+
+    // ── STATE: awaiting_trigger ──
+    if (chain.state === 'awaiting_trigger') {
+
+      // Fetch the stored FVG
+      const fvg = await env.DB.prepare(
+        'SELECT * FROM fvg_zones WHERE id=?'
+      ).bind(chain.key_level_fvg_id).first();
+
+      if (!fvg) {
+        // FVG was mitigated or deleted — hard kill chain
+        await env.DB.prepare('DELETE FROM chain_state WHERE id=?').bind(chain.id).run();
+        continue;
+      }
+
+      // Fetch LTF candles — shared candleCache Map, same pattern T1/T2 use
+      // (safe because the outer query already filters chain.ltf === tf).
+      if (!candleCache.has(chain.symbol)) {
+        candleCache.set(chain.symbol, await getCandlesFromCache(chain.symbol, tf, env));
+      }
+      const t3Candles = candleCache.get(chain.symbol);
+      if (!t3Candles?.length) continue;
+      const latestCandle = t3Candles[0];
+
+      // Check if price has wicked into FVG
+      // Bull: low <= fvg.top (wick entered FVG from above)
+      // Bear: high >= fvg.bottom (wick entered FVG from below)
+      const wickedFvg = chain.direction === 'bullish'
+        ? latestCandle.low <= fvg.top
+        : latestCandle.high >= fvg.bottom;
+
+      // Update pullback run tracking (for MSS)
+      await env.DB.prepare(`
+        UPDATE chain_state
+        SET pullback_run_high = MAX(COALESCE(pullback_run_high, ?), ?),
+            pullback_run_low  = MIN(COALESCE(pullback_run_low,  ?), ?)
+        WHERE id=?
+      `).bind(
+        latestCandle.high, latestCandle.high,
+        latestCandle.low,  latestCandle.low,
+        chain.id
+      ).run();
+
+      // Send S2 alert on first FVG wick
+      // Only send S2 once — check if zone_entry_time is already set
+      if (wickedFvg && !chain.zone_entry_time) {
+        await env.DB.prepare(`
+          UPDATE chain_state SET zone_entry_price=?, zone_entry_time=? WHERE id=?
+        `).bind(latestCandle.close, new Date().toISOString(), chain.id).run();
+
+        const t3Tg = await env.DB.prepare(
+          'SELECT chat_id FROM user_telegram WHERE user_id=? AND verified=1 LIMIT 1'
+        ).bind(chain.user_id).first();
+
+        if (t3Tg?.chat_id) {
+          const target = chain.direction === 'bullish' ? chain.htf_high : chain.htf_low;
+          const s2Text = formatT3S2Alert({
+            symbol: chain.symbol, ltf: chain.ltf, direction: chain.direction,
+            fvgTop: fvg.top, fvgBottom: fvg.bottom,
+            target, signalId: chain.signal_id,
+          });
+          await sendTelegramMessage(env.SHARED_BOT_TOKEN, t3Tg.chat_id, s2Text);
+        }
+
+        chain.zone_entry_time = new Date().toISOString(); // update local copy
+      }
+
+      // Only evaluate trigger after FVG has been wicked
+      if (!chain.zone_entry_time && !wickedFvg) continue;
+
+      // Fetch updated pullback tracking values
+      const updatedChain = await env.DB.prepare(
+        'SELECT pullback_run_high, pullback_run_low FROM chain_state WHERE id=?'
+      ).bind(chain.id).first();
+
+      // Evaluate CISD or MSS
+      const oldestFirst = [...t3Candles].reverse();
+      let triggered = false;
+      let triggerLevel = null;
+
+      if (chain.trigger_type === 'cisd') {
+        const cisd = detectCISD(oldestFirst, chain.direction);
+        if (cisd.confirmed) { triggered = true; triggerLevel = cisd.cisdLevel; }
+      } else {
+        const mss = detectMSSNew(
+          oldestFirst, chain.direction,
+          updatedChain?.pullback_run_high ?? null,
+          updatedChain?.pullback_run_low  ?? null
+        );
+        if (mss.confirmed) { triggered = true; triggerLevel = mss.mssLevel; }
+      }
+
+      if (!triggered) continue;
+
+      // Fetch telegram
+      const t3Tg2 = await env.DB.prepare(
+        'SELECT chat_id FROM user_telegram WHERE user_id=? AND verified=1 LIMIT 1'
+      ).bind(chain.user_id).first();
+
+      if (t3Tg2?.chat_id) {
+        const target = chain.direction === 'bullish' ? chain.htf_high : chain.htf_low;
+        const s3Text = formatT3S3Alert({
+          symbol: chain.symbol, ltf: chain.ltf, direction: chain.direction,
+          triggerType: chain.trigger_type,
+          triggerLevel,
+          entryPrice: latestCandle.close,
+          target, signalId: chain.signal_id,
+        });
+        await sendTelegramMessage(env.SHARED_BOT_TOKEN, t3Tg2.chat_id, s3Text);
+      }
+
+      // Write alert_history
+      await env.DB.prepare(`
+        INSERT INTO alert_history
+        (id, user_id, symbol, timeframe, direction, trend_bias,
+         candle_time, fired_at, alert_type)
+        VALUES (?,?,?,?,?,?,?,?,'t3')
+      `).bind(
+        crypto.randomUUID(), chain.user_id, chain.symbol, chain.ltf,
+        chain.direction, chain.direction,
+        latestCandle.time, new Date().toISOString()
+      ).run();
+
+      // Complete chain
+      await env.DB.prepare(
+        'UPDATE chain_state SET state=\'complete\', step=step+1 WHERE id=?'
+      ).bind(chain.id).run();
+
+      log(`[${chain.symbol}] T3 chain complete`);
+    }
+    } catch (err) {
+      console.error(`T3 chain processing error ${chain.symbol} ${tf}:`, err.message);
+    }
+  }
+  // ── END T3 PROCESSING ────────────────────────────────────────────
 }
 
 // ── Main cron handler ─────────────────────────────────────────
@@ -909,9 +1779,7 @@ export async function handleSweepCron(tf, env, debugLog = null) {
         }
         biasByTF.set(htf, bias);
       }
-      // Symbol-level (not per-user) bias, used only for the T3 signals
-      // table record below and the log line — that table has no per-user
-      // concept.
+      // Symbol-level (not per-user) bias, used only for the log line below.
       const htfBias = defaultBiasTF ? (biasByTF.get(defaultBiasTF) ?? 'neutral') : 'neutral';
 
       // FVG + Swing/MSS — candles are newest-first; need oldest-first
@@ -958,58 +1826,6 @@ export async function handleSweepCron(tf, env, debugLog = null) {
               crypto.randomUUID(), row.user_id, symbol, tf,
               mssResult.direction, effectiveBias, mssResult.candle_time, new Date().toISOString()
             ).run();
-
-            // T3 step 3 — MSS completes the chain. MSS direction must match
-            // chain direction (bull chain expects bull MSS).
-            const mssChains = await getChains(env.DB, {
-              templateTypes: 'T3', state: 'awaiting_mss', symbol,
-              direction: mssResult.direction, userId: row.user_id,
-            });
-            for (const chain of mssChains) {
-              if (chain.ltf !== tf) continue;
-
-              // Signal ID was assigned at Step 1 (chain initiation in
-              // ebp-worker.js) and carried on chain_state.step1_signal_id —
-              // reuse it, do not generate a new one.
-              const signalId = chain.step1_signal_id;
-              const firedAt  = new Date().toISOString();
-              // price_at_signal: detectMSS() returns {direction, level, candle_time} —
-              // no close field — so the actual MSS-triggering candle's close comes
-              // from `candles` (newest-first, fetched above), not mssResult itself.
-              // htf_bias: the bias for BIAS_SOURCE.sweep[tf] (this LTF's own bias
-              // gating), not a fresh lookup against chain.htf specifically —
-              // may differ from the chain's original EBP HTF in some configs.
-              await env.DB.prepare(`
-                INSERT INTO signals (
-                  signal_id, template_type, symbol, htf_tf, ltf_tf, direction, fired_at,
-                  price_at_signal, htf_bias, session
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-              `).bind(
-                signalId, 'T3', symbol, chain.htf, tf,
-                mssResult.direction, firedAt,
-                candles[0].close ?? null,
-                htfBias ?? null,
-                deriveSession(firedAt)
-              ).run();
-
-              const t3Msg = formatT3Alert(
-                symbol, chain.htf, tf, mssResult.direction,
-                deriveSession(firedAt), candles[0].close ?? null,
-                signalId, 3
-              );
-              await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, t3Msg);
-              await env.DB.prepare(`
-                INSERT INTO alert_history
-                (id,user_id,symbol,timeframe,direction,trend_bias,candle_time,fired_at,alert_type)
-                VALUES (?,?,?,?,?,?,?,?,'t3')
-              `).bind(
-                crypto.randomUUID(), row.user_id, symbol,
-                `${chain.htf}+${tf}`,
-                mssResult.direction, effectiveBias, mssResult.candle_time, new Date().toISOString()
-              ).run();
-              await completeT3Chain(env.DB, chain.id);
-            }
           }
         }
       }
@@ -1082,67 +1898,6 @@ export async function handleSweepCron(tf, env, debugLog = null) {
           sweep.direction, effectiveBias, sweep.candleTime, new Date().toISOString()
         ).run();
 
-        // T3 step 2 — sweep advances an active chain. Same-direction match
-        // (sweep.direction === chain.direction): this codebase names a
-        // sweep by its resulting bias, not the side swept, so a bull chain
-        // (direction='bullish') is advanced by a bullish sweep (= a sweep
-        // of lows, closed back above) — matching the spec's own worked
-        // example even though its prose calls this "opposite".
-        const sweepChains = await getChains(env.DB, {
-          templateTypes: 'T3', state: 'awaiting_sweep', symbol,
-          direction: sweep.direction, userId: row.user_id,
-        });
-        for (const chain of sweepChains) {
-          if (chain.ltf !== tf) continue;
-
-          const tmplRow = await env.DB.prepare(
-            `SELECT step3_enabled FROM user_templates WHERE user_id=? AND asset_id=? AND template='t3' AND htf=? AND ltf=?`
-          ).bind(chain.user_id, chain.asset_id, chain.htf, chain.ltf).first();
-          const step3Enabled = (tmplRow?.step3_enabled ?? 1) !== 0; // default 1 = enabled
-
-          if (!step3Enabled) {
-            // MSS skipped by config — complete the chain right here at the
-            // sweep, same signals/alert_history bookkeeping the normal
-            // Step-3/MSS completion does, just fired one step early.
-            const firedAt = new Date().toISOString();
-            await env.DB.prepare(`
-              INSERT INTO signals (
-                signal_id, template_type, symbol, htf_tf, ltf_tf, direction, fired_at,
-                price_at_signal, session
-              )
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `).bind(
-              chain.step1_signal_id, 'T3', symbol, chain.htf, tf,
-              sweep.direction, firedAt, sweep.closedInsideLevel ?? null, deriveSession(firedAt)
-            ).run();
-
-            const step2CompleteMsg = formatT3Step2CompleteAlert(
-              symbol, chain.htf, tf, sweep.direction,
-              deriveSession(firedAt), chain.step1_signal_id
-            );
-            await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, step2CompleteMsg);
-
-            await env.DB.prepare(`
-              INSERT INTO alert_history
-              (id,user_id,symbol,timeframe,direction,trend_bias,candle_time,fired_at,alert_type)
-              VALUES (?,?,?,?,?,?,?,?,'t3')
-            `).bind(
-              crypto.randomUUID(), row.user_id, symbol, `${chain.htf}+${tf}`,
-              sweep.direction, effectiveBias, sweep.candleTime, new Date().toISOString()
-            ).run();
-
-            await completeT3Chain(env.DB, chain.id);
-          } else {
-            await advanceT3Chain(env.DB, chain.id); // existing: set awaiting_mss
-
-            const step2Msg = formatT3Alert(
-              symbol, chain.htf, tf, sweep.direction,
-              deriveSession(new Date().toISOString()), sweep.closedInsideLevel ?? null,
-              chain.step1_signal_id, 2
-            );
-            await sendTelegramMessage(env.SHARED_BOT_TOKEN, tg.chat_id, step2Msg);
-          }
-        }
       }
 
       await new Promise(r => setTimeout(r, 1000));
