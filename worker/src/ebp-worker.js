@@ -1728,12 +1728,35 @@ router.get('/user/templates/:assetId', async (req, env) => {
 router.post('/user/templates/:assetId', async (req, env) => {
   const { user: clerkUser, origin, error, params } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const { template, htf, ltf, window_mins, enabled } = await req.json();
+  const {
+    template, htf, ltf, window_mins, enabled,
+    ote_enabled, sweep_required, trigger_type, mss_tf, bias_mode, manual_bias,
+  } = await req.json();
   if (!template || !htf || !ltf) return json({ error: 'template, htf, ltf required' }, 400, origin);
   const id = crypto.randomUUID();
-  await env.DB.prepare(
-    'INSERT INTO user_templates (id,user_id,asset_id,template,enabled,htf,ltf,window_mins,created_at) VALUES (?,?,?,?,?,?,?,?,?)'
-  ).bind(id, clerkUser.id, params.assetId, template, enabled ? 1 : 0, htf, ltf, window_mins ?? 60, Date.now()).run();
+
+  // T2's six extra fields are only ever sent by the T2 create path — when
+  // absent (T1/T3/T4), omit the columns entirely so their migration-defined
+  // defaults apply, same as before this route learned about them.
+  const hasT2Fields = [ote_enabled, sweep_required, trigger_type, mss_tf, bias_mode, manual_bias]
+    .some(v => v !== undefined);
+
+  if (hasT2Fields) {
+    await env.DB.prepare(`
+      INSERT INTO user_templates
+      (id,user_id,asset_id,template,enabled,htf,ltf,window_mins,created_at,
+       ote_enabled,sweep_required,trigger_type,mss_tf,bias_mode,manual_bias)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(
+      id, clerkUser.id, params.assetId, template, enabled ? 1 : 0, htf, ltf, window_mins ?? 60, Date.now(),
+      ote_enabled ?? 1, sweep_required ?? 0, trigger_type ?? 'cisd', mss_tf ?? ltf, bias_mode ?? 'ttrades', manual_bias ?? ''
+    ).run();
+  } else {
+    await env.DB.prepare(
+      'INSERT INTO user_templates (id,user_id,asset_id,template,enabled,htf,ltf,window_mins,created_at) VALUES (?,?,?,?,?,?,?,?,?)'
+    ).bind(id, clerkUser.id, params.assetId, template, enabled ? 1 : 0, htf, ltf, window_mins ?? 60, Date.now()).run();
+  }
+
   return json({ id, template, htf, ltf, window_mins: window_mins ?? 60, enabled: enabled ? 1 : 0 }, 201, origin);
 });
 
@@ -1742,7 +1765,10 @@ const TEMPLATE_TF_RANK = { 'M5': 1, 'M15': 2, 'M30': 3, '1H': 4, '4H': 5, 'D': 6
 router.patch('/user/template/:id', async (req, env) => {
   const { user: clerkUser, origin, error, params } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  const { enabled, htf, ltf, window_mins, bias_gate, fvg_rule, step3_enabled } = await req.json();
+  const {
+    enabled, htf, ltf, window_mins, bias_gate, fvg_rule, step3_enabled,
+    ote_enabled, sweep_required, trigger_type, mss_tf, bias_mode, manual_bias,
+  } = await req.json();
   if (htf && ltf && TEMPLATE_TF_RANK[ltf] >= TEMPLATE_TF_RANK[htf]) {
     return json({ error: 'LTF must be strictly lower than HTF' }, 400, origin);
   }
@@ -1752,11 +1778,29 @@ router.patch('/user/template/:id', async (req, env) => {
   if (window_mins !== undefined && (window_mins < 15 || window_mins > 240)) {
     return json({ error: 'window_mins must be between 15 and 240' }, 400, origin);
   }
-  await env.DB.prepare(
-    'UPDATE user_templates SET enabled=COALESCE(?,enabled), htf=COALESCE(?,htf), ltf=COALESCE(?,ltf), window_mins=COALESCE(?,window_mins), bias_gate=COALESCE(?,bias_gate), fvg_rule=COALESCE(?,fvg_rule), step3_enabled=COALESCE(?,step3_enabled) WHERE id=? AND user_id=?'
-  ).bind(
+  if (trigger_type !== undefined && !['cisd', 'mss', 'either'].includes(trigger_type)) {
+    return json({ error: "trigger_type must be 'cisd', 'mss', or 'either'" }, 400, origin);
+  }
+  if (bias_mode !== undefined && !['ttrades', 'htf_sma', 'off'].includes(bias_mode)) {
+    return json({ error: "bias_mode must be 'ttrades', 'htf_sma', or 'off'" }, 400, origin);
+  }
+  if (manual_bias !== undefined && manual_bias !== '' && !['bullish', 'bearish'].includes(manual_bias)) {
+    return json({ error: "manual_bias must be '', 'bullish', or 'bearish'" }, 400, origin);
+  }
+  await env.DB.prepare(`
+    UPDATE user_templates SET
+      enabled=COALESCE(?,enabled), htf=COALESCE(?,htf), ltf=COALESCE(?,ltf),
+      window_mins=COALESCE(?,window_mins), bias_gate=COALESCE(?,bias_gate),
+      fvg_rule=COALESCE(?,fvg_rule), step3_enabled=COALESCE(?,step3_enabled),
+      ote_enabled=COALESCE(?,ote_enabled), sweep_required=COALESCE(?,sweep_required),
+      trigger_type=COALESCE(?,trigger_type), mss_tf=COALESCE(?,mss_tf),
+      bias_mode=COALESCE(?,bias_mode), manual_bias=COALESCE(?,manual_bias)
+    WHERE id=? AND user_id=?
+  `).bind(
     enabled ?? null, htf ?? null, ltf ?? null, window_mins ?? null,
     bias_gate ?? null, fvg_rule ?? null, step3_enabled ?? null,
+    ote_enabled ?? null, sweep_required ?? null, trigger_type ?? null,
+    mss_tf ?? null, bias_mode ?? null, manual_bias ?? null,
     params.id, clerkUser.id
   ).run();
   return json({ ok: true }, 200, origin);

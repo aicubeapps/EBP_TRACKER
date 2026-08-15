@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import api from '../lib/api';
-import { TEMPLATE_HTF_OPTIONS, templateLtfOptions, FVG_RULE_OPTIONS, TEMPLATE_WINDOW_MINS_MIN, TEMPLATE_WINDOW_MINS_MAX } from '../lib/constants';
+import { TEMPLATE_HTF_OPTIONS, TEMPLATE_ALL_TFS, templateLtfOptions, FVG_RULE_OPTIONS, TEMPLATE_WINDOW_MINS_MIN, TEMPLATE_WINDOW_MINS_MAX } from '../lib/constants';
 import { ChainProgressBar } from './ChainProgressBar';
 
 const FVG_RULE_TEMPLATES = ['t1', 't2', 't4'];
@@ -27,13 +27,22 @@ export function TemplateCard({ tmpl, active, chain, assetId, onUpdate }) {
     try {
       const token = await getToken();
       if (checked && !active) {
-        await api.post(`/user/templates/${assetId}`, {
+        const body = {
           template: tmpl.key,
           enabled: 1,
           htf: '4H',
           ltf: 'M15',
           window_mins: 60,
-        }, token);
+        };
+        if (tmpl.key === 't2') {
+          body.ote_enabled = 1;
+          body.sweep_required = 0;
+          body.trigger_type = 'cisd';
+          body.mss_tf = body.ltf;
+          body.bias_mode = 'ttrades';
+          body.manual_bias = '';
+        }
+        await api.post(`/user/templates/${assetId}`, body, token);
       } else if (active) {
         await api.patch(`/user/template/${active.id}`, { enabled: checked ? 1 : 0 }, token);
       }
@@ -108,6 +117,68 @@ export function TemplateCard({ tmpl, active, chain, assetId, onUpdate }) {
               <option value={0}>Off</option>
             </select>
           </div>
+
+          {tmpl.key === 't2' && (
+            <>
+              <div className="template-card__row">
+                <label>OTE Zone</label>
+                <select className="select-sm" value={active.ote_enabled ?? 1}
+                  onChange={e => handleUpdate('ote_enabled', parseInt(e.target.value, 10))}>
+                  <option value={1}>Enabled</option>
+                  <option value={0}>Disabled</option>
+                </select>
+              </div>
+
+              <div className="template-card__row">
+                <label>Sweep Required</label>
+                <select className="select-sm" value={active.sweep_required ?? 0}
+                  onChange={e => handleUpdate('sweep_required', parseInt(e.target.value, 10))}>
+                  <option value={1}>Yes</option>
+                  <option value={0}>No</option>
+                </select>
+              </div>
+
+              <div className="template-card__row">
+                <label>Trigger Type</label>
+                <select className="select-sm" value={active.trigger_type ?? 'cisd'}
+                  onChange={e => handleUpdate('trigger_type', e.target.value)}>
+                  <option value="cisd">CISD</option>
+                  <option value="mss">MSS</option>
+                  <option value="either">Either</option>
+                </select>
+              </div>
+
+              <div className="template-card__row">
+                <label>MSS Timeframe</label>
+                <select className="select-sm" value={active.mss_tf ?? active.ltf}
+                  onChange={e => handleUpdate('mss_tf', e.target.value)}>
+                  {TEMPLATE_ALL_TFS.map(tf => <option key={tf} value={tf}>{tf}</option>)}
+                </select>
+              </div>
+
+              <div className="template-card__row">
+                <label>Bias Mode</label>
+                <select className="select-sm" value={active.bias_mode ?? 'ttrades'}
+                  onChange={e => handleUpdate('bias_mode', e.target.value)}>
+                  <option value="ttrades">TTrades</option>
+                  <option value="htf_sma">HTF SMA</option>
+                  <option value="off">Off</option>
+                </select>
+              </div>
+
+              {(active.bias_mode ?? 'ttrades') === 'off' && (
+                <div className="template-card__row">
+                  <label>Manual Bias</label>
+                  <select className="select-sm" value={active.manual_bias ?? ''}
+                    onChange={e => handleUpdate('manual_bias', e.target.value)}>
+                    <option value="">Auto</option>
+                    <option value="bullish">Bullish</option>
+                    <option value="bearish">Bearish</option>
+                  </select>
+                </div>
+              )}
+            </>
+          )}
 
           {FVG_RULE_TEMPLATES.includes(tmpl.key) && (
             <div className="template-card__row">

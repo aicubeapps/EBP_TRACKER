@@ -5,15 +5,18 @@ const STEPS = {
   ],
   T2: [
     { key: 'step1', label: 'EBP' },
-    { key: 'step2', label: 'Retracement' },
+    { key: 'step2', label: 'Zone Entry' },
+    { key: 'step3', label: 'Sweep' },
+    { key: 'step4', label: 'Trigger' },
   ],
   T3: [
-    { key: 'step1', label: 'EBP' },
-    { key: 'step2', label: 'Sweep' },
-    { key: 'step3', label: 'MSS' },
+    { key: 'step1', label: 'Daily FVG' },
+    { key: 'step2', label: 'Time Gate' },
+    { key: 'step3', label: 'Key Level' },
+    { key: 'step4', label: 'Trigger' },
   ],
   T4: [
-    { key: 'step1', label: 'Sweep' },
+    { key: 'step1', label: 'MSS' },
     { key: 'step2', label: 'FVG Entry' },
   ],
 };
@@ -23,10 +26,26 @@ const STEPS = {
 // never gets its own signal_id (only step1 does), so a signal_id-based
 // check would always read that step as incomplete even once fired.
 const STATE_STEPS = {
-  T1: { awaiting_fvg_entry: 1, complete: 2 },
-  T2: { awaiting_retracement: 1, complete: 2 },
-  T3: { awaiting_sweep: 1, awaiting_mss: 2, complete: 3 },
-  T4: { awaiting_fvg_entry: 1, complete: 2 },
+  T1: {
+    awaiting_fvg_entry: 1,
+    complete: 2,
+  },
+  T2: {
+    awaiting_zone_entry: 1,
+    awaiting_sweep: 2,
+    awaiting_trigger: 3,
+    complete: 4,
+  },
+  T3: {
+    awaiting_time_gate: 1,
+    awaiting_key_level: 2,
+    awaiting_trigger: 3,
+    complete: 4,
+  },
+  T4: {
+    awaiting_fvg_entry: 1,
+    complete: 2,
+  },
 };
 
 function getCompletedSteps(chain, templateType) {
