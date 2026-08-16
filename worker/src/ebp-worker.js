@@ -981,7 +981,10 @@ async function handleEBPCron(tf, env, debugLog = null) {
           const alertMode     = row.alert_mode ?? 'aligned';
           const biasOverrides = JSON.parse(row.bias_overrides || '{}');
           const effectiveBias = getEffectiveBias(userBiasTF, { [userBiasTF]: { bias: userHtfBias } }, biasOverrides);
-          const shouldAlert   = alertMode === 'all' || mssResult.direction === effectiveBias || effectiveBias === 'neutral';
+          const shouldAlert   = alertMode === 'all'
+            || (alertMode === 'price_action' && mssResult.direction === userHtfBias)
+            || mssResult.direction === effectiveBias
+            || effectiveBias === 'neutral';
           if (!shouldAlert) continue;
 
           const tg = await env.DB.prepare(
@@ -1069,6 +1072,9 @@ async function handleEBPCron(tf, env, debugLog = null) {
         // enabled for this exact tf (see the function's own driving query).
         let ebpAlertSentThisCycle = false;
 
+        // alert_mode='price_action' intentionally behaves like 'all' here — the EBP pattern
+        // itself is the raw candle-close read (calcTTradesBias), so bias agreement is implicit
+        // when an EBP fires. effectiveBias applies only for 'aligned' gating.
         if (!(alertMode === 'aligned' && !trendAligned)) {
           const isDup = await isDuplicateAlert(env.DB, row.user_id, symbol, tf, ebp.direction, 'ebp');
           if (isDup) {
@@ -1437,7 +1443,7 @@ async function verifyClerkToken(token, secretKey) {
   };
 }
 
-async function getOrCreateUser(db, clerkUser) {
+async function getOrCreateUser(db, clerkUser, botToken) {
   const now     = Date.now();
   const expires = now + 30 * 24 * 60 * 60 * 1000;
   await db.prepare(`
@@ -1447,10 +1453,64 @@ async function getOrCreateUser(db, clerkUser) {
   `).bind(clerkUser.id, clerkUser.email, clerkUser.email.split('@')[0], now, expires).run();
 
   const user = await db.prepare('SELECT * FROM users WHERE id = ?').bind(clerkUser.id).first();
-  if (user?.active && user.expires_at < now) {
+
+  // 7-day advance warning — fire once
+  if (user?.active && !user.expiry_warning_sent && user.expires_at) {
+    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+    if (user.expires_at - Date.now() <= sevenDaysMs && user.expires_at > Date.now()) {
+      try {
+        const tg = await db.prepare(
+          'SELECT chat_id FROM user_telegram WHERE user_id = ? AND verified = 1'
+        ).bind(clerkUser.id).first();
+        if (tg?.chat_id) {
+          const daysLeft = Math.ceil((user.expires_at - Date.now()) / (24 * 60 * 60 * 1000));
+          const msg = [
+            '⏳ <b>EBP Tracker — Subscription Expiring Soon</b>',
+            '',
+            `Your subscription expires in <b>${daysLeft} day${daysLeft === 1 ? '' : 's'}</b>.`,
+            'Please contact the admin to renew before access is paused.',
+            '',
+            '<i>EBP Tracker</i>',
+          ].join('\n');
+          await sendTelegramMessage(botToken, tg.chat_id, msg);
+        }
+      } catch (_) {}
+      await db.prepare(
+        'UPDATE users SET expiry_warning_sent = 1 WHERE id = ?'
+      ).bind(clerkUser.id).run();
+      user.expiry_warning_sent = 1;
+    }
+  }
+
+  if (user?.active && user.expires_at < Date.now()) {
     await db.prepare('UPDATE users SET active = 0 WHERE id = ?').bind(clerkUser.id).run();
     user.active = 0;
+
+    // Fire one-time Telegram expiry notification
+    if (!user.expiry_notified) {
+      try {
+        const tg = await db.prepare(
+          'SELECT chat_id FROM user_telegram WHERE user_id = ? AND verified = 1'
+        ).bind(clerkUser.id).first();
+        if (tg?.chat_id) {
+          const msg = [
+            '⚠️ <b>EBP Tracker — Subscription Expired</b>',
+            '',
+            'Your subscription has expired and signal delivery has been paused.',
+            'Please contact the admin to renew your access.',
+            '',
+            '<i>EBP Tracker</i>',
+          ].join('\n');
+          await sendTelegramMessage(botToken, tg.chat_id, msg);
+        }
+      } catch (_) {}
+      await db.prepare(
+        'UPDATE users SET expiry_notified = 1 WHERE id = ?'
+      ).bind(clerkUser.id).run();
+      user.expiry_notified = 1;
+    }
   }
+
   return user;
 }
 
@@ -1469,7 +1529,7 @@ router.get('/health', async (req, env) => {
 router.get('/user/me', async (req, env) => {
   const { user: clerkUser, origin, error } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
-  await getOrCreateUser(env.DB, clerkUser);
+  await getOrCreateUser(env.DB, clerkUser, env.SHARED_BOT_TOKEN);
   const user = await env.DB.prepare(
     'SELECT id, email, name, plan, asset_limit, created_at, expires_at, active, is_admin, user_tf_access, nse_tf_access FROM users WHERE id=?'
   ).bind(clerkUser.id).first();
@@ -1513,7 +1573,7 @@ router.post('/user/assets', async (req, env) => {
   const { user: clerkUser, origin, error } = req._ctx;
   if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
   const body = await req.json();
-  const user = await getOrCreateUser(env.DB, clerkUser);
+  const user = await getOrCreateUser(env.DB, clerkUser, env.SHARED_BOT_TOKEN);
 
   const assetType = body.assetType ?? 'forex';
 

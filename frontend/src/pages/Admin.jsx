@@ -60,6 +60,18 @@ export default function Admin() {
     setUsers(Array.isArray(u) ? u : []);
   };
 
+  const handleExtend = async (userId, days) => {
+    if (!window.confirm(`Extend subscription by ${days} days?`)) return;
+    try {
+      const token = await getToken();
+      await api.patch(`/admin/users/${userId}/extend`, { days }, token);
+      const u = await api.get('/admin/users', token);
+      setUsers(Array.isArray(u) ? u : []);
+    } catch (e) {
+      alert('Failed to extend: ' + e.message);
+    }
+  };
+
   const loadKeys = async () => {
     const token = await getToken();
     const k = await api.get('/admin/api-keys', token);
@@ -330,6 +342,20 @@ export default function Admin() {
 
                     <div className="divider" />
                     <button className="btn btn-danger btn-sm" onClick={() => handleExpire(u.id)}>Expire Account</button>
+                    <select
+                      className="select-sm"
+                      defaultValue=""
+                      onChange={e => {
+                        if (e.target.value) handleExtend(u.id, parseInt(e.target.value, 10));
+                        e.target.value = '';
+                      }}
+                      style={{ marginLeft: 8 }}
+                    >
+                      <option value="" disabled>Extend…</option>
+                      <option value="30">+30 days</option>
+                      <option value="60">+60 days</option>
+                      <option value="90">+90 days</option>
+                    </select>
                   </div>
                 )}
               </div>

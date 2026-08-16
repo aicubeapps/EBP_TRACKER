@@ -1813,8 +1813,10 @@ export async function handleSweepCron(tf, env, debugLog = null) {
             const alertMode     = row.alert_mode ?? 'aligned';
             const biasOverrides = JSON.parse(row.bias_overrides || '{}');
             const effectiveBias = getEffectiveBias(userBiasTF, { [userBiasTF]: { bias: userHtfBias } }, biasOverrides);
-            const shouldAlert   = alertMode === 'all' || alertMode === 'price_action' ||
-                                  mssResult.direction === effectiveBias || effectiveBias === 'neutral';
+            const shouldAlert   = alertMode === 'all'
+              || (alertMode === 'price_action' && mssResult.direction === userHtfBias)
+              || mssResult.direction === effectiveBias
+              || effectiveBias === 'neutral';
             if (!shouldAlert) continue;
 
             const tg = await env.DB.prepare(
@@ -1862,6 +1864,9 @@ export async function handleSweepCron(tf, env, debugLog = null) {
         const effectiveBias = getEffectiveBias(userBiasTF, { [userBiasTF]: { bias: userHtfBias } }, biasOverrides);
         const trendAligned  = sweep.direction === effectiveBias;
 
+        // alert_mode='price_action' intentionally behaves like 'all' here — a sweep is itself
+        // a raw price-action event, so bias agreement is implicit when a sweep fires.
+        // effectiveBias applies only for 'aligned' gating.
         const shouldAlert =
           alertMode === 'all' ||
           alertMode === 'price_action' ||

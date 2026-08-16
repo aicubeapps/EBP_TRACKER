@@ -23,7 +23,12 @@ const SIGNAL_CARDS = [
     code: 'MODE',
     label: 'Alert Mode',
     badgeClass: 'badge-system',
-    desc: "Controls which direction signals you receive, set per timeframe on the Assets page. aligned = only signals matching the current HTF bias. all / price_action = both directions regardless of bias — price_action labels the alert as a pure price-action signal rather than bias-aligned.",
+    desc: 'Controls which direction signals you receive, configured per asset per timeframe on the Assets page.',
+    subPoints: [
+      { label: 'aligned', desc: 'Only fires when the signal direction matches your configured HTF bias. If you have a manual or SMA bias set, that is what gets checked. Counter-trend signals are suppressed.' },
+      { label: 'price_action', desc: "Ignores your configured bias source (manual or SMA). Re-reads the raw HTF candle close direction at alert time using the TTrades engine. Only fires when the signal matches what the market's most recent HTF candle is saying — not what your settings say. Useful when your manual bias is stale or your SMA is lagging." },
+      { label: 'all', desc: 'Fires every signal regardless of direction or bias. No filtering applied.' },
+    ],
   },
   {
     code: 'BIAS',
@@ -207,6 +212,26 @@ export default function GuidePage() {
             <span className="template-card__label">{s.label}</span>
           </div>
           <p className="template-card__desc" style={{ margin: 0 }}>{s.desc}</p>
+          {s.subPoints && (
+            <div className="table-wrap mt-sm">
+              <table className="alert-table">
+                <thead>
+                  <tr>
+                    <th>Value</th>
+                    <th>Behavior</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {s.subPoints.map(sp => (
+                    <tr key={sp.label}>
+                      <td className="asset-cell">{sp.label}</td>
+                      <td>{sp.desc}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       ))}
 

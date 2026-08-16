@@ -180,6 +180,33 @@ router.post('/admin/expire/:id', async (req, env) => {
   return json({ success: true }, 200, origin);
 });
 
+router.patch('/admin/users/:id/extend', async (req, env) => {
+  const { user: clerkUser, origin, error, params } = req._ctx;
+  if (error || !clerkUser) return json({ error: error ?? 'Unauthorized' }, 401, origin);
+  if (!await requireAdmin(clerkUser, env.DB)) return json({ error: 'Access denied' }, 403, origin);
+  const body = await req.json();
+  const days = body?.days;
+  if (![30, 60, 90].includes(days)) {
+    return json({ error: 'days must be 30, 60, or 90' }, 400, origin);
+  }
+  const user = await env.DB.prepare(
+    'SELECT expires_at, active FROM users WHERE id = ?'
+  ).bind(params.id).first();
+  if (!user) return json({ error: 'user not found' }, 404, origin);
+
+  // Extend from current expires_at if it's in the future, otherwise from now
+  const base = (user.expires_at && user.expires_at > Date.now())
+    ? user.expires_at
+    : Date.now();
+  const newExpiry = base + days * 24 * 60 * 60 * 1000;
+
+  await env.DB.prepare(
+    'UPDATE users SET expires_at = ?, active = 1, expiry_notified = 0, expiry_warning_sent = 0 WHERE id = ?'
+  ).bind(newExpiry, params.id).run();
+
+  return json({ success: true, expires_at: newExpiry }, 200, origin);
+});
+
 // ── API key management ───────────────────────────────────────
 
 router.get('/admin/api-keys', async (req, env) => {
