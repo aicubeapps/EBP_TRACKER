@@ -7,22 +7,22 @@ const TEMPLATES = [
   {
     key: 't1',
     label: 'HTF FVG → LTF confirmation',
-    description: 'HTF FVG → Price at zone → LTF confirmation',
+    description: "4H EBP arms the chain silently. Alert fires when an M15 FVG forms inside the EBP candle's OTE zone and price body-closes beyond it.",
   },
   {
     key: 't2',
     label: 'HTF EBP → LTF FVG retracement',
-    description: 'HTF EBP → LTF FVG retracement → LTF MSS',
+    description: '4H EBP arms the chain. Waits for zone entry, optional sweep, then a CISD or MSS trigger. Sends up to 3 stepped alerts (/S1 /S2 /S3).',
   },
   {
     key: 't3',
     label: 'HTF EBP → LTF Sweep → LTF MSS',
-    description: 'HTF EBP → LTF Sweep → LTF MSS',
+    description: "Previous day's NY close candle → unmitigated 4H/1H FVG in the 50–75% zone → NY 23:00 time gate → S2 alert at FVG wick, S3 at CISD or MSS.",
   },
   {
     key: 't4',
     label: 'HTF Sweep → HTF FVG pullback',
-    description: 'HTF Sweep → HTF FVG pullback → LTF MSS',
+    description: 'Daily bias gate → intraday MSS (1H/M30) → pullback into premium/discount FVG → M15 body close beyond FVG. Dual targets, hard kill if prior day level swept. Expires NY 17:00.',
   },
 ];
 

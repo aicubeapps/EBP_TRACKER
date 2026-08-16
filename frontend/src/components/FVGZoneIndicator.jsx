@@ -2,7 +2,7 @@ function formatPrice(val) {
   const n = parseFloat(val);
   if (!Number.isFinite(n)) return '—';
   if (n >= 1000) return n.toFixed(2);
-  if (n >= 1)    return n.toFixed(4);
+  if (n >= 1)    return n.toFixed(5);
   return n.toFixed(6);
 }
 

@@ -8,6 +8,7 @@ import Alerts from './pages/Alerts.jsx'
 import Settings from './pages/Settings.jsx'
 import Admin from './pages/Admin.jsx'
 import MarketBreathPage from './pages/MarketBreathPage.jsx'
+import GuidePage from './pages/GuidePage.jsx'
 import NotFound from './pages/NotFound.jsx'
 import Layout from './components/Layout.jsx'
 
@@ -38,8 +39,9 @@ export default function App() {
         <Route path="/assets" element={<ProtectedRoute><Layout><Assets /></Layout></ProtectedRoute>} />
         <Route path="/alerts" element={<ProtectedRoute><Layout><Alerts /></Layout></ProtectedRoute>} />
         <Route path="/settings" element={<ProtectedRoute><Layout><Settings /></Layout></ProtectedRoute>} />
-        <Route path="/admin" element={<ProtectedRoute><Layout><Admin /></Layout></ProtectedRoute>} />
         <Route path="/market" element={<ProtectedRoute><Layout><MarketBreathPage /></Layout></ProtectedRoute>} />
+        <Route path="/guide" element={<ProtectedRoute><Layout><GuidePage /></Layout></ProtectedRoute>} />
+        <Route path="/admin" element={<ProtectedRoute><Layout><Admin /></Layout></ProtectedRoute>} />
         <Route path="*" element={<NotFound />} />
       </Routes>
     </BrowserRouter>
