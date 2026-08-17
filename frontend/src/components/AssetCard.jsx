@@ -78,6 +78,11 @@ export default function AssetCard({ asset, allowedTfs: allowedTfsProp, userNseTf
 
   useEffect(() => { fetchSummary(); }, [fetchSummary]);
 
+  const handleToast = useCallback((message, type) => {
+    setToast({ text: message, type });
+    setTimeout(() => setToast(null), 2500);
+  }, []);
+
   const handleOverrideChange = async (tf, value) => {
     const updated = { ...biasOverrides, [tf]: value };
     setBiasOverrides(updated);
@@ -134,7 +139,7 @@ export default function AssetCard({ asset, allowedTfs: allowedTfsProp, userNseTf
             const token = await getToken();
             Promise.all(ebpConfigs.map(cfg =>
               api.patch(`/user/ebp-configs/${cfg.id}`, { enabled: checked ? 1 : 0 }, token)
-            )).then(() => { setToast({ text: checked ? 'Alert Added' : 'Alert Removed', add: checked }); setTimeout(() => setToast(null), 2500); });
+            )).then(() => handleToast(checked ? '✓ Alert Added' : '✕ Alert Removed', checked ? 'add' : 'remove'));
           }} />
         <label htmlFor={`ebp-${asset.id}`}>EBP Alerts</label>
       </div>
@@ -146,6 +151,7 @@ export default function AssetCard({ asset, allowedTfs: allowedTfsProp, userNseTf
           biasCache={biasCache}
           biasOverrides={biasOverrides}
           onUpdate={fetchSummary}
+          onToast={handleToast}
         />
       )}
 
@@ -158,7 +164,7 @@ export default function AssetCard({ asset, allowedTfs: allowedTfsProp, userNseTf
             const token = await getToken();
             Promise.all(sweepConfigs.map(cfg =>
               api.patch(`/user/sweep-configs/${cfg.id}`, { enabled: checked ? 1 : 0 }, token)
-            )).then(() => { setToast({ text: checked ? 'Alert Added' : 'Alert Removed', add: checked }); setTimeout(() => setToast(null), 2500); });
+            )).then(() => handleToast(checked ? '✓ Alert Added' : '✕ Alert Removed', checked ? 'add' : 'remove'));
           }} />
         <label htmlFor={`sweep-${asset.id}`}>Sweep Alerts</label>
       </div>
@@ -170,6 +176,7 @@ export default function AssetCard({ asset, allowedTfs: allowedTfsProp, userNseTf
           biasCache={biasCache}
           biasOverrides={biasOverrides}
           onUpdate={fetchSummary}
+          onToast={handleToast}
         />
       )}
 
@@ -187,6 +194,7 @@ export default function AssetCard({ asset, allowedTfs: allowedTfsProp, userNseTf
               assetId={asset.id}
               chainStates={chainStates}
               onUpdate={fetchSummary}
+              onToast={handleToast}
             />
           )}
         </>
@@ -200,7 +208,7 @@ export default function AssetCard({ asset, allowedTfs: allowedTfsProp, userNseTf
               checked={tdiEnabled} onChange={e => setTdiEnabled(e.target.checked)} />
             <label htmlFor={`tdi-${asset.id}`}>TDI Alerts</label>
           </div>
-          {tdiEnabled && <TdiConfigPanel assetId={asset.id} allowedTfs={allowedTfs} onUpdate={fetchSummary} />}
+          {tdiEnabled && <TdiConfigPanel assetId={asset.id} allowedTfs={allowedTfs} onUpdate={fetchSummary} onToast={handleToast} />}
 
           {/* SMA Cloud Alerts */}
           <div className="check-row">
@@ -208,7 +216,7 @@ export default function AssetCard({ asset, allowedTfs: allowedTfsProp, userNseTf
               checked={smaEnabled} onChange={e => setSmaEnabled(e.target.checked)} />
             <label htmlFor={`sma-nse-${asset.id}`}>SMA Cloud</label>
           </div>
-          {smaEnabled && <SmaConfigPanel assetId={asset.id} allowedTfs={allowedTfs} onUpdate={fetchSummary} />}
+          {smaEnabled && <SmaConfigPanel assetId={asset.id} allowedTfs={allowedTfs} onUpdate={fetchSummary} onToast={handleToast} />}
         </>
       )}
 
@@ -220,18 +228,19 @@ export default function AssetCard({ asset, allowedTfs: allowedTfsProp, userNseTf
               checked={smaEnabled} onChange={e => setSmaEnabled(e.target.checked)} />
             <label htmlFor={`sma-forex-${asset.id}`}>SMA Cloud</label>
           </div>
-          {smaEnabled && <ForexSmaConfigPanel assetId={asset.id} allowedTfs={allowedTfs} onUpdate={fetchSummary} />}
+          {smaEnabled && <ForexSmaConfigPanel assetId={asset.id} allowedTfs={allowedTfs} onUpdate={fetchSummary} onToast={handleToast} />}
         </>
       )}
 
       {toast && (
         <div style={{
           position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
-          background: toast.add ? '#16a34a' : '#dc2626', color: '#ffffff', padding: '10px 20px',
+          background: toast.type === 'add' ? '#16a34a' : toast.type === 'remove' ? '#dc2626' : '#ff9800',
+          color: '#ffffff', padding: '10px 20px',
           borderRadius: 'var(--radius-md)', fontSize: 13, fontFamily: 'var(--font-mono)',
           boxShadow: '0 8px 24px rgba(0,0,0,0.3)', zIndex: 2000,
         }}>
-          {toast.add ? '✓' : '✕'} {toast.text}
+          {toast.text}
         </div>
       )}
     </div>

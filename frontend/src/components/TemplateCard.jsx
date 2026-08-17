@@ -6,13 +6,22 @@ import { ChainProgressBar } from './ChainProgressBar';
 
 const FVG_RULE_TEMPLATES = ['t1', 't2', 't4'];
 
-export function TemplateCard({ tmpl, active, chain, assetId, onUpdate }) {
+export function TemplateCard({ tmpl, active, chain, assetId, onUpdate, onToast }) {
   const { getToken } = useAuth();
   const [saving, setSaving] = useState(false);
   const [saved, setSaved]   = useState(false);
-  const savedTimer = useRef(null);
+  const savedTimer    = useRef(null);
+  const toastTimerRef = useRef(null);
 
   useEffect(() => () => clearTimeout(savedTimer.current), []);
+  useEffect(() => () => { if (toastTimerRef.current) clearTimeout(toastTimerRef.current); }, []);
+
+  const fireReConfigToast = () => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => {
+      onToast?.('✓ Re-Config Done', 'reconfig');
+    }, 2000);
+  };
 
   const isEnabled = !!active?.enabled;
 
@@ -43,10 +52,13 @@ export function TemplateCard({ tmpl, active, chain, assetId, onUpdate }) {
           body.manual_bias = '';
         }
         await api.post(`/user/templates/${assetId}`, body, token);
+        onUpdate?.();
+        onToast?.('✓ Alert Added', 'add');
       } else if (active) {
         await api.patch(`/user/template/${active.id}`, { enabled: checked ? 1 : 0 }, token);
+        onUpdate?.();
+        if (!checked) onToast?.('✕ Alert Removed', 'remove');
       }
-      onUpdate?.();
     } finally {
       setSaving(false);
     }
@@ -58,6 +70,7 @@ export function TemplateCard({ tmpl, active, chain, assetId, onUpdate }) {
     await api.patch(`/user/template/${active.id}`, { [field]: value }, token);
     flashSaved();
     onUpdate?.();
+    fireReConfigToast();
   }
 
   // HTF change can leave the stored LTF invalid (LTF must rank strictly
@@ -73,6 +86,7 @@ export function TemplateCard({ tmpl, active, chain, assetId, onUpdate }) {
     await api.patch(`/user/template/${active.id}`, { htf: newHtf, ltf: newLtf }, token);
     flashSaved();
     onUpdate?.();
+    fireReConfigToast();
   }
 
   return (

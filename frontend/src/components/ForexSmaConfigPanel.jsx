@@ -1,14 +1,15 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import api from '../lib/api';
 import { FOREX_SMA_TFS, FOREX_SMA_HTF_OPTIONS } from '../lib/constants';
 
-export default function ForexSmaConfigPanel({ assetId, allowedTfs }) {
+export default function ForexSmaConfigPanel({ assetId, allowedTfs, onToast }) {
   const { getToken } = useAuth();
   const [configs, setConfigs]         = useState([]);
   const [loading, setLoading]         = useState(true);
   const [error, setError]             = useState(null);
   const [showAddForm, setShowAddForm] = useState(false);
+  const toastTimerRef                 = useRef(null);
 
   // allowedTfs is null while /user/me hasn't resolved yet — skip filtering
   // rather than showing a false "no timeframes enabled" state.
@@ -28,6 +29,14 @@ export default function ForexSmaConfigPanel({ assetId, allowedTfs }) {
   }, [assetId, getToken]);
 
   useEffect(() => { fetchConfigs(); }, [fetchConfigs]);
+  useEffect(() => () => { if (toastTimerRef.current) clearTimeout(toastTimerRef.current); }, []);
+
+  const fireReConfigToast = () => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => {
+      onToast?.('✓ Re-Config Done', 'reconfig');
+    }, 2000);
+  };
 
   async function addConfig() {
     setError(null);
@@ -43,6 +52,7 @@ export default function ForexSmaConfigPanel({ assetId, allowedTfs }) {
         confirmation_mode: pendingConfirmationMode, enabled: 1,
       }]);
       setShowAddForm(false);
+      onToast?.('✓ Alert Added', 'add');
     } catch (e) {
       setError(e.message || 'Could not add SMA alert.');
     }
@@ -52,12 +62,14 @@ export default function ForexSmaConfigPanel({ assetId, allowedTfs }) {
     const token = await getToken();
     await api.patch(`/user/forex-indicator-configs/${id}`, { [field]: value }, token);
     setConfigs(prev => prev.map(c => c.id === id ? { ...c, [field]: value } : c));
+    fireReConfigToast();
   }
 
   async function deleteConfig(id) {
     const token = await getToken();
     await api.delete(`/user/forex-indicator-configs/${id}`, token);
     setConfigs(prev => prev.filter(c => c.id !== id));
+    onToast?.('✕ Alert Removed', 'remove');
   }
 
   function onPendingTfChange(tf) {
