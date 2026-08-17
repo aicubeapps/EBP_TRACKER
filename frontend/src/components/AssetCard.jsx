@@ -27,6 +27,9 @@ export default function AssetCard({ asset, allowedTfs: allowedTfsProp, userNseTf
   const [aiEnabled,    setAiEnabled]    = useState(false);
   const [tdiEnabled,   setTdiEnabled]   = useState(false);
   const [smaEnabled,   setSmaEnabled]   = useState(false);
+  const [ebpConfigs,   setEbpConfigs]   = useState([]);
+  const [sweepConfigs, setSweepConfigs] = useState([]);
+  const [toast,        setToast]        = useState(null);
   const [showBiasOverride, setShowBiasOverride] = useState(false);
   const [biasOverrides, setBiasOverrides] = useState(() => {
     try { return JSON.parse(asset.bias_overrides || '{}'); } catch { return {}; }
@@ -50,8 +53,14 @@ export default function AssetCard({ asset, allowedTfs: allowedTfsProp, userNseTf
       (!isNse) ? api.get(`/user/chain-state/${asset.id}`, token) : Promise.resolve([]),
       (!isNse) ? api.get(`/user/fvg-zones/${asset.id}`, token) : Promise.resolve([]),
     ]);
-    if (ebp.status === 'fulfilled')  setEbpEnabled(Array.isArray(ebp.value) && ebp.value.length > 0);
-    if (swp.status === 'fulfilled')  setSweepEnabled(Array.isArray(swp.value) && swp.value.length > 0);
+    if (ebp.status === 'fulfilled') {
+      setEbpConfigs(Array.isArray(ebp.value) ? ebp.value : []);
+      setEbpEnabled(Array.isArray(ebp.value) && ebp.value.some(c => c.enabled === 1));
+    }
+    if (swp.status === 'fulfilled') {
+      setSweepConfigs(Array.isArray(swp.value) ? swp.value : []);
+      setSweepEnabled(Array.isArray(swp.value) && swp.value.some(c => c.enabled === 1));
+    }
     if (tmpl.status === 'fulfilled') setAiEnabled(Array.isArray(tmpl.value) && tmpl.value.some(t => t.enabled));
     if (hist.status === 'fulfilled' && Array.isArray(hist.value) && hist.value.length > 0)
       setLastAlert(hist.value[0]);
@@ -119,7 +128,14 @@ export default function AssetCard({ asset, allowedTfs: allowedTfsProp, userNseTf
       {/* EBP Alerts */}
       <div className="check-row">
         <input type="checkbox" id={`ebp-${asset.id}`}
-          checked={ebpEnabled} onChange={e => setEbpEnabled(e.target.checked)} />
+          checked={ebpEnabled} onChange={async e => {
+            const checked = e.target.checked;
+            setEbpEnabled(checked);
+            const token = await getToken();
+            Promise.all(ebpConfigs.map(cfg =>
+              api.patch(`/user/ebp-configs/${cfg.id}`, { enabled: checked ? 1 : 0 }, token)
+            )).then(() => { setToast('Changes saved'); setTimeout(() => setToast(null), 2500); });
+          }} />
         <label htmlFor={`ebp-${asset.id}`}>EBP Alerts</label>
       </div>
       {ebpEnabled && (
@@ -136,7 +152,14 @@ export default function AssetCard({ asset, allowedTfs: allowedTfsProp, userNseTf
       {/* Sweep Alerts */}
       <div className="check-row">
         <input type="checkbox" id={`sweep-${asset.id}`}
-          checked={sweepEnabled} onChange={e => setSweepEnabled(e.target.checked)} />
+          checked={sweepEnabled} onChange={async e => {
+            const checked = e.target.checked;
+            setSweepEnabled(checked);
+            const token = await getToken();
+            Promise.all(sweepConfigs.map(cfg =>
+              api.patch(`/user/sweep-configs/${cfg.id}`, { enabled: checked ? 1 : 0 }, token)
+            )).then(() => { setToast('Changes saved'); setTimeout(() => setToast(null), 2500); });
+          }} />
         <label htmlFor={`sweep-${asset.id}`}>Sweep Alerts</label>
       </div>
       {sweepEnabled && (
@@ -199,6 +222,17 @@ export default function AssetCard({ asset, allowedTfs: allowedTfsProp, userNseTf
           </div>
           {smaEnabled && <ForexSmaConfigPanel assetId={asset.id} allowedTfs={allowedTfs} onUpdate={fetchSummary} />}
         </>
+      )}
+
+      {toast && (
+        <div style={{
+          position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
+          background: 'var(--nav-bg)', color: '#f1f5f9', padding: '10px 20px',
+          borderRadius: 'var(--radius-md)', fontSize: 13, fontFamily: 'var(--font-mono)',
+          boxShadow: '0 8px 24px rgba(0,0,0,0.3)', zIndex: 2000,
+        }}>
+          ✓ {toast}
+        </div>
       )}
     </div>
   );
