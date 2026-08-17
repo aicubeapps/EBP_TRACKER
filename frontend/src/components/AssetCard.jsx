@@ -134,7 +134,7 @@ export default function AssetCard({ asset, allowedTfs: allowedTfsProp, userNseTf
             const token = await getToken();
             Promise.all(ebpConfigs.map(cfg =>
               api.patch(`/user/ebp-configs/${cfg.id}`, { enabled: checked ? 1 : 0 }, token)
-            )).then(() => { setToast('Changes saved'); setTimeout(() => setToast(null), 2500); });
+            )).then(() => { setToast({ text: checked ? 'Alert Added' : 'Alert Removed', add: checked }); setTimeout(() => setToast(null), 2500); });
           }} />
         <label htmlFor={`ebp-${asset.id}`}>EBP Alerts</label>
       </div>
@@ -158,7 +158,7 @@ export default function AssetCard({ asset, allowedTfs: allowedTfsProp, userNseTf
             const token = await getToken();
             Promise.all(sweepConfigs.map(cfg =>
               api.patch(`/user/sweep-configs/${cfg.id}`, { enabled: checked ? 1 : 0 }, token)
-            )).then(() => { setToast('Changes saved'); setTimeout(() => setToast(null), 2500); });
+            )).then(() => { setToast({ text: checked ? 'Alert Added' : 'Alert Removed', add: checked }); setTimeout(() => setToast(null), 2500); });
           }} />
         <label htmlFor={`sweep-${asset.id}`}>Sweep Alerts</label>
       </div>
@@ -227,11 +227,11 @@ export default function AssetCard({ asset, allowedTfs: allowedTfsProp, userNseTf
       {toast && (
         <div style={{
           position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
-          background: 'var(--nav-bg)', color: '#f1f5f9', padding: '10px 20px',
+          background: toast.add ? '#16a34a' : '#dc2626', color: '#ffffff', padding: '10px 20px',
           borderRadius: 'var(--radius-md)', fontSize: 13, fontFamily: 'var(--font-mono)',
           boxShadow: '0 8px 24px rgba(0,0,0,0.3)', zIndex: 2000,
         }}>
-          ✓ {toast}
+          {toast.add ? '✓' : '✕'} {toast.text}
         </div>
       )}
     </div>
