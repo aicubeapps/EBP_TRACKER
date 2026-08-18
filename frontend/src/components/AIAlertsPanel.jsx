@@ -26,7 +26,7 @@ const TEMPLATES = [
   },
 ];
 
-export default function AIAlertsPanel({ assetId, chainStates, onUpdate }) {
+export default function AIAlertsPanel({ assetId, chainStates, onUpdate, onToast }) {
   const { getToken } = useAuth();
   const [templates, setTemplates] = useState([]);
   const [loading, setLoading]     = useState(true);
@@ -61,6 +61,7 @@ export default function AIAlertsPanel({ assetId, chainStates, onUpdate }) {
             chain={chain}
             assetId={assetId}
             onUpdate={refetch}
+            onToast={onToast}
           />
         );
       })}

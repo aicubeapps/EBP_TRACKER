@@ -1,9 +1,9 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import api from '../lib/api';
 import { NSE_SMA_TFS, NSE_SMA_HTF_TFS } from '../lib/constants';
 
-export default function SmaConfigPanel({ assetId, allowedTfs, onUpdate }) {
+export default function SmaConfigPanel({ assetId, allowedTfs, onUpdate, onToast }) {
   const { getToken } = useAuth();
   const [configs, setConfigs]         = useState([]);
   const [loading, setLoading]         = useState(true);
@@ -13,6 +13,7 @@ export default function SmaConfigPanel({ assetId, allowedTfs, onUpdate }) {
   const [pendingConfirmationMode, setPendingConfirmationMode] = useState('either');
   const [pendingHtfTf, setPendingHtfTf]               = useState(NSE_SMA_HTF_TFS[0]);
   const [pendingBiasMode, setPendingBiasMode]         = useState('ttrades');
+  const toastTimerRef                                  = useRef(null);
 
   const fetchConfigs = useCallback(async () => {
     const token = await getToken();
@@ -22,6 +23,14 @@ export default function SmaConfigPanel({ assetId, allowedTfs, onUpdate }) {
   }, [assetId, getToken]);
 
   useEffect(() => { fetchConfigs(); }, [fetchConfigs]);
+  useEffect(() => () => { if (toastTimerRef.current) clearTimeout(toastTimerRef.current); }, []);
+
+  const fireReConfigToast = () => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => {
+      onToast?.('✓ Re-Config Done', 'reconfig');
+    }, 2000);
+  };
 
   // allowedTfs is null while /user/me hasn't resolved yet — skip filtering
   // rather than showing a false "no timeframes enabled" state.
@@ -41,6 +50,7 @@ export default function SmaConfigPanel({ assetId, allowedTfs, onUpdate }) {
         confirmation_mode: pendingConfirmationMode, bias_mode: pendingBiasMode, htf_timeframe: pendingHtfTf, enabled: 1,
       }]);
       setShowAddForm(false);
+      onToast?.('✓ Alert Added', 'add');
       onUpdate?.();
     } catch (e) {
       setError(e.message || 'Could not add SMA alert.');
@@ -52,12 +62,14 @@ export default function SmaConfigPanel({ assetId, allowedTfs, onUpdate }) {
     await api.patch(`/user/nse-indicator-configs/${id}`, { [field]: value }, token);
     setConfigs(prev => prev.map(c => c.id === id ? { ...c, [field]: value } : c));
     onUpdate?.();
+    fireReConfigToast();
   }
 
   async function deleteConfig(id) {
     const token = await getToken();
     await api.delete(`/user/nse-indicator-configs/${id}`, token);
     setConfigs(prev => prev.filter(c => c.id !== id));
+    onToast?.('✕ Alert Removed', 'remove');
     onUpdate?.();
   }
 

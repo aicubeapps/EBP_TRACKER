@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import api from '../lib/api';
 import { SWEEP_TFS, NSE_SWEEP_TFS, BIAS_SOURCE_FRONTEND, NSE_BIAS_SOURCE_FRONTEND, HTF_OVERRIDE_OPTIONS } from '../lib/constants';
@@ -22,11 +22,12 @@ function getEffectiveBiasDisplay(htfTf, biasCache, biasOverrides) {
   return { label: raw, isOverridden: false, raw: null };
 }
 
-export default function SweepConfigPanel({ assetId, assetType, allowedTfs, biasCache, biasOverrides, onUpdate }) {
+export default function SweepConfigPanel({ assetId, assetType, allowedTfs, biasCache, biasOverrides, onUpdate, onToast }) {
   const { getToken } = useAuth();
   const [configs, setConfigs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState(null);
+  const toastTimerRef         = useRef(null);
 
   const fullTfOptions = assetType === 'nse' ? NSE_SWEEP_TFS : SWEEP_TFS;
   const tfOptions  = allowedTfs ? fullTfOptions.filter(tf => allowedTfs.includes(tf)) : fullTfOptions;
@@ -40,6 +41,14 @@ export default function SweepConfigPanel({ assetId, assetType, allowedTfs, biasC
   }, [assetId, getToken]);
 
   useEffect(() => { fetchConfigs(); }, [fetchConfigs]);
+  useEffect(() => () => { if (toastTimerRef.current) clearTimeout(toastTimerRef.current); }, []);
+
+  const fireReConfigToast = () => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => {
+      onToast?.('✓ Re-Config Done', 'reconfig');
+    }, 2000);
+  };
 
   async function addConfig() {
     const tf = tfOptions.find(t => !configs.some(c => c.timeframe === t)) ?? tfOptions[0];
@@ -49,6 +58,7 @@ export default function SweepConfigPanel({ assetId, assetType, allowedTfs, biasC
       const token = await getToken();
       const res   = await api.post(`/user/sweep-configs/${assetId}`, { timeframe: tf, alert_mode: 'aligned' }, token);
       setConfigs(prev => [...prev, { id: res.id, timeframe: tf, alert_mode: 'aligned', enabled: 1 }]);
+      onToast?.('✓ Alert Added', 'add');
       onUpdate?.();
     } catch (e) {
       setError(e.message || 'Could not add sweep alert.');
@@ -60,6 +70,7 @@ export default function SweepConfigPanel({ assetId, assetType, allowedTfs, biasC
     await api.patch(`/user/sweep-configs/${id}`, { [field]: value }, token);
     setConfigs(prev => prev.map(c => c.id === id ? { ...c, [field]: value } : c));
     onUpdate?.();
+    fireReConfigToast();
   }
 
   async function updateTimeframe(id, newTf) {
@@ -67,12 +78,14 @@ export default function SweepConfigPanel({ assetId, assetType, allowedTfs, biasC
     await api.patch(`/user/sweep-configs/${id}`, { timeframe: newTf }, token);
     setConfigs(prev => prev.map(c => c.id === id ? { ...c, timeframe: newTf, htf_override: null } : c));
     onUpdate?.();
+    fireReConfigToast();
   }
 
   async function deleteConfig(id) {
     const token = await getToken();
     await api.delete(`/user/sweep-configs/${id}`, token);
     setConfigs(prev => prev.filter(c => c.id !== id));
+    onToast?.('✕ Alert Removed', 'remove');
     onUpdate?.();
   }
 
