@@ -1346,7 +1346,7 @@ async function handleWatchdogHealthCheck(env) {
   const utcHour   = nowUtc.getUTCHours();
   const utcMinute = nowUtc.getUTCMinutes();
   // 2-hourly healthy confirmation: first 15-min tick after every even UTC hour.
-  const is2HourlyWindow = utcHour % 2 === 0 && utcMinute < 15;
+  const is2HourlyWindow = utcHour % 2 === 1 && utcMinute < 15;
 
   // ── Human-readable NY/IST timestamp for Telegram text ───────────────────
   // nyWallClock/istClock are synthetic Date objects whose UTC-getter fields
