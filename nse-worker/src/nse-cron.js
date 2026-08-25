@@ -1529,7 +1529,8 @@ export async function handleNseCron(env, tf) {
     JOIN users u ON ec.user_id = u.id
     WHERE ua.asset_type='nse' AND ec.timeframe=? AND ec.enabled=1
     AND u.active=1
-  `).bind(tf).all();
+    AND (u.expires_at IS NULL OR u.expires_at > ?)
+  `).bind(tf, Date.now()).all();
 
   const { results: sweepRows } = await env.DB.prepare(`
     SELECT sc.id as config_id, sc.alert_mode,
@@ -1540,7 +1541,8 @@ export async function handleNseCron(env, tf) {
     JOIN users u ON sc.user_id = u.id
     WHERE ua.asset_type='nse' AND sc.timeframe=? AND sc.enabled=1
     AND u.active=1
-  `).bind(tf).all();
+    AND (u.expires_at IS NULL OR u.expires_at > ?)
+  `).bind(tf, Date.now()).all();
 
   // TDI / SMA Cloud configs (same two-query-pattern reasoning as ebp/sweep
   // above — no UNION, joins user_telegram at fire time instead).
@@ -1554,7 +1556,8 @@ export async function handleNseCron(env, tf) {
     JOIN users u ON ic.user_id = u.id
     WHERE ua.asset_type='nse' AND ic.timeframe=? AND ic.enabled=1
     AND u.active=1
-  `).bind(tf).all();
+    AND (u.expires_at IS NULL OR u.expires_at > ?)
+  `).bind(tf, Date.now()).all();
 
   const symbolMap = new Map(); // symbol -> { ebp: [rows], sweep: [rows], indicators: [rows] }
   for (const row of (ebpRows ?? [])) {

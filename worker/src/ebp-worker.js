@@ -891,8 +891,9 @@ async function handleEBPCron(tf, env, debugLog = null) {
     JOIN users u ON ec.user_id = u.id
     WHERE ec.timeframe=? AND ec.enabled=1
     AND u.active=1
+    AND (u.expires_at IS NULL OR u.expires_at > ?)
     AND ua.asset_type != 'nse'
-  `).bind(tf).all();
+  `).bind(tf, Date.now()).all();
   if (!filtered?.length) {
     log(`No enabled EBP configs for TF ${tf}`);
     return { symbolsProcessed: 0 };
@@ -1273,8 +1274,9 @@ async function handleEBPCron(tf, env, debugLog = null) {
       AND ut.enabled = 1
       AND ut.htf = 'D'
       AND u.active = 1
+      AND (u.expires_at IS NULL OR u.expires_at > ?)
       AND ua.asset_type != 'nse'
-    `).all();
+    `).bind(Date.now()).all();
 
     const dailyCandleCache = new Map();
 

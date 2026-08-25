@@ -230,6 +230,26 @@ async function getWeeklyCandlesFromCache(symbol, env) {
   }));
 }
 
+async function getDailyCandlesForSweep(symbol, env) {
+  const { results } = await env.DB.prepare(
+    'SELECT date_ny, open, high, low, close FROM daily_candle_cache WHERE symbol = ? ORDER BY date_ny DESC LIMIT 10'
+  ).bind(symbol).all();
+  return (results ?? []).map(r => ({
+    open: r.open, high: r.high, low: r.low, close: r.close,
+    time: nyDateAtHourToUTCms(addDaysToDateStr(r.date_ny, -1), 17),
+  }));
+}
+
+async function getWeeklyCandlesForSweep(symbol, env) {
+  const { results } = await env.DB.prepare(
+    'SELECT week_start_ny, week_end_ny, open, high, low, close FROM weekly_candle_cache WHERE symbol = ? ORDER BY week_start_ny DESC LIMIT 6'
+  ).bind(symbol).all();
+  return (results ?? []).map(r => ({
+    open: r.open, high: r.high, low: r.low, close: r.close,
+    time: nyDateAtHourToUTCms(addDaysToDateStr(r.week_start_ny, -1), 17),
+  }));
+}
+
 // ── Telegram (inlined, standalone) ────────
 
 async function sendTelegramMessage(botToken, chatId, text) {
@@ -1730,7 +1750,8 @@ export async function handleSweepCron(tf, env, debugLog = null) {
 
   // T1/T2/T4 chains, decoupled from the sweep-config-driven loop below
   // (see processTemplateChains comment for why).
-  await processTemplateChains(tf, env, log);
+  // D/W: sweep+MSS only, no chain processing
+  if (!['D', 'W'].includes(tf)) await processTemplateChains(tf, env, log);
 
   const { results: filtered } = await env.DB.prepare(`
     SELECT sc.id as config_id, sc.alert_mode, sc.htf_override,
@@ -1741,7 +1762,8 @@ export async function handleSweepCron(tf, env, debugLog = null) {
     JOIN users u ON sc.user_id = u.id
     WHERE sc.timeframe=? AND sc.enabled=1
     AND u.active=1
-  `).bind(tf).all();
+    AND (u.expires_at IS NULL OR u.expires_at > ?)
+  `).bind(tf, Date.now()).all();
 
   if (!filtered?.length) {
     log(`No sweep assets configured for ${tf}`);
@@ -1760,7 +1782,9 @@ export async function handleSweepCron(tf, env, debugLog = null) {
 
   for (const [symbol, userRows] of symbolMap) {
     try {
-      const candles = await getCandlesFromCache(symbol, tf, env);
+      const candles = tf === 'D' ? await getDailyCandlesForSweep(symbol, env)
+                    : tf === 'W' ? await getWeeklyCandlesForSweep(symbol, env)
+                    : await getCandlesFromCache(symbol, tf, env);
       log(`[${symbol}] candles fetched: ${candles?.length ?? 'null'}`);
       if (!candles || candles.length < 2) {
         log(`[${symbol}] SKIP: insufficient candles in cache`);

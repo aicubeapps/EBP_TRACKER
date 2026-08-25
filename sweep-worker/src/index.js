@@ -74,7 +74,7 @@ async function handleFetch(request, env) {
     try { body = await request.json(); } catch {}
 
     const tf       = body.tf ?? 'M15';
-    const validTFs = ['M15', 'M30', '1H', '4H'];
+    const validTFs = ['M15', 'M30', '1H', '4H', 'D', 'W'];
 
     if (!validTFs.includes(tf)) {
       return json({ error: `Invalid TF: ${tf}. Must be one of ${validTFs.join(', ')}` }, 400, origin);

@@ -730,7 +730,8 @@ async function handleForexSmaCron(tf, env, debugLog = null) {
       AND fic.indicator = 'sma'
       AND ua.asset_type IN ('forex', 'crypto', 'commodity')
       AND u.active = 1
-  `).bind(tf).all();
+      AND (u.expires_at IS NULL OR u.expires_at > ?)
+  `).bind(tf, Date.now()).all();
 
   if (!configs?.length) {
     log(`No forex SMA Cloud assets configured for ${tf}`);
